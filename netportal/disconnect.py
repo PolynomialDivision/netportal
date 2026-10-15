@@ -10,19 +10,22 @@ import hmac
 import os
 import socket
 import struct
+import time
 
 DISCONNECT_REQUEST, DISCONNECT_ACK, DISCONNECT_NAK = 40, 41, 42
-USER_NAME, NAS_IP_ADDRESS, CALLING_STATION_ID, MESSAGE_AUTHENTICATOR, ERROR_CAUSE = 1, 4, 31, 80, 101
+USER_NAME, NAS_IP_ADDRESS, CALLING_STATION_ID, EVENT_TIMESTAMP, MESSAGE_AUTHENTICATOR, ERROR_CAUSE = 1, 4, 31, 55, 80, 101
 
 
 def _attr(kind, value):
     return struct.pack("!BB", kind, len(value) + 2) + value
 
 
-def build(identifier, secret, user_name, calling_station, nas_ip):
-    """The Disconnect-Request packet (bytes)."""
+def build(identifier, secret, user_name, calling_station, nas_ip, now=None):
+    """The Disconnect-Request packet (bytes). Event-Timestamp is included because access points
+    running hostapd may require it (radius_das_require_event_timestamp, 5-minute window)."""
+    stamp = int(time.time() if now is None else now)
     attrs = (_attr(USER_NAME, user_name.encode()) + _attr(CALLING_STATION_ID, calling_station.encode())
-             + _attr(NAS_IP_ADDRESS, socket.inet_aton(nas_ip)))
+             + _attr(NAS_IP_ADDRESS, socket.inet_aton(nas_ip)) + _attr(EVENT_TIMESTAMP, struct.pack("!I", stamp)))
     # Message-Authenticator: HMAC-MD5 over the packet with a zero authenticator and zero MA.
     ma_placeholder = _attr(MESSAGE_AUTHENTICATOR, b"\x00" * 16)
     length = 20 + len(attrs) + len(ma_placeholder)

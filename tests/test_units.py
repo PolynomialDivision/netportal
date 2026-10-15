@@ -86,6 +86,9 @@ class DisconnectTests(unittest.TestCase):
         # Request Authenticator (RFC 5176 2.3) over the attributes as sent.
         self.assertEqual(pkt[4:20], hashlib.md5(pkt[:4] + b"\x00" * 16 + pkt[20:] + secret).digest())
         self.assertIn(b"anonymous@scharni.org", pkt)
+        # Event-Timestamp (55), 4 octets, for access points that require it.
+        stamped = disconnect.build(7, secret, "u", "02-00-00-00-00-01", "10.0.10.21", now=1760000000)
+        self.assertIn(struct.pack("!BBI", 55, 6, 1760000000), stamped)
 
     def test_reply_check(self):
         secret = b"s3cret"
