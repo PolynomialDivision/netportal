@@ -84,7 +84,7 @@ radius_env=(-e RADIUS_DB_HOST=10.199.0.5 -e RADIUS_DB_NAME=netportal -e RADIUS_D
   -v "$here/clients.conf:/etc/freeradius/clients.conf:ro" -v "$run/pki:/etc/netportal:ro"
   -v "$run/pki/radius-server.key:/etc/netportal-secrets/radius-server.key:ro")
 # The RADIUS image is always the one from radius/Dockerfile (its entrypoint matters).
-docker build -q -t netportal-radius:it "$root/radius" >/dev/null
+docker build -q -t netportal-radius:it -f "$root/radius/Dockerfile" "$root" >/dev/null
 docker run -d --name netportal-it-radius --network "$NET" --ip 10.199.0.10 "${radius_env[@]}" netportal-radius:it >/dev/null
 docker run -d --name netportal-it-nas --network "$NET" --ip 10.199.0.11 \
   -v "$here/fake-nas-clients.conf:/etc/freeradius/clients.conf:ro" \
