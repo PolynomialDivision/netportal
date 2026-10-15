@@ -134,7 +134,7 @@ def create_app(settings=None):
     @app.context_processor
     def _context():
         return {"t": g.t, "lang": g.lang, "user": g.user, "csrf": session.get("csrf"), "settings": settings,
-                "host": urllib.parse.urlsplit(settings.base_url).netloc}
+                "host": urllib.parse.urlsplit(settings.base_url).netloc, "platform_label": i18n.PLATFORM_LABEL}
 
     def need_user(admin=False):
         if g.user and not registry.person_active(g.db, g.user["sub"]):

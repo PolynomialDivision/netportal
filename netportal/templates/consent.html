@@ -1,14 +1,20 @@
 {% extends "base.html" %}
 {% block body %}
 <section class="card">
-  <h2>{{ t.consent }}</h2>
+  <div class="hero-mark small" aria-hidden="true"><svg class="icon"><use href="#i-app"/></svg></div>
+  <h1>{{ t.consent }}</h1>
+  <p class="muted">{{ t.consent_note.format(ssid=settings.ssid) }}</p>
   <form method="post" action="{{ url_for('oauth_authorize') }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     {% for key in ("client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state", "scope") %}
       {% if args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ args.get(key) }}">{% endif %}
     {% endfor %}
-    <label>{{ t.device_name }} <input name="name" value="{{ name }}" maxlength="60"></label>
-    <p><button class="button primary">{{ t.allow }}</button></p>
+    <label class="field">{{ t.device_name }}
+      <input name="name" value="{{ name }}" maxlength="60">
+      <span class="muted small">{{ t.consent_name_help }}</span>
+    </label>
+    <p class="cta"><button class="button primary big">{{ t.allow }}</button></p>
   </form>
 </section>
+<p class="backlink"><a href="{{ url_for('index') }}"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>{{ t.cancel }}</a></p>
 {% endblock %}

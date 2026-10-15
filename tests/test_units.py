@@ -77,6 +77,27 @@ class LanguageTests(unittest.TestCase):
             self.assertEqual(set(text), keys, lang)
 
 
+class TextTests(unittest.TestCase):
+    """Every text exists in every language with the same placeholders; the platform labels exist."""
+
+    def test_same_keys_and_placeholders(self):
+        import re
+        self.assertEqual(sorted(i18n.TEXT["de"]), sorted(i18n.TEXT["en"]))
+        self.assertEqual(sorted(i18n.TEXT["uk"]), sorted(i18n.TEXT["en"]))
+        for key, value in i18n.TEXT["en"].items():
+            for lang in ("de", "uk"):
+                other = i18n.TEXT[lang][key]
+                self.assertIs(type(other), type(value), key)
+                if isinstance(value, list):
+                    self.assertEqual(len(other), len(value), key)
+                    value_text, other_text = " ".join(value), " ".join(other)
+                else:
+                    value_text, other_text = value, other
+                self.assertEqual(sorted(re.findall(r"{\w+}", other_text)), sorted(re.findall(r"{\w+}", value_text)), (lang, key))
+        for label in i18n.PLATFORM_LABEL.values():
+            self.assertIn(label, i18n.TEXT["en"])
+
+
 class DisconnectTests(unittest.TestCase):
     def test_packet(self):
         secret = b"s3cret"

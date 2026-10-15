@@ -1,5 +1,13 @@
 {% extends "base.html" %}
 {% block body %}
-<p class="intro">{{ t.intro }}</p>
-<p><a class="button primary" href="{{ url_for('login') }}">{{ t.login }}</a></p>
+<section class="hero">
+  <div class="hero-mark" aria-hidden="true"><svg class="icon"><use href="#i-wifi"/></svg></div>
+  <h1>{{ t.tagline }}</h1>
+  <ul class="points">
+    <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>{{ t.landing_1 }}</span></li>
+    <li><svg class="icon" aria-hidden="true"><use href="#i-key"/></svg><span>{{ t.landing_2 }}</span></li>
+    <li><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg><span>{{ t.landing_3 }}</span></li>
+  </ul>
+  <p class="cta"><a class="button primary big" href="{{ url_for('login') }}">{{ t.login }}</a></p>
+</section>
 {% endblock %}
