@@ -111,5 +111,29 @@ class DisconnectTests(unittest.TestCase):
             self.assertEqual(disconnect.disconnect(sess, "x", timeout=0.1, retries=0), "error", nas_ip)
 
 
+class OffboardSidecarTests(unittest.TestCase):
+    """python -m netportal offboard touches its heartbeat after every round (the healthcheck)."""
+
+    def run_once(self, run):
+        import tempfile
+        from unittest import mock
+        from netportal import __main__ as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            beat = Path(tmp) / "beat"
+            with mock.patch.object(cli, "HEARTBEAT", str(beat)), \
+                    mock.patch("netportal.config.load", return_value=object()), \
+                    mock.patch("netportal.offboarding.run", side_effect=run) as mocked:
+                rc = cli.main(["offboard"])
+                return rc, beat.exists(), mocked.call_count
+
+    def test_heartbeat_after_a_round(self):
+        self.assertEqual(self.run_once(lambda settings: None), (0, True, 1))
+
+    def test_heartbeat_even_when_the_round_fails(self):
+        def boom(settings):
+            raise RuntimeError("authentik down")
+        self.assertEqual(self.run_once(boom), (1, True, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

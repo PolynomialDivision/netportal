@@ -9,6 +9,7 @@
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -22,18 +23,25 @@ def cmd_init_db(args):
     print("schema ready")
 
 
+HEARTBEAT = os.environ.get("NETPORTAL_HEARTBEAT", "/tmp/netportal-offboard.heartbeat")
+
+
 def cmd_offboard(args):
+    """Reconcile once, or forever with --every. After every round (also a failed one: the
+    metric shows the age of the last success) the heartbeat file is touched, so the
+    container's healthcheck can tell a living sidecar from a hung one."""
     from . import config, offboarding
     settings = config.load()
     while True:
+        failed = False
         try:
             offboarding.run(settings)
-        except Exception:  # noqa: BLE001 (keep the loop; the metric shows the age of the last success)
+        except Exception:  # noqa: BLE001 (keep the loop)
             logging.exception("offboarding failed")
-            if not args.every:
-                return 1
+            failed = True
+        Path(HEARTBEAT).touch()
         if not args.every:
-            return 0
+            return 1 if failed else 0
         time.sleep(args.every)
 
 
