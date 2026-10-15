@@ -1,0 +1,16 @@
+# Test only: FreeRADIUS plays the access point's Dynamic Authorization server (RFC 5176), so
+# netportal's Disconnect-Request is checked by an independent implementation (authenticator,
+# Message-Authenticator). It answers Disconnect-ACK and logs the request.
+server fake-nas {
+	listen {
+		type = coa
+		ipaddr = *
+		port = 3799
+	}
+	recv-coa {
+		ok
+	}
+	send-coa {
+		ok
+	}
+}

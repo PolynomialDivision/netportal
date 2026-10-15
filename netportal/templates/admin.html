@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <h2>{{ t.admin }} ({{ devices|length }})</h2>
+  <table>
+    <thead><tr><th>{{ t.owner }}</th><th>{{ t.device_name }}</th><th>{{ t.expires }}</th><th>{{ t.last_seen }}</th><th></th></tr></thead>
+    <tbody>
+    {% for d in devices %}
+      <tr>
+        <td>{{ people.get(d.owner, {}).get("display", d.owner) }}</td>
+        <td>{{ d.name }}</td>
+        <td{% if expires_soon(d.expires) %} class="warn"{% endif %}>{{ d.expires.strftime("%Y-%m-%d") if d.expires else "–" }}</td>
+        <td>{{ d.last_seen.strftime("%Y-%m-%d") if d.last_seen else t.never }}</td>
+        <td>
+          <form method="post" action="{{ url_for('revoke', device_id=d.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="back" value="/admin">
+            <button class="button danger small">{{ t.revoke }}</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

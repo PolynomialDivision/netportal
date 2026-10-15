@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block body %}
+<p class="intro">{{ t.intro }}</p>
+<p><a class="button primary" href="{{ url_for('login') }}">{{ t.login }}</a></p>
+{% endblock %}

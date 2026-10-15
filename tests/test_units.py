@@ -1,0 +1,112 @@
+"""Unit tests of the security-relevant pieces (no database, no network)."""
+
+import base64
+import hashlib
+import struct
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from netportal import disconnect, i18n, web  # noqa: E402
+
+
+class RedirectTests(unittest.TestCase):
+    sh = web.LETSWIFI_CLIENTS["app.geteduroam.sh"]
+    android = web.LETSWIFI_CLIENTS["app.eduroam.geteduroam"]
+
+    def test_loopback_any_port(self):
+        self.assertTrue(web.redirect_allowed(self.sh, "http://127.0.0.1:43210/"))
+        self.assertTrue(web.redirect_allowed(self.sh, "http://[::1]:5000/callback"))
+
+    def test_refused(self):
+        for uri in ("https://evil.example/", "http://127.0.0.1.evil.example/", "http://localhost:80/",
+                    "http://10.0.0.1/", "app.eduroam.geteduroam:/", "javascript:alert(1)"):
+            self.assertFalse(web.redirect_allowed(self.sh, uri), uri)
+
+    def test_custom_scheme_exact(self):
+        self.assertTrue(web.redirect_allowed(self.android, "app.eduroam.geteduroam:/"))
+        self.assertFalse(web.redirect_allowed(self.android, "app.eduroam.geteduroam:/x"))
+        self.assertFalse(web.redirect_allowed(self.android, "http://127.0.0.1/"))
+
+
+class PkceTests(unittest.TestCase):
+    def test_rfc7636_example(self):
+        self.assertTrue(web.pkce_ok("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+                                    "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
+
+    def test_refused(self):
+        self.assertFalse(web.pkce_ok("x" * 43, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
+        self.assertFalse(web.pkce_ok("short", base64.urlsafe_b64encode(hashlib.sha256(b"short").digest())
+                                     .rstrip(b"=").decode()))
+        self.assertFalse(web.pkce_ok("", ""))
+
+
+class PlatformTests(unittest.TestCase):
+    def test_detection(self):
+        cases = {
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X)": ["apple"],
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6)": ["apple-mac", "apple"],
+            "Mozilla/5.0 (Linux; Android 16; Pixel 9)": ["android", "android-app"],
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)": ["windows"],
+            "Mozilla/5.0 (X11; Linux x86_64)": ["linux"],
+        }
+        for ua, expected in cases.items():
+            self.assertEqual(web.platform_of(ua), expected, ua)
+        self.assertEqual(len(web.platform_of("curl/8")), 6)
+
+    def test_passpoint_off_puts_the_app_first(self):
+        android = "Mozilla/5.0 (Linux; Android 16; Pixel 9)"
+        self.assertEqual(web.enrol_options(android, passpoint=False), ["android-app"])
+        self.assertEqual(web.enrol_options(android, passpoint=True), ["android", "android-app"])
+        self.assertNotIn("android", web.enrol_options("curl/8", passpoint=False))
+
+
+class LanguageTests(unittest.TestCase):
+    def test_pick(self):
+        self.assertEqual(i18n.pick("de-DE,de;q=0.9,en;q=0.8"), "de")
+        self.assertEqual(i18n.pick("uk"), "uk")
+        self.assertEqual(i18n.pick("ru-RU"), "uk")
+        self.assertEqual(i18n.pick("fr"), "en")
+        self.assertEqual(i18n.pick(None), "en")
+
+    def test_every_language_has_every_text(self):
+        keys = set(i18n.TEXT["en"])
+        for lang, text in i18n.TEXT.items():
+            self.assertEqual(set(text), keys, lang)
+
+
+class DisconnectTests(unittest.TestCase):
+    def test_packet(self):
+        secret = b"s3cret"
+        pkt = disconnect.build(7, secret, "anonymous@scharni.org", "02-00-00-00-00-01", "10.0.10.21")
+        code, ident, length = struct.unpack("!BBH", pkt[:4])
+        self.assertEqual((code, ident, length), (40, 7, len(pkt)))
+        # Request Authenticator (RFC 5176 2.3) over the attributes as sent.
+        self.assertEqual(pkt[4:20], hashlib.md5(pkt[:4] + b"\x00" * 16 + pkt[20:] + secret).digest())
+        self.assertIn(b"anonymous@scharni.org", pkt)
+
+    def test_reply_check(self):
+        secret = b"s3cret"
+        req = disconnect.build(9, secret, "u", "02-00-00-00-00-01", "10.0.10.21")
+        body = b""
+        head = struct.pack("!BBH", 41, 9, 20)
+        good = head + hashlib.md5(head + req[4:20] + body + secret).digest()
+        self.assertTrue(disconnect.verify_reply(good, req, secret))
+        self.assertFalse(disconnect.verify_reply(good, req, b"other"))
+        self.assertFalse(disconnect.verify_reply(struct.pack("!BBH", 41, 8, 20) + good[4:], req, secret))
+
+    def test_nothing_to_do(self):
+        self.assertEqual(disconnect.disconnect(None, "x"), "skipped")
+        self.assertEqual(disconnect.disconnect({"nas_ip": "1"}, ""), "skipped")
+
+    def test_unusable_address_is_an_error_not_a_crash(self):
+        # A session without NAS-IP-Address (or an IPv6 one) must not break the revocation.
+        for nas_ip in ("", "fe80::1"):
+            sess = {"nas_ip": nas_ip, "calling_station": "02-00-00-00-00-01", "user_name": "u"}
+            self.assertEqual(disconnect.disconnect(sess, "x", timeout=0.1, retries=0), "error", nas_ip)
+
+
+if __name__ == "__main__":
+    unittest.main()

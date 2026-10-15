@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% macro enrol_button(fmt, label, primary=False) %}
+<form method="post" action="{{ url_for('enroll_device') }}" class="enrol">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="format" value="{{ fmt }}">
+  <button class="button{% if primary %} primary{% endif %}">{{ label }}</button>
+</form>
+{% endmacro %}
+{% block body %}
+<p class="intro">{{ t.intro }}</p>
+
+<section class="card">
+  <h2>{{ t.add_device }}</h2>
+  {% for opt in options %}
+    {% set primary = loop.first %}
+    {% if opt == "apple" %}{{ enrol_button("apple", t.for_apple, primary) }}
+    {% elif opt == "apple-mac" %}{{ enrol_button("apple-mac", t.for_mac, primary) }}
+    {% elif opt == "android" %}{{ enrol_button("android", t.for_android, primary) }}
+    {% elif opt == "android-app" %}{{ enrol_button("eap-config", t.for_android_app, primary) }}
+    {% elif opt in ("windows", "linux") %}
+      <p>{{ t.install_app.format(host=host) }}</p>
+      <p><a class="button{% if primary %} primary{% endif %}" href="https://www.geteduroam.app/" rel="noreferrer">{{ t.get_app }}</a></p>
+    {% endif %}
+  {% endfor %}
+  {# A recognised browser gets one or two options; an unknown one already sees every option. #}
+  {% if options|length < 3 %}
+  <details>
+    <summary>{{ t.add_other }}</summary>
+    {{ enrol_button("apple", t.for_apple) }}
+    {{ enrol_button("apple-mac", t.for_mac) }}
+    {% if settings.passpoint %}{{ enrol_button("android", t.for_android) }}{% endif %}
+    {{ enrol_button("eap-config", t.for_android_app) }}
+    <p>{{ t.for_windows }} / {{ t.for_linux }}: {{ t.install_app.format(host=host) }}</p>
+  </details>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>{{ t.your_devices }}</h2>
+  {% if not devices %}<p>{{ t.no_devices }}</p>{% endif %}
+  <ul class="devices">
+  {% for d in devices %}
+    <li>
+      <form method="post" action="{{ url_for('rename', device_id=d.id) }}" class="rename">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="name" value="{{ d.name }}" maxlength="60" aria-label="{{ t.device_name }}">
+        <button class="link">{{ t.rename }}</button>
+      </form>
+      <p class="meta">
+        {% if d.expires %}{{ t.expires }} {{ d.expires.strftime("%Y-%m-%d") }}{% endif %}
+        · {% if d.last_seen %}{{ t.last_seen }} {{ d.last_seen.strftime("%Y-%m-%d") }}{% else %}{{ t.never }}{% endif %}
+      </p>
+      <div class="actions">
+        {% if expires_soon(d.expires) %}
+        <form method="post" action="{{ url_for('renew', device_id=d.id) }}" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="button primary">{{ t.expires_soon }}</button>
+        </form>
+        {% endif %}
+        <details class="danger">
+          <summary>{{ t.revoke }}</summary>
+          <form method="post" action="{{ url_for('revoke', device_id=d.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <p>{{ t.revoke_confirm }}</p>
+            <button class="button danger">{{ t.revoke }}</button>
+          </form>
+        </details>
+      </div>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endblock %}

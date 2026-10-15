@@ -1,0 +1,83 @@
+"""Command line: python -m netportal <command>
+
+  init-db                       create/upgrade the schema (also done by the web app at start)
+  offboard [--every SECONDS]    reconcile with Authentik once, or forever (the sidecar)
+  pki --out DIR [--name NAME] --server-name FQDN
+                                the PKI ceremony: root (offline), device CA, RADIUS server
+                                certificate as PEM files; run on an admin's machine, not the server
+"""
+
+import argparse
+import logging
+import sys
+import time
+from pathlib import Path
+
+
+def cmd_init_db(args):
+    from . import config, registry
+    settings = config.load()
+    with registry.connect(settings.database_url) as db:
+        registry.init(db, settings.default_vlan)
+    print("schema ready")
+
+
+def cmd_offboard(args):
+    from . import config, offboarding
+    settings = config.load()
+    while True:
+        try:
+            offboarding.run(settings)
+        except Exception:  # noqa: BLE001 (keep the loop; the metric shows the age of the last success)
+            logging.exception("offboarding failed")
+            if not args.every:
+                return 1
+        if not args.every:
+            return 0
+        time.sleep(args.every)
+
+
+def cmd_pki(args):
+    from . import pki
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    root = pki.make_ca("%s Network Root" % args.name, days=7300, path_length=1)
+    device_ca = pki.make_ca("%s Device CA" % args.name, issuer=root, days=3650, path_length=0)
+    server = pki.server_cert(root, args.server_name, days=825)
+
+    def write(name, data, secret=False):
+        path = out / name
+        path.write_bytes(data)
+        path.chmod(0o600 if secret else 0o644)
+
+    write("root.pem", root.cert_pem())
+    write("root.key", root.key_pem(), secret=True)            # offline: password manager, never the server
+    write("device-ca.pem", device_ca.cert_pem())
+    write("device-ca.key", device_ca.key_pem(), secret=True)  # vault -> netportal only
+    write("device-ca-chain.pem", device_ca.cert_pem() + root.cert_pem())   # FreeRADIUS ca_file
+    write("radius-server.pem", server.cert_pem())
+    write("radius-server.key", server.key_pem(), secret=True)  # vault -> FreeRADIUS only
+    print("PKI written to %s; device CA DN for FreeRADIUS check_cert_issuer: /CN=%s Device CA"
+          % (out, args.name))
+    return 0
+
+
+def main(argv=None):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(prog="netportal")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init-db").set_defaults(func=cmd_init_db)
+    p = sub.add_parser("offboard")
+    p.add_argument("--every", type=int, default=0)
+    p.set_defaults(func=cmd_offboard)
+    p = sub.add_parser("pki")
+    p.add_argument("--out", required=True)
+    p.add_argument("--name", default="Scharni")
+    p.add_argument("--server-name", required=True)
+    p.set_defaults(func=cmd_pki)
+    args = parser.parse_args(argv)
+    return args.func(args) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

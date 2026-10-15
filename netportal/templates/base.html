@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <title>{{ settings.display_name }} · {{ t.title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main>
+  <header>
+    <h1>{{ settings.display_name }} {{ t.title }}</h1>
+    {% if user %}
+    <form method="post" action="{{ url_for('logout') }}" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <span class="who">{{ user.name }}</span>
+      {% if user.admin %}<a href="{{ url_for('admin') }}">{{ t.admin }}</a>{% endif %}
+      <button class="link">{{ t.logout }}</button>
+    </form>
+    {% endif %}
+  </header>
+  {% block body %}{% endblock %}
+  <footer>{{ t.privacy }}</footer>
+</main>
+</body>
+</html>

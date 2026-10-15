@@ -1,0 +1,69 @@
+# The house Wi-Fi's RADIUS server: EAP-TLS only, every decision from the device registry
+# (view radius_cert, through check-eap-tls). Authentik is never asked, so Wi-Fi works while it
+# is down. Wired 802.1X will use the same path; MAC authentication (wired devices without
+# 802.1X) gets its own elsif branch here later (docs: NETWORK-ACCESS.md).
+#
+# Fail closed, written positively (see check-eap-tls): access only inside an "if" whose test
+# is true; every error or missing value ends in an else that rejects.
+server default {
+	listen {
+		type = auth
+		ipaddr = *
+		port = 1812
+	}
+	listen {
+		type = acct
+		ipaddr = *
+		port = 1813
+	}
+
+	authorize {
+		if (&EAP-Message) {
+			eap
+		}
+		else {
+			reject
+		}
+	}
+
+	authenticate {
+		Auth-Type eap {
+			eap
+		}
+	}
+
+	accounting {
+		# UniFi sends accounting when enabled; nothing is stored (no history).
+		ok
+	}
+
+	post-auth {
+		# VLAN and device were decided by check-eap-tls (outer.control).
+		if (&control:Tmp-String-0 && (&control:Tmp-String-0 =~ /^[0-9]+$/)) {
+			update reply {
+				&Tunnel-Type := VLAN
+				&Tunnel-Medium-Type := IEEE-802
+				&Tunnel-Private-Group-Id := "%{control:Tmp-String-0}"
+				# Backstop for sessions a Disconnect-Request does not reach (netaccess.session_timeout).
+				&Session-Timeout := $ENV{RADIUS_SESSION_TIMEOUT}
+				&Termination-Action := RADIUS-Request
+			}
+			# The latest session of the device (no history): where netportal sends the
+			# Disconnect-Request when the device is revoked. Without NAS-IP-Address the packet's
+			# source is the access point.
+			if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
+				update control {
+					&Tmp-String-3 := "%{sql:INSERT INTO radius_session (device_id, nas_ip, calling_station, user_name, updated) VALUES ('%{control:Tmp-String-2}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Calling-Station-Id}', '%{User-Name}', now()) ON CONFLICT (device_id) DO UPDATE SET nas_ip = EXCLUDED.nas_ip, calling_station = EXCLUDED.calling_station, user_name = EXCLUDED.user_name, updated = now()}"
+				}
+			}
+		}
+		else {
+			reject
+		}
+		Post-Auth-Type REJECT {
+			update reply {
+				&Reply-Message := "device not registered"
+			}
+		}
+	}
+}

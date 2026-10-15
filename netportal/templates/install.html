@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <h2>{{ name }}</h2>
+  {% if fmt == "apple" %}<p>{{ t.install_apple.format(ssid=settings.ssid) }}</p>
+  {% elif fmt == "apple-mac" %}<p>{{ t.install_mac }}</p>
+  {% elif fmt == "android" %}<p>{{ t.install_android.format(ssid=settings.ssid) }}</p>
+  {% else %}<p>{{ t.install_android_app }}</p>{% endif %}
+  {# A plain link: Android installs a Passpoint file only from a user tap on an element (GET). #}
+  <p><a class="button primary" href="{{ url_for('download', token=token) }}">{{ t.install }}</a></p>
+  <p class="meta">{{ t.link_once }}</p>
+</section>
+<p><a href="{{ url_for('index') }}">← {{ t.your_devices }}</a></p>
+{% endblock %}

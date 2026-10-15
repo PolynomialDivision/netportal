@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <h2>{{ t.consent }}</h2>
+  <form method="post" action="{{ url_for('oauth_authorize') }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% for key in ("client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state", "scope") %}
+      {% if args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ args.get(key) }}">{% endif %}
+    {% endfor %}
+    <label>{{ t.device_name }} <input name="name" value="{{ name }}" maxlength="60"></label>
+    <p><button class="button primary">{{ t.allow }}</button></p>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,43 @@
+# Called by the EAP-TLS module once the client certificate's chain is valid (once per
+# authentication, just before the final Accept). The registry decides: the serial must belong
+# to a device that is not revoked and not expired. The VLAN and device ID go to the outer
+# request (outer.control), where post-auth builds the reply.
+#
+# Fail closed, written positively: access only inside an "if" whose test is true. In
+# FreeRADIUS 3 a test on a missing attribute fails with an error and counts as false, also
+# when negated, so "if (!(&x =~ ...)) { reject }" lets a missing value through (found by the
+# PoC). Likewise an empty SQL result in an integer attribute becomes 0, which "exists".
+server check-eap-tls {
+	authorize {
+		if (&TLS-Client-Cert-Serial && (&TLS-Client-Cert-Serial =~ /^[0-9a-fA-F]+$/)) {
+			update request {
+				&Tmp-String-1 := "%{tolower:%{TLS-Client-Cert-Serial}}"
+			}
+			update control {
+				&Tmp-String-0 := "%{sql:SELECT vlan FROM radius_cert WHERE serial = '%{Tmp-String-1}'}"
+				&Tmp-String-2 := "%{sql:SELECT device_id FROM radius_cert WHERE serial = '%{Tmp-String-1}'}"
+			}
+			if (&control:Tmp-String-0 && (&control:Tmp-String-0 =~ /^[0-9]+$/) && &control:Tmp-String-2) {
+				update outer.control {
+					&Tmp-String-0 := &control:Tmp-String-0
+					&Tmp-String-2 := &control:Tmp-String-2
+				}
+				update control {
+					&Auth-Type := Accept
+				}
+			}
+			else {
+				update control {
+					&Auth-Type := Reject
+				}
+				reject
+			}
+		}
+		else {
+			update control {
+				&Auth-Type := Reject
+			}
+			reject
+		}
+	}
+}
