@@ -326,8 +326,11 @@ def main():
     r = s.post(PORTAL + "/enroll", data={"csrf": form_before, "format": "apple"}, allow_redirects=False)
     check("... and her open portal session cannot enrol a new device",
           r.status_code == 302 and "/login" in r.headers.get("Location", ""), r.status_code)
-    r = s.get(PORTAL + "/")
-    check("... and the portal shows the login again", "Your devices" not in r.text and "/login" in r.text)
+    r = s.get(PORTAL + "/", allow_redirects=False)
+    check("... and the portal sends her to the login again (no page in between, 2026-10-19)",
+          r.status_code == 302 and "/login" in r.headers.get("Location", ""), r.status_code)
+    r = s.get(PORTAL + "/welcome")
+    check("... the landing page stays at /welcome", r.status_code == 200 and "/login" in r.text, r.status_code)
     requests.post(IDP + "/_test/users", json=[])
     out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
     check("an empty Authentik answer revokes nothing (fails safe)", out.returncode != 0)

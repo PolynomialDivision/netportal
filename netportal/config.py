@@ -48,6 +48,7 @@ class Settings:
     authentik_api: str = ""       # https://login.scharni.org/api/v3 (offboarding); "" = off
     authentik_token: str = ""     # read-only token (directory-reader)
     passpoint: bool = False       # offer the Passpoint download on Android (UniFi Hotspot 2.0 on)
+    logout_url: str = ""         # where "log out" goes (the house's logout page); "" = the portal's own page
 
 
 def _device_ca_key():
@@ -89,4 +90,5 @@ def load():
         authentik_token=_secret("NETPORTAL_AUTHENTIK_TOKEN") if (os.environ.get("NETPORTAL_AUTHENTIK_TOKEN")
                                                                   or os.environ.get("NETPORTAL_AUTHENTIK_TOKEN_FILE")) else "",
         passpoint=os.environ.get("NETPORTAL_PASSPOINT", "false").lower() == "true",
+        logout_url=os.environ.get("NETPORTAL_LOGOUT_URL", ""),
     )

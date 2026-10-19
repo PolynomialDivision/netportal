@@ -183,9 +183,15 @@ def create_app(settings=None):
     @app.post("/logout")
     def logout():
         session.clear()
-        return redirect(url_for("index"))
+        # the portal's own page would log straight back in (the login is automatic there):
+        # to the house's logout, which ends the session at the identity provider
+        return redirect(settings.logout_url or url_for("index"))
 
     # --- the resident's devices ---------------------------------------------------------------
+
+    @app.get("/welcome")
+    def welcome():
+        return render_template("landing.html")
 
     @app.get("/")
     def index():
@@ -195,7 +201,9 @@ def create_app(settings=None):
             session.clear()
             g.user = None
         if not g.user:
-            return render_template("landing.html")
+            # straight to the house login, no page with a button in between (2026-10-19);
+            # the landing page stays at /welcome for the texts
+            return redirect(url_for("login"))
         devices = registry.devices(g.db, owner=g.user["sub"])
         return render_template("devices.html", devices=devices,
                                options=enrol_options(request.user_agent.string, settings.passpoint),
