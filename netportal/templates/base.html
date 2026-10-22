@@ -4,9 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#1f6f5f">
+  <meta name="theme-color" content="#b5471f">
   <meta name="robots" content="noindex">
   <title>{{ settings.display_name }} · {{ t.title }}</title>
+  {# the house's shared look (Caddy serves it on every house site); the page works without it #}
+  <link rel="stylesheet" href="/_house/ui.css">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -24,13 +26,9 @@
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></symbol>
   <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M21.5 20a6.5 6.5 0 0 0-4.5-6"/></symbol>
 </svg>
+<nav class="h-bar" aria-label="{{ t.house_nav }}"><a href="{{ settings.home }}">⌂ {{ settings.display_name }}</a><span>{{ t.title }}</span></nav>
+{% if user %}
 <header class="top">
-  <a class="brand" href="{{ url_for('index') }}">
-    <svg class="icon" aria-hidden="true"><use href="#i-wifi"/></svg>
-    <span class="brand-name">{{ settings.display_name }}</span>
-    <span class="brand-sub">{{ t.title }}</span>
-  </a>
-  {% if user %}
   <nav class="session" aria-label="Account">
     <span class="who">{{ user.name }}</span>
     {% if user.admin %}<a class="pill" href="{{ url_for('admin') }}"><svg class="icon" aria-hidden="true"><use href="#i-people"/></svg>{{ t.admin }}</a>{% endif %}
@@ -39,8 +37,8 @@
       <button class="pill">{{ t.logout }}</button>
     </form>
   </nav>
-  {% endif %}
 </header>
+{% endif %}
 <main>
   {% block body %}{% endblock %}
 </main>

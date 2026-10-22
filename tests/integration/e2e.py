@@ -344,6 +344,13 @@ def main():
     check("... and a device she enrols now too", verdict == ("accept", "50"), verdict)
     page = a.get(PORTAL + "/admin")
     check("the admin view shows each device's policy", "· guests ·" in page.text and "· residents ·" in page.text)
+    # Admin rights are checked against the registry on every request (2026-10-22): removed from
+    # it-admins, the open session loses the admin view at the next offboarding round.
+    users(("sub-admin", "admin", ["residents"], True), ("sub-carol", "carol", ["former-residents"], True), ALICE, FIA)
+    out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
+    r = a.get(PORTAL + "/admin")
+    check("someone removed from the admin group loses the admin view at once, in the open session",
+          out.returncode == 0 and r.status_code == 403, (out.returncode, r.status_code))
 
     # --- offboarding ----------------------------------------------------------------------
     s, _ = login(ALICE)

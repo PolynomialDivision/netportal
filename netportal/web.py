@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import time
 import urllib.parse
 
 from authlib.integrations.base_client.errors import OAuthError
@@ -27,6 +28,9 @@ LETSWIFI_CLIENTS = {
     "app.geteduroam.sh": {"redirect": ["http://127.0.0.1/", "http://[::1]/"], "refresh": True},
 }
 ACCESS_SECONDS, CODE_SECONDS, REFRESH_SECONDS = 3600, 300, 400 * 86400
+# A portal session ends after 8 hours without a request, and 12 hours after the login at the
+# latest, however busy (the login is automatic through the house account).
+SESSION_IDLE_SECONDS, SESSION_MAX_SECONDS = 8 * 3600, 12 * 3600
 FORMATS = ("apple", "apple-mac", "android", "eap-config")
 
 
@@ -79,7 +83,7 @@ def create_app(settings=None):
         SESSION_COOKIE_SECURE=settings.base_url.startswith("https://"),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
-        PERMANENT_SESSION_LIFETIME=8 * 3600,
+        PERMANENT_SESSION_LIFETIME=SESSION_IDLE_SECONDS,
     )
     if not app.config["SESSION_COOKIE_SECURE"]:
         app.config["SESSION_COOKIE_NAME"] = "netportal"   # __Host- requires Secure (local tests only)
@@ -102,9 +106,11 @@ def create_app(settings=None):
         # not as a failed scrape); static files need none.
         if request.endpoint not in ("static", "metrics_endpoint"):
             g.db = registry.connect(settings.database_url)
-        g.lang = i18n.pick(request.headers.get("Accept-Language"))
+        g.lang = i18n.pick(request.headers.get("Accept-Language"), request.cookies.get("house_lang"))
         g.t = i18n.TEXT[g.lang]
         g.user = session.get("user")
+        if g.user and not session_fresh(session.get("login_at"), time.time()):
+            end_login()                    # the CSRF token stays: a form sent now goes to the login
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(24)
         if request.method == "POST" and request.endpoint not in ("oauth_token", "letswifi_eap_config"):
@@ -136,14 +142,29 @@ def create_app(settings=None):
         return {"t": g.t, "lang": g.lang, "user": g.user, "csrf": session.get("csrf"), "settings": settings,
                 "host": urllib.parse.urlsplit(settings.base_url).netloc, "platform_label": i18n.PLATFORM_LABEL}
 
-    def need_user(admin=False):
-        if g.user and not registry.person_active(g.db, g.user["sub"]):
-            session.clear()                # offboarded since the login: the session ends now
-            g.user = None
+    def end_login():
+        session.pop("user", None)
+        session.pop("login_at", None)
+        g.user = None
+
+    def load_user():
+        """The logged-in person as the registry knows them now, or None. Rights (admin) come from
+        the registry on every request, which the login and every offboarding round keep current;
+        the cookie only says who it is."""
         if not g.user:
+            return None
+        state = registry.person_state(g.db, g.user["sub"])
+        if state is None:
+            end_login()                    # offboarded since the login: the session ends now
+            return None
+        g.user = dict(g.user, admin=bool(state["admin"]))
+        return g.user
+
+    def need_user(admin=False):
+        if not load_user():
             session["next"] = request.full_path
             abort(redirect(url_for("login")))
-        if admin and not g.user.get("admin"):
+        if admin and not g.user["admin"]:
             abort(403)
         return g.user
 
@@ -171,12 +192,13 @@ def create_app(settings=None):
             session.clear()
             return render_template("message.html", message=g.t["no_access"]), 403
         username = claims.get("preferred_username") or claims["sub"]
-        registry.upsert_person(g.db, claims["sub"], username, claims.get("name") or username)
+        is_admin = bool(groups & settings.admin_groups)
+        registry.upsert_person(g.db, claims["sub"], username, claims.get("name") or username, admin=is_admin)
         apply_policy(g.db, claims["sub"], policy, claims["sub"], settings)
         nxt = session.pop("next", None)
         session.clear()
-        session["user"] = {"sub": claims["sub"], "username": username, "name": claims.get("name") or username,
-                           "admin": bool(groups & settings.admin_groups)}
+        session["user"] = {"sub": claims["sub"], "username": username, "name": claims.get("name") or username}
+        session["login_at"] = int(time.time())
         session["csrf"] = secrets.token_urlsafe(24)
         session.permanent = True
         return redirect(nxt if nxt and nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
@@ -192,16 +214,14 @@ def create_app(settings=None):
 
     @app.get("/welcome")
     def welcome():
+        load_user()
         return render_template("landing.html")
 
     @app.get("/")
     def index():
         if "application/json" in request.headers.get("Accept", "") and "text/html" not in request.headers.get("Accept", ""):
             return letswifi_document()
-        if g.user and not registry.person_active(g.db, g.user["sub"]):
-            session.clear()
-            g.user = None
-        if not g.user:
+        if not load_user():
             # straight to the house login, no page with a button in between (2026-10-19);
             # the landing page stays at /welcome for the texts
             return redirect(url_for("login"))
@@ -397,6 +417,12 @@ def create_app(settings=None):
                 "eap-config": "Android", "letswifi": "geteduroam"}.get(fmt, "device") + " (%s)" % g.user["username"]
 
     return app
+
+
+def session_fresh(login_at, now):
+    """A login is good for SESSION_MAX_SECONDS, however often it is used (the cookie's own expiry
+    moves with every request). A session without a login time (from before 2026-10-22) is not."""
+    return isinstance(login_at, int) and 0 <= now - login_at < SESSION_MAX_SECONDS
 
 
 def revoke_now(db, device_id, actor_sub, settings):

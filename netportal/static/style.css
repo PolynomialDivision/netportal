@@ -1,17 +1,29 @@
 /* netportal: one stylesheet, system fonts, no external resources (strict CSP). Light and
    dark follow the device. Everything a finger must hit is at least 44px high. */
+/* The house's look comes from the shared kit (/_house/ui.css, linked before this file, same
+   origin): every colour here is the kit's --h-* value, with the house's own colours as the
+   fallback for local development (no Caddy, no kit). */
 :root {
-  --bg: #f3f5f4; --card: #ffffff; --text: #1b2420; --muted: #5d6b66; --line: #dfe5e2;
-  --accent: #1f6f5f; --accent-strong: #185a4d; --accent-soft: #e4f1ec; --accent-text: #ffffff;
-  --danger: #b3261e; --danger-soft: #fbeae8; --warn: #8a5a00; --warn-soft: #fff3d6;
-  --shadow: 0 1px 2px rgba(20, 30, 26, .06), 0 8px 24px -16px rgba(20, 30, 26, .25);
-  --radius: 16px;
+  --bg: var(--h-bg, #f7f3ec); --card: var(--h-surface, #fffdf9); --text: var(--h-text, #2b2520);
+  --muted: var(--h-muted, #6b5f55); --line: var(--h-line, #e6ddd0);
+  --accent: var(--h-accent, #b5471f); --accent-strong: var(--h-accent, #963a18);
+  --accent-soft: var(--h-accent-soft, #f6dcd0); --accent-text: var(--h-accent-ink, #ffffff);
+  --ring: var(--h-ring, #b5471f);
+  --danger: var(--h-bad, #b3261e); --danger-soft: var(--h-bad-soft, #fbeae8);
+  --warn: var(--h-warn, #8a5a00); --warn-soft: var(--h-warn-soft, #fff3d6);
+  --shadow: 0 1px 2px rgba(60, 40, 20, .05), 0 8px 24px -16px rgba(60, 40, 20, .25);
+  --radius: var(--h-radius, 16px);
+  --font: var(--h-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #101513; --card: #1a211e; --text: #e7ece9; --muted: #9eaaa5; --line: #2b3531;
-    --accent: #5fc2a8; --accent-strong: #7fd3bd; --accent-soft: #1d3a32; --accent-text: #0e1a16;
-    --danger: #ff8a80; --danger-soft: #3a1f1d; --warn: #ffcf6b; --warn-soft: #3a2f14;
+    --bg: var(--h-bg, #1b1917); --card: var(--h-surface, #27231f); --text: var(--h-text, #f1ebe3);
+    --muted: var(--h-muted, #b3a89c); --line: var(--h-line, #3a342e);
+    --accent: var(--h-accent, #e8864f); --accent-strong: var(--h-accent, #f0a070);
+    --accent-soft: var(--h-accent-soft, #3d2a20); --accent-text: var(--h-accent-ink, #1b1917);
+    --ring: var(--h-ring, #f0a070);
+    --danger: var(--h-bad, #ff8a80); --danger-soft: var(--h-bad-soft, #3a1f1d);
+    --warn: var(--h-warn, #ffcf6b); --warn-soft: var(--h-warn-soft, #3a2f14);
     --shadow: none;
   }
 }
@@ -19,7 +31,7 @@
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font: 17px/1.5 var(--font);
   display: flex; flex-direction: column; min-height: 100vh;
 }
 main { width: 100%; max-width: 38rem; margin: 0 auto; padding: 0 1rem 1rem; flex: 1; }
@@ -29,7 +41,7 @@ h2.h-sub { font-size: 1rem; margin: 1.25rem 0 .5rem; }
 p { margin: 0 0 .75rem; }
 a { color: var(--accent); }
 a:hover { color: var(--accent-strong); }
-:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+:focus-visible { outline: 3px solid var(--ring); outline-offset: 2px; border-radius: 6px; }
 .sprite { display: none; }
 .icon { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-width: 1.8;
         stroke-linecap: round; stroke-linejoin: round; vertical-align: -.3em; flex: none; }
@@ -41,13 +53,16 @@ a:hover { color: var(--accent-strong); }
 .eyebrow { text-transform: uppercase; letter-spacing: .06em; font-size: .78rem; font-weight: 600;
            color: var(--muted); margin-bottom: .25rem; }
 
+/* the house bar (styled by the kit; :where keeps this fallback below the kit's rules) */
+:where(.h-bar) { display: flex; align-items: center; gap: .75rem; padding: .25rem 1rem; min-height: 44px;
+                 border-bottom: 1px solid var(--line); background: var(--card); font-size: .95rem; }
+:where(.h-bar) a { display: inline-flex; align-items: center; min-height: 44px; font-weight: 600;
+                   text-decoration: none; color: var(--text); }
+:where(.h-bar) span { color: var(--muted); }
+
 /* header and footer */
 .top { max-width: 38rem; margin: 0 auto; padding: 1rem; display: flex; align-items: center;
-       justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
-.brand { display: inline-flex; align-items: center; gap: .5rem; text-decoration: none; color: var(--text); }
-.brand .icon { width: 1.6rem; height: 1.6rem; color: var(--accent); }
-.brand-name { font-weight: 700; font-size: 1.1rem; }
-.brand-sub { color: var(--muted); }
+       justify-content: flex-end; gap: .75rem; flex-wrap: wrap; }
 .session { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .who { color: var(--muted); font-size: .95rem; }
 footer { max-width: 38rem; margin: 1rem auto 0; padding: 1rem 1rem 1.5rem; color: var(--muted);

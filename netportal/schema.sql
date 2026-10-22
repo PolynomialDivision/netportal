@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS policy (
 -- The policy the person's groups give (at login and every offboarding round); their devices
 -- follow it. NULL: not known yet (logged in before 2026-10-22, until the next round).
 ALTER TABLE person ADD COLUMN IF NOT EXISTS policy text REFERENCES policy(name);
+-- In the admin groups (NETPORTAL_ADMIN_GROUPS): set at login and every offboarding round, checked
+-- on every admin request (the session cookie holds no rights). Offboarding clears it.
+ALTER TABLE person ADD COLUMN IF NOT EXISTS admin boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS device (
     id          uuid PRIMARY KEY,            -- also the certificate subject <id>@<realm>

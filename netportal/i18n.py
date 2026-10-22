@@ -99,6 +99,7 @@ TEXT = {
         "no_access": "Your account has no access to the house Wi-Fi.",
         "error": "Something went wrong. Please try again.",
         "privacy": "Stored: the device's name, when it was added and last connected. Not stored: what you do online.",
+        "house_nav": "House",
     },
     "de": {
         "title": "WLAN",
@@ -194,6 +195,7 @@ TEXT = {
         "no_access": "Dein Konto hat keinen Zugang zum Haus-WLAN.",
         "error": "Etwas ist schiefgegangen. Bitte versuche es noch einmal.",
         "privacy": "Gespeichert: Name des Geräts, wann es hinzugefügt und zuletzt verbunden wurde. Nicht gespeichert: was du im Netz machst.",
+        "house_nav": "Haus",
     },
     "uk": {
         "title": "Wi-Fi",
@@ -289,6 +291,7 @@ TEXT = {
         "no_access": "Ваш акаунт не має доступу до домашнього Wi-Fi.",
         "error": "Щось пішло не так. Спробуйте ще раз.",
         "privacy": "Зберігається: назва пристрою, коли його додано і востаннє підключено. Не зберігається: що ви робите в мережі.",
+        "house_nav": "Будинок",
     },
 }
 
@@ -297,8 +300,11 @@ PLATFORM_LABEL = {"apple": "for_apple", "apple-mac": "for_mac", "android": "for_
                   "eap-config": "for_android_app", "letswifi": "for_app"}
 
 
-def pick(accept_language):
-    """The best language for an Accept-Language header (ru -> uk, default en)."""
+def pick(accept_language, house_lang=None):
+    """The language the resident chose on the house's start page (cookie house_lang on the base
+    domain: de, en or uk), else the best one for the Accept-Language header (ru -> uk, default en)."""
+    if house_lang in TEXT:
+        return house_lang
     for part in (accept_language or "").split(","):
         code = part.split(";")[0].strip().lower()[:2]
         if code in TEXT:

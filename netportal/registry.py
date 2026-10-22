@@ -41,10 +41,15 @@ def token_hash(token):
 
 # --- people ---------------------------------------------------------------------------------
 
-def upsert_person(db, sub, username, display):
-    db.execute("""INSERT INTO person (sub, username, display) VALUES (%s, %s, %s)
-                  ON CONFLICT (sub) DO UPDATE SET username = excluded.username,
-                  display = excluded.display, last_login = now(), offboarded = NULL""", (sub, username, display))
+def upsert_person(db, sub, username, display, admin=False):
+    db.execute("""INSERT INTO person (sub, username, display, admin) VALUES (%s, %s, %s, %s)
+                  ON CONFLICT (sub) DO UPDATE SET username = excluded.username, display = excluded.display,
+                  admin = excluded.admin, last_login = now(), offboarded = NULL""", (sub, username, display, admin))
+
+
+def set_admin(db, sub, admin):
+    """Whether the person is in the admin groups now (the offboarding round, from the directory)."""
+    db.execute("UPDATE person SET admin = %s WHERE sub = %s AND admin IS DISTINCT FROM %s", (admin, sub, admin))
 
 
 def person_policy(db, sub):
@@ -68,9 +73,10 @@ def people(db):
     return {r["sub"]: r for r in db.execute("SELECT sub, username, display FROM person")}
 
 
-def person_active(db, sub):
-    """True while the person has logged in and was not offboarded since."""
-    return db.execute("SELECT 1 FROM person WHERE sub = %s AND offboarded IS NULL", (sub,)).fetchone() is not None
+def person_state(db, sub):
+    """{"admin": bool} while the person is active (logged in, not offboarded since), else None.
+    Asked on every request that needs a login: rights come from here, not from the cookie."""
+    return db.execute("SELECT admin FROM person WHERE sub = %s AND offboarded IS NULL", (sub,)).fetchone()
 
 
 def subjects_to_check(db):
@@ -84,7 +90,7 @@ def subjects_to_check(db):
 
 def offboard_person(db, sub):
     """The person lost access: no portal session, no app grants (devices: revoke each)."""
-    db.execute("UPDATE person SET offboarded = now() WHERE sub = %s AND offboarded IS NULL", (sub,))
+    db.execute("UPDATE person SET offboarded = now(), admin = false WHERE sub = %s AND offboarded IS NULL", (sub,))
     db.execute("UPDATE oauth_grant SET revoked = now() WHERE owner = %s AND revoked IS NULL", (sub,))
 
 

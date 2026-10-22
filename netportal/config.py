@@ -82,6 +82,12 @@ class Settings:
     authentik_token: str = ""     # read-only token (directory-reader)
     passpoint: bool = False       # offer the Passpoint download on Android (UniFi Hotspot 2.0 on)
     logout_url: str = ""         # where "log out" goes (the house's logout page); "" = the portal's own page
+    home_url: str = ""            # the house's start page (the house bar's link home); "" = https://<realm>/
+
+    @property
+    def home(self):
+        """Where the house bar's link goes: the start page of the base domain."""
+        return self.home_url or "https://%s/" % self.realm
 
     @property
     def allowed_groups(self):
@@ -139,4 +145,5 @@ def load():
                                                                   or os.environ.get("NETPORTAL_AUTHENTIK_TOKEN_FILE")) else "",
         passpoint=os.environ.get("NETPORTAL_PASSPOINT", "false").lower() == "true",
         logout_url=os.environ.get("NETPORTAL_LOGOUT_URL", ""),
+        home_url=os.environ.get("NETPORTAL_HOME_URL", ""),
     )

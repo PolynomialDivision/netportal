@@ -22,7 +22,7 @@ decides every Wi-Fi login from the registry.
 
 ```sh
 python3 -m unittest discover -s tests       # unit and profile-format tests
-tests/integration/run.sh                     # whole Wi-Fi path on local Docker (58 checks)
+tests/integration/run.sh                     # whole Wi-Fi path on local Docker (59 checks)
 IMAGES=1 tests/integration/run.sh            # the same against the built images
 ```
 

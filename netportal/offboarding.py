@@ -1,6 +1,7 @@
 """Keep Wi-Fi in line with Authentik: a person who is deactivated, deleted or no longer in the
 allowed groups loses every device (revoked, sessions disconnected), their app grants and
-their portal session. Someone whose groups now give another policy (moved out: residents ->
+their portal session. Admin rights follow the admin groups (stored per person, checked on
+every admin request). Someone whose groups now give another policy (moved out: residents ->
 guests) keeps their devices; they move to that policy's VLAN (Disconnect, authenticate again).
 
 Matches devices to people by the OIDC subject, which for Authentik's default subject mode
@@ -19,7 +20,13 @@ log = logging.getLogger("netportal.offboarding")
 
 def allowed_subjects(api, token, settings, timeout=15):
     """{uid: policy name} of every active user who may use Wi-Fi; raises on any API problem."""
-    url, allowed, seen = api + "/core/users/?page_size=100&include_groups=true", {}, 0
+    return read_directory(api, token, settings, timeout)[0]
+
+
+def read_directory(api, token, settings, timeout=15):
+    """({uid: policy name} of every active user who may use Wi-Fi, {uid} of the active admins);
+    raises on any API problem."""
+    url, allowed, admins, seen = api + "/core/users/?page_size=100&include_groups=true", {}, set(), 0
     while url:
         resp = requests.get(url, headers={"Authorization": "Bearer " + token}, timeout=timeout)
         resp.raise_for_status()
@@ -30,10 +37,12 @@ def allowed_subjects(api, token, settings, timeout=15):
             policy = settings.policy_for(names)
             if user.get("is_active") and policy and user.get("uid"):
                 allowed[user["uid"]] = policy
+                if names & settings.admin_groups:
+                    admins.add(user["uid"])
         url = (data.get("pagination") or {}).get("next") and _next_url(api, data)
     if seen == 0:
         raise RuntimeError("Authentik returned no users; refusing to offboard everyone")
-    return allowed
+    return allowed, admins
 
 
 def _next_url(api, data):
@@ -45,12 +54,14 @@ def run(settings):
     """One reconciliation. Returns the number of devices revoked."""
     if not settings.authentik_api or not settings.authentik_token:
         return 0
-    allowed = allowed_subjects(settings.authentik_api, settings.authentik_token, settings)
+    allowed, admins = read_directory(settings.authentik_api, settings.authentik_token, settings)
     revoked = moved = 0
     with registry.connect(settings.database_url) as db:
         subjects = registry.subjects_to_check(db)
         for sub in sorted(subjects & set(allowed)):
             moved += web.apply_policy(db, sub, allowed[sub], "offboarding", settings)
+            registry.set_admin(db, sub, sub in admins)      # removed from it-admins: no /admin from now on
+            db.commit()
         for sub in sorted(subjects - set(allowed)):
             registry.offboard_person(db, sub)
             db.commit()
