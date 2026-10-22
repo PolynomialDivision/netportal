@@ -4,6 +4,7 @@ Every value is required unless it has a default; a missing one stops the portal 
 """
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,39 @@ def _secret(name):
 
 
 @dataclass(frozen=True)
+class Policy:
+    """Where a person's devices go: a name, the VLAN RADIUS assigns, the groups it is for."""
+    name: str
+    vlan: int
+    groups: frozenset
+
+
+def parse_policies(text):
+    """NETPORTAL_POLICIES: "name=vlan:group,group;name=vlan:group" in order of precedence (a
+    person in the groups of two policies gets the first). Raises on anything unclear."""
+    policies, seen_groups = [], set()
+    for part in (p.strip() for p in text.split(";")):
+        if not part:
+            continue
+        m = re.fullmatch(r"([a-z0-9][a-z0-9-]*)=(\d+):(.+)", part)
+        if not m:
+            raise RuntimeError("NETPORTAL_POLICIES: %r is not name=vlan:group,group" % part)
+        name, vlan = m.group(1), int(m.group(2))
+        groups = frozenset(g.strip() for g in m.group(3).split(",") if g.strip())
+        if not 1 <= vlan <= 4094:
+            raise RuntimeError("NETPORTAL_POLICIES: VLAN %d of %s is not 1-4094" % (vlan, name))
+        if name in {p.name for p in policies}:
+            raise RuntimeError("NETPORTAL_POLICIES: %s twice" % name)
+        if not groups or groups & seen_groups:
+            raise RuntimeError("NETPORTAL_POLICIES: %s needs groups that no other policy has" % name)
+        seen_groups |= groups
+        policies.append(Policy(name, vlan, groups))
+    if not policies:
+        raise RuntimeError("NETPORTAL_POLICIES: no policy")
+    return tuple(policies)
+
+
+@dataclass(frozen=True)
 class Settings:
     base_url: str                 # https://wifi.scharni.org
     realm: str                    # scharni.org (outer identity realm, Passpoint FQDN)
@@ -35,12 +69,11 @@ class Settings:
     oidc_issuer: str              # https://login.scharni.org/application/o/netportal/
     oidc_client_id: str
     oidc_client_secret: str
-    allowed_groups: frozenset     # may enrol devices
-    admin_groups: frozenset       # may see and revoke every device
+    policies: tuple               # Policy, in order of precedence: who may enrol, and into which VLAN
+    admin_groups: frozenset       # may see and revoke every device (their devices: the first policy)
     root_cert: Path               # PEM of the offline root (the anchor in every profile)
     device_ca_cert: Path          # PEM of the device CA
     device_ca_key: bytes          # PEM key of the device CA (secret): NETPORTAL_DEVICE_CA_KEY_B64 or a file
-    default_vlan: int = 30        # VLAN of the default policy "residents"
     cert_days: int = 365
     renew_overlap_days: int = 2   # previous certificate stays valid this long after a renewal
     dae_port: int = 3799
@@ -49,6 +82,19 @@ class Settings:
     authentik_token: str = ""     # read-only token (directory-reader)
     passpoint: bool = False       # offer the Passpoint download on Android (UniFi Hotspot 2.0 on)
     logout_url: str = ""         # where "log out" goes (the house's logout page); "" = the portal's own page
+
+    @property
+    def allowed_groups(self):
+        """May enrol devices: the groups of every policy."""
+        return frozenset().union(*(p.groups for p in self.policies))
+
+    def policy_for(self, groups):
+        """The name of the policy for someone in these groups, or None (no Wi-Fi)."""
+        groups = set(groups)
+        for policy in self.policies:
+            if groups & policy.groups:
+                return policy.name
+        return self.policies[0].name if groups & self.admin_groups else None
 
 
 def _device_ca_key():
@@ -75,12 +121,14 @@ def load():
         oidc_issuer=_env("NETPORTAL_OIDC_ISSUER"),
         oidc_client_id=_env("NETPORTAL_OIDC_CLIENT_ID"),
         oidc_client_secret=_secret("NETPORTAL_OIDC_CLIENT_SECRET"),
-        allowed_groups=groups("NETPORTAL_ALLOWED_GROUPS", "residents"),
+        # NETPORTAL_POLICIES, or (as before 2026-10-22) one policy "residents" with
+        # NETPORTAL_DEFAULT_VLAN and NETPORTAL_ALLOWED_GROUPS
+        policies=parse_policies(os.environ["NETPORTAL_POLICIES"]) if os.environ.get("NETPORTAL_POLICIES") else (
+            Policy("residents", int(_env("NETPORTAL_DEFAULT_VLAN")), groups("NETPORTAL_ALLOWED_GROUPS", "residents")),),
         admin_groups=groups("NETPORTAL_ADMIN_GROUPS", "it-admins"),
         root_cert=Path(_env("NETPORTAL_ROOT_CERT")),
         device_ca_cert=Path(_env("NETPORTAL_DEVICE_CA_CERT")),
         device_ca_key=_device_ca_key(),
-        default_vlan=int(_env("NETPORTAL_DEFAULT_VLAN")),
         cert_days=int(_env("NETPORTAL_CERT_DAYS", "365")),
         renew_overlap_days=int(_env("NETPORTAL_RENEW_OVERLAP_DAYS", "2")),
         dae_port=int(_env("NETPORTAL_DAE_PORT", "3799")),

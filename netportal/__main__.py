@@ -19,7 +19,7 @@ def cmd_init_db(args):
     from . import config, registry
     settings = config.load()
     with registry.connect(settings.database_url) as db:
-        registry.init(db, settings.default_vlan)
+        registry.init(db, settings.policies)
     print("schema ready")
 
 

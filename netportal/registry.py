@@ -20,10 +20,11 @@ def connect(dsn):
     return psycopg.connect(dsn, row_factory=dict_row)
 
 
-def init(db, default_vlan):
+def init(db, policies):
     db.execute(resources.files("netportal").joinpath("schema.sql").read_text())
-    db.execute("""INSERT INTO policy (name, vlan) VALUES ('residents', %s)
-                  ON CONFLICT (name) DO UPDATE SET vlan = excluded.vlan""", (default_vlan,))
+    for policy in policies:
+        db.execute("""INSERT INTO policy (name, vlan) VALUES (%s, %s)
+                      ON CONFLICT (name) DO UPDATE SET vlan = excluded.vlan""", (policy.name, policy.vlan))
     # A fresh registry counts as reconciled now: an offboarding that never succeeds alerts an
     # hour later instead of never.
     db.execute("INSERT INTO job (name, last_success) VALUES ('offboarding', now()) ON CONFLICT (name) DO NOTHING")
@@ -44,6 +45,23 @@ def upsert_person(db, sub, username, display):
     db.execute("""INSERT INTO person (sub, username, display) VALUES (%s, %s, %s)
                   ON CONFLICT (sub) DO UPDATE SET username = excluded.username,
                   display = excluded.display, last_login = now(), offboarded = NULL""", (sub, username, display))
+
+
+def person_policy(db, sub):
+    row = db.execute("SELECT policy FROM person WHERE sub = %s", (sub,)).fetchone()
+    return row["policy"] if row else None
+
+
+def set_policy(db, sub, policy):
+    """The person's policy now; their active devices that had another one move with it.
+    Returns [(device id, latest RADIUS session or None)] of the moved devices: a Disconnect
+    makes each authenticate again, into the new VLAN."""
+    db.execute("UPDATE person SET policy = %s WHERE sub = %s AND policy IS DISTINCT FROM %s", (policy, sub, policy))
+    moved = [r["id"] for r in db.execute("""UPDATE device SET policy = %s
+                                            WHERE owner = %s AND revoked IS NULL AND policy <> %s
+                                            RETURNING id""", (policy, sub, policy))]
+    return [(device_id, db.execute("SELECT nas_ip, calling_station, user_name FROM radius_session WHERE device_id = %s",
+                                   (device_id,)).fetchone()) for device_id in moved]
 
 
 def people(db):
@@ -72,7 +90,7 @@ def offboard_person(db, sub):
 
 # --- devices ----------------------------------------------------------------------------------
 
-def create_device(db, owner, name, platform, policy="residents"):
+def create_device(db, owner, name, platform, policy):
     device_id = uuid.uuid4()
     db.execute("INSERT INTO device (id, owner, name, kind, platform, policy) VALUES (%s, %s, %s, 'cert', %s, %s)",
                (device_id, owner, name, platform, policy))

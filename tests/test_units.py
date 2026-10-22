@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from netportal import disconnect, i18n, web  # noqa: E402
+from netportal import config, disconnect, i18n, offboarding, web  # noqa: E402
 
 
 class RedirectTests(unittest.TestCase):
@@ -154,6 +154,58 @@ class OffboardSidecarTests(unittest.TestCase):
         def boom(settings):
             raise RuntimeError("authentik down")
         self.assertEqual(self.run_once(boom), (1, True, 1))
+
+
+class PolicyTests(unittest.TestCase):
+    """NETPORTAL_POLICIES: which VLAN a person's devices go to (2026-10-22: guests)."""
+
+    TEXT = "residents=30:residents,house-admins,it-admins; guests=50:former-residents"
+
+    def settings(self, text=TEXT):
+        import dataclasses
+        fields = {f.name: None for f in dataclasses.fields(config.Settings) if f.default is dataclasses.MISSING}
+        return config.Settings(**dict(fields, policies=config.parse_policies(text), admin_groups=frozenset({"it-admins"})))
+
+    def test_parse(self):
+        policies = config.parse_policies(self.TEXT)
+        self.assertEqual([(p.name, p.vlan) for p in policies], [("residents", 30), ("guests", 50)])
+        self.assertEqual(policies[1].groups, frozenset({"former-residents"}))
+        for bad in ("", "residents=30", "residents=0:residents", "residents=4095:residents", "Residents=30:residents",
+                    "residents=30:residents;residents=40:guests", "residents=30:residents;guests=50:residents",
+                    "residents=30: , "):
+            with self.assertRaises(RuntimeError, msg=bad):
+                config.parse_policies(bad)
+
+    def test_policy_for(self):
+        s = self.settings()
+        self.assertEqual(s.policy_for({"residents"}), "residents")
+        self.assertEqual(s.policy_for({"former-residents"}), "guests")
+        self.assertEqual(s.policy_for({"former-residents", "residents"}), "residents")   # moving out: the first
+        self.assertEqual(s.policy_for({"it-admins"}), "residents")
+        self.assertIsNone(s.policy_for({"vpn-users"}))
+        self.assertIsNone(s.policy_for(set()))
+        self.assertEqual(s.allowed_groups, {"residents", "house-admins", "it-admins", "former-residents"})
+
+    def test_the_old_settings_give_one_policy(self):
+        from unittest import mock
+        env = {"NETPORTAL_DEFAULT_VLAN": "30", "NETPORTAL_ALLOWED_GROUPS": "residents,house-admins"}
+        with mock.patch.dict("os.environ", env, clear=True), \
+                mock.patch.object(config, "_env", side_effect=lambda name, default=None: env.get(name, default or "x")), \
+                mock.patch.object(config, "_secret", return_value="x"), \
+                mock.patch.object(config, "_device_ca_key", return_value=b"x"):
+            policies = config.load().policies
+        self.assertEqual(policies, (config.Policy("residents", 30, frozenset({"residents", "house-admins"})),))
+
+    def test_offboarding_reads_the_policy_per_person(self):
+        from unittest import mock
+        users = [{"uid": "a", "is_active": True, "groups_obj": [{"name": "residents"}]},
+                 {"uid": "f", "is_active": True, "groups_obj": [{"name": "former-residents"}]},
+                 {"uid": "x", "is_active": False, "groups_obj": [{"name": "residents"}]},
+                 {"uid": "v", "is_active": True, "groups_obj": [{"name": "vpn-users"}]}]
+        reply = mock.Mock(**{"json.return_value": {"results": users, "pagination": {"next": 0}}})
+        with mock.patch("netportal.offboarding.requests.get", return_value=reply):
+            self.assertEqual(offboarding.allowed_subjects("http://ak/api/v3", "t", self.settings()),
+                             {"a": "residents", "f": "guests"})
 
 
 if __name__ == "__main__":

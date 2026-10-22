@@ -14,9 +14,12 @@ CREATE TABLE IF NOT EXISTS person (
 ALTER TABLE person ADD COLUMN IF NOT EXISTS offboarded timestamptz;
 
 CREATE TABLE IF NOT EXISTS policy (
-    name  text PRIMARY KEY,                  -- residents (default), later iot, vpn-<exit> ...
+    name  text PRIMARY KEY,                  -- residents, guests (NETPORTAL_POLICIES), later iot, vpn-<exit> ...
     vlan  integer NOT NULL CHECK (vlan BETWEEN 1 AND 4094)
 );
+-- The policy the person's groups give (at login and every offboarding round); their devices
+-- follow it. NULL: not known yet (logged in before 2026-10-22, until the next round).
+ALTER TABLE person ADD COLUMN IF NOT EXISTS policy text REFERENCES policy(name);
 
 CREATE TABLE IF NOT EXISTS device (
     id          uuid PRIMARY KEY,            -- also the certificate subject <id>@<realm>
@@ -103,7 +106,7 @@ CREATE OR REPLACE VIEW radius_cert AS
       AND c.not_after > now()
       AND (c.retired_after IS NULL OR c.retired_after > now());
 
--- The default policy 'residents' and its VLAN are set by registry.init (NETPORTAL_DEFAULT_VLAN).
+-- The policies and their VLANs are set by registry.init (NETPORTAL_POLICIES).
 
 -- FreeRADIUS's role (created by the stack): read the decision view, write the latest session.
 DO $$

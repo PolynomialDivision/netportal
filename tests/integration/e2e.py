@@ -53,10 +53,11 @@ ALICE = ("sub-alice", "alice", ["residents"], True)
 CAROL = ("sub-carol", "carol", ["residents"], True)
 ADMIN = ("sub-admin", "admin", ["it-admins"], True)
 BOB = ("sub-bob", "bob", ["vpn-users"], True)
+FIA = ("sub-fia", "fia", ["former-residents"], True)      # moved out before (policy guests)
 
 
-def login(person, ua="Mozilla/5.0 (Linux; Android 16)"):
-    users(person, ALICE, CAROL, ADMIN, BOB)
+def login(person, ua="Mozilla/5.0 (Linux; Android 16)", others=(ALICE, CAROL, ADMIN, BOB)):
+    users(person, *others)
     s = requests.Session()
     s.headers.update({"User-Agent": ua, "Accept-Language": "en"})
     r = s.get(PORTAL + "/login")
@@ -313,7 +314,39 @@ def main():
           and "Alice" in page.text, page.status_code)
     check("a resident cannot open the admin view", s.get(PORTAL + "/admin").status_code == 403)
 
+    # --- guests: former residents get the guests' VLAN (2026-10-22) ---------------------
+    f, r = login(FIA)
+    check("a former resident logs in", r.status_code == 200 and "Your devices" in r.text, r.status_code)
+    key, cert, chain = from_eap_config(f.get(PORTAL + enrol(f, "eap-config", "fia phone")).content)
+    write_client("fia", key, cert, chain)
+    verdict = connect("fia")
+    check("... and her device connects into the guests' VLAN 50", verdict == ("accept", "50"), verdict)
+    c, _ = login(CAROL)
+    key, cert, chain = from_eap_config(c.get(PORTAL + enrol(c, "eap-config", "carol phone")).content)
+    write_client("carol", key, cert, chain)
+    verdict = connect("carol")
+    check("a resident's device connects into VLAN 30", verdict == ("accept", "30"), verdict)
+    carol_phone = sql("SELECT id FROM device WHERE owner = 'sub-carol' AND name = 'carol phone'")[0][0]
+    sql("UPDATE radius_session SET nas_ip = '10.199.0.11'")        # the fake access point
+    users(("sub-carol", "carol", ["former-residents"], True), ALICE, ADMIN, FIA)   # carol moved out
+    out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
+    check("offboarding runs after someone moved out", out.returncode == 0, out.stderr[-300:])
+    actions = {r[0] for r in sql("SELECT action FROM audit WHERE device_id = %s", carol_phone)}
+    check("... her device moves to the guests' policy with a Disconnect, and is not revoked",
+          {"policy:guests", "disconnect:ack"} <= actions
+          and sql("SELECT policy, revoked FROM device WHERE id = %s", carol_phone)[0] == ("guests", None), actions)
+    verdict = connect("carol")
+    check("... and connects into VLAN 50 from then on", verdict == ("accept", "50"), verdict)
+    c, r = login(("sub-carol", "carol", ["former-residents"], True), others=(ALICE, ADMIN, FIA))
+    key, cert, chain = from_eap_config(c.get(PORTAL + enrol(c, "eap-config", "carol tablet")).content)
+    write_client("carol-tablet", key, cert, chain)
+    verdict = connect("carol-tablet")
+    check("... and a device she enrols now too", verdict == ("accept", "50"), verdict)
+    page = a.get(PORTAL + "/admin")
+    check("the admin view shows each device's policy", "· guests ·" in page.text and "· residents ·" in page.text)
+
     # --- offboarding ----------------------------------------------------------------------
+    s, _ = login(ALICE)
     form_before = csrf(s)                 # alice's portal session from before she left
     users(("sub-alice", "alice", [], True), CAROL, ADMIN)
     out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)

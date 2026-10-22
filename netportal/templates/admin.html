@@ -10,7 +10,7 @@
     {% for d in devices %}
       <tr>
         <td>{{ people.get(d.owner, {}).get("display", d.owner) }}</td>
-        <td>{{ d.name }}<br><span class="muted small">{{ t[platform_label.get(d.platform, 'for_app')] }} · {{ d.created.strftime(t.date_format) }}</span></td>
+        <td>{{ d.name }}<br><span class="muted small">{{ t[platform_label.get(d.platform, 'for_app')] }} · {{ d.policy }} · {{ d.created.strftime(t.date_format) }}</span></td>
         <td{% if expires_soon(d.expires) %} class="warn"{% endif %}>{{ d.expires.strftime(t.date_format) if d.expires else "–" }}</td>
         <td>{{ d.last_seen.strftime(t.date_format) if d.last_seen else t.never }}</td>
         <td>

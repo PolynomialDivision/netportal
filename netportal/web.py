@@ -166,12 +166,13 @@ def create_app(settings=None):
             return render_template("message.html", message=g.t["error"]), 400
         claims = token.get("userinfo") or {}
         groups = set(claims.get("groups") or [])
-        allowed = bool(groups & settings.allowed_groups) or bool(groups & settings.admin_groups)
-        if not claims.get("sub") or not allowed:
+        policy = settings.policy_for(groups)
+        if not claims.get("sub") or policy is None:
             session.clear()
             return render_template("message.html", message=g.t["no_access"]), 403
         username = claims.get("preferred_username") or claims["sub"]
         registry.upsert_person(g.db, claims["sub"], username, claims.get("name") or username)
+        apply_policy(g.db, claims["sub"], policy, claims["sub"], settings)
         nxt = session.pop("next", None)
         session.clear()
         session["user"] = {"sub": claims["sub"], "username": username, "name": claims.get("name") or username,
@@ -216,7 +217,7 @@ def create_app(settings=None):
         if fmt not in FORMATS or (fmt == "android" and not settings.passpoint):
             abort(400)
         name = (request.form.get("name") or "").strip()[:60] or default_name(fmt)
-        device_id = registry.create_device(g.db, user["sub"], name, fmt)
+        device_id = registry.create_device(g.db, user["sub"], name, fmt, owner_policy(g.db, user["sub"], settings))
         registry.audit(g.db, user["sub"], "enrol:" + fmt, device_id)
         token = registry.create_download(g.db, device_id, fmt)
         metrics.ENROLMENTS.labels(fmt).inc()
@@ -348,7 +349,8 @@ def create_app(settings=None):
             return _oauth_error("invalid_token", 401)
         device_id = row["device_id"]
         if device_id is None:                          # first eap-config of this grant: the device
-            device_id = registry.create_device(g.db, row["owner"], row["device_name"], "letswifi")
+            device_id = registry.create_device(g.db, row["owner"], row["device_name"], "letswifi",
+                                               owner_policy(g.db, row["owner"], settings))
             registry.bind_grant(g.db, row["grant_id"], device_id)
             registry.audit(g.db, row["owner"], "enrol:letswifi", device_id)
             metrics.ENROLMENTS.labels("letswifi").inc()
@@ -408,6 +410,28 @@ def revoke_now(db, device_id, actor_sub, settings):
     metrics.DISCONNECTS.labels(result).inc()
     log.info("revoked device %s by %s; disconnect: %s", device_id, actor_sub, result)
     return result
+
+
+def owner_policy(db, sub, settings):
+    """The policy for a new device of this person: theirs from the last login or offboarding
+    round, the first one if none is known yet."""
+    return registry.person_policy(db, sub) or settings.policies[0].name
+
+
+def apply_policy(db, sub, policy, actor_sub, settings):
+    """Give the person this policy; a device that had another one gets a Disconnect-Request and
+    authenticates again into the policy's VLAN (someone moved out: residents -> guests).
+    Returns the number of devices moved."""
+    moved = registry.set_policy(db, sub, policy)
+    db.commit()
+    for device_id, sess in moved:
+        registry.audit(db, actor_sub, "policy:" + policy, device_id)
+        result = disconnect.disconnect(sess, settings.dae_secret, port=settings.dae_port) if sess else "no-session"
+        registry.audit(db, actor_sub, "disconnect:" + result, device_id)
+        db.commit()
+        metrics.DISCONNECTS.labels(result).inc()
+        log.info("moved device %s to policy %s by %s; disconnect: %s", device_id, policy, actor_sub, result)
+    return len(moved)
 
 
 def _origin(uri):
