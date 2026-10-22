@@ -32,6 +32,9 @@ ACCESS_SECONDS, CODE_SECONDS, REFRESH_SECONDS = 3600, 300, 400 * 86400
 # latest, however busy (the login is automatic through the house account).
 SESSION_IDLE_SECONDS, SESSION_MAX_SECONDS = 8 * 3600, 12 * 3600
 FORMATS = ("apple", "apple-mac", "android", "eap-config")
+# The app's authorization request, as the consent form sends it back (templates/consent.html).
+CONSENT_ARGS = ("client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state",
+                "scope")
 
 
 def platform_of(user_agent):
@@ -160,9 +163,22 @@ def create_app(settings=None):
         g.user = dict(g.user, admin=bool(state["admin"]))
         return g.user
 
+    def return_to():
+        """Where the login goes back to: the page itself for a GET. A form sent once the session
+        has ended goes back to the page it came from (the consent page with the app's request, the
+        admin page), else to the start page: its POST URL would answer the redirect with 405, and
+        the form is not sent again."""
+        if request.method in ("GET", "HEAD"):
+            return request.full_path
+        if request.endpoint == "oauth_authorize":
+            return url_for("oauth_authorize", **{k: request.form[k] for k in CONSENT_ARGS if request.form.get(k)})
+        if request.form.get("back") == "/admin":
+            return url_for("admin")
+        return url_for("index")
+
     def need_user(admin=False):
         if not load_user():
-            session["next"] = request.full_path
+            session["next"] = return_to()
             abort(redirect(url_for("login")))
         if admin and not g.user["admin"]:
             abort(403)
@@ -328,7 +344,8 @@ def create_app(settings=None):
             return redirect(_with_query(redirect_uri, error="invalid_request", state=state))
         if request.method == "GET":
             g.form_action = "'self' %s" % _origin(redirect_uri)
-            return render_template("consent.html", args=args, name=default_name("letswifi"))
+            return render_template("consent.html", args=args, consent_args=CONSENT_ARGS,
+                                   name=default_name("letswifi"))
         name = (request.form.get("name") or "").strip()[:60] or default_name("letswifi")
         grant_id = registry.create_grant(g.db, user["sub"], args["client_id"], name)
         code = registry.issue_token(g.db, grant_id, "code", CODE_SECONDS, args["code_challenge"], redirect_uri)

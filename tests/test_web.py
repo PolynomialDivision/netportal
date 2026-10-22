@@ -121,6 +121,63 @@ class SessionAgeTests(PortalTestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp.headers["Location"])
 
+    def expire(self, sub=RESIDENT_SUB):
+        self.state[sub] = {"admin": sub == ADMIN_SUB}
+        self.log_in(sub, login_at=int(time.time()) - web.SESSION_MAX_SECONDS - 5)
+
+    def next_after_login(self):
+        with self.client.session_transaction() as sess:
+            return sess.get("next")
+
+    def log_in_again(self, sub=RESIDENT_SUB):
+        claims = {"sub": sub, "preferred_username": sub, "name": sub, "groups": ["residents"]}
+        with mock.patch("authlib.integrations.flask_client.apps.FlaskOAuth2App.authorize_access_token",
+                        return_value={"userinfo": claims}), \
+                mock.patch.object(web.registry, "upsert_person"), \
+                mock.patch.object(web.registry, "set_policy", return_value=[]):
+            return self.client.get("/auth/callback")
+
+    def test_a_page_asked_for_after_the_limit_is_where_the_login_goes_back_to(self):
+        self.expire(ADMIN_SUB)
+        self.client.get("/admin")
+        self.assertEqual(self.next_after_login(), "/admin?")
+        self.assertEqual(self.log_in_again(ADMIN_SUB).headers["Location"].rstrip("?"), "/admin")
+
+    def test_a_form_sent_after_the_limit_goes_back_to_a_page_not_to_its_post_url(self):
+        self.expire()
+        self.client.post("/enroll", data={"csrf": "example-csrf", "format": "apple"})
+        self.assertEqual(self.next_after_login(), "/")
+        resp = self.log_in_again()
+        self.assertEqual(resp.headers["Location"], "/")
+        self.assertEqual(self.client.get(resp.headers["Location"]).status_code, 200)   # not 405
+        # revoked from the admin page: back to the admin page
+        self.expire(ADMIN_SUB)
+        self.client.post("/devices/00000000-0000-4000-8000-000000000001/revoke",
+                         data={"csrf": "example-csrf", "back": "/admin"})
+        self.assertEqual(self.next_after_login(), "/admin")
+        # anything else in "back": the start page
+        self.expire()
+        self.client.post("/devices/00000000-0000-4000-8000-000000000001/revoke",
+                         data={"csrf": "example-csrf", "back": "https://evil.example.org/"})
+        self.assertEqual(self.next_after_login(), "/")
+
+    def test_a_consent_sent_after_the_limit_shows_the_consent_page_again(self):
+        self.expire()
+        form = {"csrf": "example-csrf", "name": "Example phone", "client_id": "app.eduroam.geteduroam",
+                "redirect_uri": "app.eduroam.geteduroam:/", "response_type": "code", "state": "example-state",
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "code_challenge_method": "S256"}
+        self.client.post("/oauth/authorize", data=form)
+        nxt = self.next_after_login()
+        path, _, query = nxt.partition("?")
+        self.assertEqual(path, "/oauth/authorize")
+        sent = dict(web.urllib.parse.parse_qsl(query))
+        self.assertEqual(sent, {k: v for k, v in form.items() if k not in ("csrf", "name")})
+        resp = self.log_in_again()
+        self.assertEqual(resp.headers["Location"], nxt)
+        page = self.client.get(nxt)
+        self.assertEqual(page.status_code, 200)            # the consent page, its form again
+        self.assertIn('name="code_challenge"', page.get_data(as_text=True))
+
     def test_the_login_records_its_time_and_the_rights_go_to_the_registry(self):
         claims = {"sub": ADMIN_SUB, "preferred_username": "admin", "name": "Admin", "groups": ["it-admins"]}
         with mock.patch("authlib.integrations.flask_client.apps.FlaskOAuth2App.authorize_access_token",

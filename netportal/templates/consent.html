@@ -6,7 +6,7 @@
   <p class="muted">{{ t.consent_note.format(ssid=settings.ssid) }}</p>
   <form method="post" action="{{ url_for('oauth_authorize') }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    {% for key in ("client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state", "scope") %}
+    {% for key in consent_args %}
       {% if args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ args.get(key) }}">{% endif %}
     {% endfor %}
     <label class="field">{{ t.device_name }}
