@@ -63,6 +63,33 @@ class PortalTestCase(unittest.TestCase):
             sess.permanent = True
 
 
+class BrowserNoticeTests(PortalTestCase):
+    """Firefox on Android saves the Passpoint file instead of installing it (2026-10-23)."""
+    FIREFOX = "Mozilla/5.0 (Android 15; Mobile; rv:158.0) Gecko/158.0 Firefox/158.0"
+    CHROME = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Mobile Safari/537.36"
+
+    def setUp(self):
+        super().setUp()
+        self.settings = example_settings(passpoint=True)        # the Passpoint download on, as in the house
+        self.app = web.create_app(self.settings)
+        self.client = self.app.test_client()
+
+    def page(self, ua):
+        self.state[RESIDENT_SUB] = {"admin": False}
+        self.log_in(RESIDENT_SUB)
+        return self.client.get("/", headers={"User-Agent": ua, "Accept-Language": "de"}).get_data(as_text=True)
+
+    def test_firefox_on_android_is_told_and_gets_the_app_first(self):
+        page = self.page(self.FIREFOX)
+        self.assertIn(i18n.TEXT["de"]["other_browser"], page)
+        self.assertLess(page.index('value="eap-config"'), page.index('value="android"'))
+
+    def test_chrome_on_android_is_not(self):
+        page = self.page(self.CHROME)
+        self.assertNotIn(i18n.TEXT["de"]["other_browser"], page)
+        self.assertLess(page.index('value="android"'), page.index('value="eap-config"'))
+
+
 class AdminRightsTests(PortalTestCase):
     def test_admin_from_the_registry(self):
         self.state[ADMIN_SUB] = {"admin": True}

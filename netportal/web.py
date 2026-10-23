@@ -37,6 +37,14 @@ CONSENT_ARGS = ("client_id", "redirect_uri", "response_type", "code_challenge", 
                 "scope")
 
 
+def no_passpoint_browser(user_agent):
+    """An Android browser that saves a Passpoint file instead of handing it to Android's
+    installer: Firefox and its kin (Gecko). Only Chromium browsers (Chrome, Vanadium, Samsung
+    Internet, Edge) install it; Firefox 158 on Android 15 downloaded the XML (2026-10-23)."""
+    ua = user_agent or ""
+    return "Android" in ua and ("Firefox/" in ua or ("Gecko/" in ua and "like Gecko" not in ua))
+
+
 def platform_of(user_agent):
     """The enrolment options for this browser, best first."""
     ua = user_agent or ""
@@ -44,6 +52,8 @@ def platform_of(user_agent):
         return ["apple"]
     if "Macintosh" in ua:            # a Mac, or an iPad asking for the desktop site
         return ["apple-mac", "apple"]
+    if no_passpoint_browser(ua):     # the app first: the Passpoint file does not install here
+        return ["android-app", "android"]
     if "Android" in ua:
         return ["android", "android-app"]
     if "Windows" in ua:
@@ -143,7 +153,8 @@ def create_app(settings=None):
     @app.context_processor
     def _context():
         return {"t": g.t, "lang": g.lang, "user": g.user, "csrf": session.get("csrf"), "settings": settings,
-                "host": urllib.parse.urlsplit(settings.base_url).netloc, "platform_label": i18n.PLATFORM_LABEL}
+                "host": urllib.parse.urlsplit(settings.base_url).netloc, "platform_label": i18n.PLATFORM_LABEL,
+                "no_passpoint_browser": no_passpoint_browser(request.user_agent.string)}
 
     def end_login():
         session.pop("user", None)

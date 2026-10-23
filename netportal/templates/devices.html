@@ -25,6 +25,9 @@
   {% else %}
   <p class="muted">{{ t.intro }}</p>
   {% endif %}
+  {% if no_passpoint_browser %}
+  <div class="notice"><svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg><p>{{ t.other_browser }}</p></div>
+  {% endif %}
   {% for opt in options %}
     {% set primary = loop.first %}
     {% if opt == "apple" %}{{ enrol_button("apple", t.connect_apple if primary else t.for_apple, "phone", primary) }}

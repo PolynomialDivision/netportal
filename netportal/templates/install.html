@@ -5,6 +5,9 @@
 <section class="card">
   <p class="eyebrow">{{ t.add_device }}</p>
   <h1>{{ name }}</h1>
+  {% if fmt == "android" and no_passpoint_browser %}
+  <div class="notice"><svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg><p>{{ t.other_browser }}</p></div>
+  {% endif %}
   <ol class="steps">
     {% for step in steps %}<li>{{ step.format(ssid=settings.ssid, host=host) }}</li>{% endfor %}
   </ol>

@@ -56,6 +56,16 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(web.platform_of(ua), expected, ua)
         self.assertEqual(len(web.platform_of("curl/8")), 6)
 
+    def test_firefox_on_android_gets_the_app_first(self):
+        # 2026-10-23: Firefox saved the Passpoint file as XML instead of installing it
+        firefox = "Mozilla/5.0 (Android 15; Mobile; rv:158.0) Gecko/158.0 Firefox/158.0"
+        chrome = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Mobile Safari/537.36"
+        self.assertTrue(web.no_passpoint_browser(firefox))
+        self.assertFalse(web.no_passpoint_browser(chrome))
+        self.assertFalse(web.no_passpoint_browser("Mozilla/5.0 (X11; Linux x86_64; rv:158.0) Gecko/20100101 Firefox/158.0"))
+        self.assertEqual(web.platform_of(firefox), ["android-app", "android"])
+        self.assertEqual(web.enrol_options(firefox, passpoint=False), ["android-app"])
+
     def test_passpoint_off_puts_the_app_first(self):
         android = "Mozilla/5.0 (Linux; Android 16; Pixel 9)"
         self.assertEqual(web.enrol_options(android, passpoint=False), ["android-app"])
