@@ -253,6 +253,21 @@ details.danger[open] > summary { color: var(--danger); }
 .dev-state.state-offline, .dev-state.state-unknown, .dev-state.state-never_connected { color: var(--muted); }
 .dev-state.state-offline strong, .dev-state.state-unknown strong, .dev-state.state-never_connected strong { color: var(--text); }
 .state-more { color: var(--muted); font-weight: 400; }
+/* connecting: a neutral state on its way (not an error); the icon turns slowly */
+.dev-state.state-connecting { color: var(--text); }
+.dev-state.state-connecting .icon { color: var(--muted); animation: spin 2.4s linear infinite; }
+.dev-icon.state-connecting { background: var(--bg-2); color: var(--text); }
+.adm-state.state-connecting { background: var(--bg-2); color: var(--text); }
+/* "Confirmed 12 s ago by Wi-Fi session records": its own line under the state */
+.state-confirmed { flex-basis: 100%; font-size: .82rem; color: var(--muted); font-weight: 400; }
+.dev-state time[title] { text-decoration: underline dotted; text-decoration-color: var(--line); text-underline-offset: .15em; }
+/* the admin's view of how the state was decided */
+.presence-admin:empty { display: none; }
+.pr-admin { margin: .6rem 0 0; font-size: .88rem; }
+.pr-admin > summary { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; color: var(--muted); min-height: 44px; }
+.pr-admin > summary .icon { width: 1rem; height: 1rem; }
+.pr-evidence { margin: 0; padding-left: 1.1rem; }
+.pr-evidence li { margin: .1rem 0; }
 
 .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem 1rem; margin: 1rem 0 0; }
 .facts:empty { display: none; }
@@ -719,7 +734,7 @@ tr.job-error td { color: var(--danger); font-size: .78rem; padding-top: 0; }
   .needs-js { display: none !important; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .live-line.busy .icon, .history-status .loading::before { animation: none; }
+  .live-line.busy .icon, .history-status .loading::before, .dev-state.state-connecting .icon { animation: none; }
   .adm-chevron, .history[aria-busy="true"] .chart-host { transition: none; }
 }
 @media (forced-colors: active) {

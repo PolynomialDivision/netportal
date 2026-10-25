@@ -88,6 +88,10 @@ class Settings:
     prometheus_url: str = ""
     prometheus_timeout: float = 4.0   # seconds per query
     timezone: str = "Europe/Berlin"   # the house's days (the history's 1y/all points, the rollups' days)
+    # RADIUS accounting interval in seconds (NETPORTAL_ACCT_INTERIM_S; FreeRADIUS sends the same
+    # value as Acct-Interim-Interval): presence calls a session abandoned after 2 x this + 60 s
+    # without an update, unless the interval measured from the session's own updates is known
+    acct_interim_s: int = 300
 
     @property
     def home(self):
@@ -154,7 +158,16 @@ def load():
         prometheus_url=_prometheus_url(os.environ.get("NETPORTAL_PROMETHEUS_URL", "")),
         prometheus_timeout=float(_env("NETPORTAL_PROMETHEUS_TIMEOUT", "4")),
         timezone=_timezone(os.environ.get("NETPORTAL_TIMEZONE", "") or "Europe/Berlin"),
+        acct_interim_s=_interim(os.environ.get("NETPORTAL_ACCT_INTERIM_S", "") or "300"),
     )
+
+
+def _interim(text):
+    """NETPORTAL_ACCT_INTERIM_S: whole seconds, 30 .. 86400 (RFC 2869 asks for at least 60; the
+    house uses 120)."""
+    if not re.fullmatch(r"[0-9]{1,6}", text.strip()) or not 30 <= int(text) <= 86400:
+        raise RuntimeError("NETPORTAL_ACCT_INTERIM_S: %r is not 30-86400 seconds" % text)
+    return int(text)
 
 
 def _timezone(name):

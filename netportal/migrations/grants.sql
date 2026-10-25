@@ -5,8 +5,8 @@
 --   EXECUTE on the functions FreeRADIUS logs through (they write as the schema owner) and the
 --   two helpers it may call: radius_login, radius_reject, radius_accounting, radius_cert_status,
 --   np_mac.
--- No table: since 2026-10-25 the functions write radius_session, radius_auth, radius_acct and
--- device_mac. The role is created by the stack (house-infra stacks/netaccess); when it is missing
+-- No table: since 2026-10-25 the functions write radius_session, radius_auth, radius_acct,
+-- device_mac and (0003) radius_nas. The role is created by the stack (house-infra stacks/netaccess); when it is missing
 -- this only warns (registry.migrate logs it, /metrics shows it): FreeRADIUS then rejects every
 -- login, as it cannot read the registry.
 

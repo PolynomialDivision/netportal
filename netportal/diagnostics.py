@@ -160,18 +160,27 @@ def is_stale(wifi_data_age_s):
 
 
 def state_findings(device, wifi_data_age_s, telemetry="ok"):
-    """never_connected, offline, stale_data: what is known about the device at all. stale_data
-    only while Prometheus answers (telemetry "ok"): its Wi-Fi data is old, so the device's state
-    is not known (an unreachable Prometheus is the page's telemetry state, not a finding)."""
+    """never_connected, offline, stale_data: what is known about the device at all. The state is
+    presence.py's (DEVICE.state, DEVICE.presence): offline only when presence says so (never
+    for unknown or connecting), its evidence the presence's confirmation (confirmed_at,
+    confirmed_by, reason, basis). stale_data only while Prometheus answers (telemetry "ok"): its
+    Wi-Fi data is old, so what the page shows of the radio may be the past (an unreachable
+    Prometheus is the page's telemetry state, not a finding): for an unknown state, and for one
+    that RADIUS or UniFi's log decided while the snapshot is old."""
     state = device.get("state")
     if state == "never_connected":
         return [finding("never_connected", "info", evidence={"logins": 0})]
     out = []
-    if telemetry == "ok" and state == "unknown" and is_stale(wifi_data_age_s):
+    presence = device.get("presence") or {}
+    from_radius = presence.get("confirmed_by") in ("radius_acct", "radius_auth", "unifi_syslog")
+    if telemetry == "ok" and is_stale(wifi_data_age_s) and (state == "unknown" or from_radius):
         age = None if wifi_data_age_s is None else int(wifi_data_age_s)
         out.append(finding("stale_data", "warn", evidence={"age_s": age, "threshold_s": STALE_AFTER_S}, age_s=age))
     if state == "offline":
-        out.append(finding("offline", "info", last_seen=device.get("last_seen")))
+        out.append(finding("offline", "info", presence.get("basis") or MEASURED, evidence={
+            "last_seen": device.get("last_seen"), "confirmed_at": presence.get("confirmed_at"),
+            "confirmed_by": presence.get("confirmed_by"), "reason": presence.get("reason")},
+            last_seen=device.get("last_seen")))
     return out
 
 
@@ -422,8 +431,10 @@ def findings(device, summary=None, wifi_data_age_s=None, telemetry="ok", context
     context = context or {}
     out = state_findings(device, wifi_data_age_s, telemetry)
     if device.get("state") != "never_connected":
-        out += radio_findings(device, summary) + history_findings(device, summary, context)
-        out += identity_findings(context) + load_findings(device, context) + coverage_findings(device, context)
-        out += incident_findings(context)
+        # the radio and the AP's load only from a fresh snapshot (a frozen one is the past)
+        live = not (wifi_data_age_s is not None and is_stale(wifi_data_age_s))
+        out += (radio_findings(device, summary) if live else []) + history_findings(device, summary, context)
+        out += identity_findings(context) + (load_findings(device, context) if live else [])
+        out += coverage_findings(device, context) + incident_findings(context)
     out += auth_findings(context) + cert_findings(context)
     return sorted(out, key=lambda f: SEVERITY_ORDER[f["severity"]])

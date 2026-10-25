@@ -45,7 +45,7 @@ FAKE_NAS = "10.199.0.11"
 
 
 def check(name, ok, detail=""):
-    print(("ok    " if ok else "FAIL  ") + name + ("" if ok else "  -> " + str(detail)[:300]))
+    print(("ok    " if ok else "FAIL  ") + name + ("" if ok else "  -> " + str(detail)[:1200]))
     if not ok:
         failures.append(name)
 
@@ -168,9 +168,10 @@ def radius_pools():
     return pools
 
 
-def accounting(attrs):
-    """An Accounting-Request from the fake access point (radclient): True if answered."""
-    body = "".join("%s = %s\n" % kv for kv in [("NAS-IP-Address", FAKE_NAS)] + list(attrs.items()))
+def accounting(attrs, nas=FAKE_NAS):
+    """An Accounting-Request from the fake access point (radclient): True if answered. nas: the
+    NAS-IP-Address it names (another access point of the house, from the same container)."""
+    body = "".join("%s = %s\n" % kv for kv in [("NAS-IP-Address", nas)] + list(attrs.items()))
     out = subprocess.run(["docker", "exec", "-i", "netportal-it-nas", "radclient", "-t", "4", "-r", "2",
                           "10.199.0.10:1813", "acct", "it-radius-secret"], input=body, capture_output=True, text=True)
     return "Received Accounting-Response" in out.stdout
@@ -264,8 +265,8 @@ def main():
             check("the Accept carries the Session-Timeout backstop", m and int(m.group(1)) == 43200,
                   m and m.group(1))
             m = re.search(r"Attribute 85 \(Acct-Interim-Interval\) length=6\s+Value: ([0-9]+)", LAST_REPLY)
-            check("the Accept asks for accounting updates every 5 minutes", m and int(m.group(1)) == 300,
-                  m and m.group(1))
+            check("the Accept asks for accounting updates every NETPORTAL_ACCT_INTERIM_S (120 s here)",
+                  m and int(m.group(1)) == 120, m and m.group(1))
             android_class = reply_class()
         again = s.get(PORTAL + link)
         check("%s: the download link works only once" % fmt, again.status_code == 404, again.status_code)
@@ -489,7 +490,7 @@ def main():
     check("... and a device she enrols now too", verdict == ("accept", "50"), verdict)
     page = a.get(PORTAL + "/admin")
     check("the admin view shows each device's policy", ">guests<" in page.text and ">residents<" in page.text)
-    telemetry_checks(sql("SELECT id::text FROM device WHERE owner = 'sub-carol' AND name = 'carol tablet'")[0][0])
+    telemetry_checks(sql("SELECT id::text FROM device WHERE owner = 'sub-carol' AND name = 'carol tablet'")[0][0], c)
     # Admin rights are checked against the registry on every request (2026-10-22): removed from
     # it-admins, the open session loses the admin view at the next offboarding round.
     users(("sub-admin", "admin", ["residents"], True), ("sub-carol", "carol", ["former-residents"], True), ALICE, FIA)
@@ -537,9 +538,101 @@ def main():
     return 1 if failures else 0
 
 
-def telemetry_checks(tablet):
+def presence_of(portal, device_id, etag=None):
+    """(status, DEVICE or None, ETag, poll_s) of GET /api/devices/<id> as the dashboard polls it."""
+    r = portal.get(PORTAL + "/api/devices/%s" % device_id, headers={"If-None-Match": etag} if etag else {})
+    body = r.json() if r.status_code == 200 else {}
+    return r.status_code, body.get("device"), r.headers.get("ETag"), body.get("poll_s")
+
+
+def presence_checks(tablet, portal, mac):
+    """Presence (docs/TELEMETRY.md): the portal has no Prometheus here, so RADIUS decides alone:
+    a fresh login is connecting, its Start online, a roam's late Stop of the old AP changes
+    nothing, the current session's Stop is offline at once, reordered and repeated packets change
+    nothing, the measured interval sets the staleness, the AP's Accounting-Off ends it; the API
+    answers 304 while nothing changed."""
+    ap_a, ap_b = "10.199.0.31", "10.199.0.32"
+    connect("carol-tablet", mac=mac)
+    token = "0x" + (reply_class() or "").encode().hex()
+    base = {"Calling-Station-Id": '"A4-83-E7-00-00-05"', "Called-Station-Id": '"AA-BB-CC-00-00-03:Scharni"',
+            "Class": token}
+    status, dev, tag, poll = presence_of(portal, tablet)
+    check("presence: a fresh login without an accounting Start is connecting (radius_auth), polled fast",
+          status == 200 and dev["state"] == "connecting" and dev["presence"]["confirmed_by"] == "radius_auth"
+          and poll == 5 and not any(f["code"] == "offline" for f in dev["diagnostics"]),
+          (status, dev and dev["state"], dev and [(e["kind"], e["at"]) for e in dev["presence"]["evidence"]],
+           sql("SELECT acct_session_id, started, stopped FROM radius_acct WHERE device_id = %s", tablet),
+           sql("SELECT updated FROM radius_session WHERE device_id = %s", tablet)))
+    # Event-Timestamps up to now + 7 below: never in the future (radius_accounting takes a future
+    # one as its arrival), and after the login (the earlier sessions ended before it)
+    time.sleep(9)
+    now = -int(-time.time()) - 8       # whole seconds after the earlier sessions' (sub-second) times
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"P-1"', "Event-Timestamp": str(now)}, nas=ap_a)
+    status, dev, tag, poll = presence_of(portal, tablet)
+    check("presence: the Start makes it online at once (radius_acct, acct_start), since the Start",
+          dev and dev["state"] == "online" and dev["presence"]["reason"] == "acct_start"
+          and dev["presence"]["session"]["acct_session_id"] == "P-1" and dev["since"] is not None,
+          dev and dev["presence"])
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"P-2"', "Event-Timestamp": str(now + 1)},
+               nas=ap_b)
+    accounting({**base, "Acct-Status-Type": "Stop", "Acct-Session-Id": '"P-1"', "Acct-Session-Time": "2",
+                "Acct-Terminate-Cause": "User-Request", "Event-Timestamp": str(now + 2)}, nas=ap_a)
+    status, dev, tag, poll = presence_of(portal, tablet)
+    check("presence: a roam (new AP's Start before the old AP's Stop) stays online on the new session",
+          dev and dev["state"] == "online" and dev["presence"]["session"]["acct_session_id"] == "P-2"
+          and dev["presence"]["session"]["nas_ip"] == ap_b, dev and dev["presence"])
+    status, _dev, tag2, _ = presence_of(portal, tablet, tag)
+    check("presence: nothing changed -> 304 with the same ETag", status == 304 and tag2 == tag, (status, tag, tag2))
+    # reordered: an earlier session's Stop arrives before its Start
+    accounting({**base, "Acct-Status-Type": "Stop", "Acct-Session-Id": '"P-3"', "Acct-Session-Time": "5",
+                "Event-Timestamp": str(now - 10)}, nas=ap_b)
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"P-3"', "Event-Timestamp": str(now - 15)},
+               nas=ap_b)
+    row = sql("SELECT started, stopped FROM radius_acct WHERE nas_ip = %s AND acct_session_id = 'P-3'", ap_b)
+    check("accounting: a Stop that overtook its Start leaves the session stopped",
+          row and row[0][1] is not None and row[0][0] is not None and row[0][0] < row[0][1], row)
+    status, dev, _tag, _ = presence_of(portal, tablet)
+    check("presence: ... and the session that is still running keeps it online",
+          dev and dev["state"] == "online" and dev["presence"]["session"]["acct_session_id"] == "P-2",
+          dev and dev["presence"])
+    stop = {**base, "Acct-Status-Type": "Stop", "Acct-Session-Id": '"P-2"', "Acct-Session-Time": "4",
+            "Acct-Terminate-Cause": "User-Request", "Event-Timestamp": str(now + 5)}
+    accounting(stop, nas=ap_b)
+    status, dev, tag, poll = presence_of(portal, tablet)
+    check("presence: the Stop of the current session is offline at once (radius_acct, acct_stop), not connected",
+          dev and dev["state"] == "offline" and dev["presence"]["reason"] == "acct_stop" and poll == 5
+          and any(f["code"] == "offline" and f["evidence"]["confirmed_by"] == "radius_acct" for f in dev["diagnostics"]),
+          dev and dev["presence"])
+    accounting(stop, nas=ap_b)                                            # the AP repeats its Stop
+    accounting({**base, "Acct-Status-Type": "Interim-Update", "Acct-Session-Id": '"P-2"', "Acct-Session-Time": "3",
+                "Event-Timestamp": str(now + 4)}, nas=ap_b)              # and a late Interim arrives
+    status, _dev, tag2, _ = presence_of(portal, tablet, tag)
+    check("presence: a repeated Stop and a late Interim change nothing (304)", status == 304 and tag2 == tag,
+          (status, _dev and _dev["presence"]))
+    # the measured interval: Start and Interim 120 s apart
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"P-4"', "Event-Timestamp": str(now - 240)},
+               nas=ap_a)
+    accounting({**base, "Acct-Status-Type": "Interim-Update", "Acct-Session-Id": '"P-4"', "Acct-Session-Time": "120",
+                "Event-Timestamp": str(now - 120)}, nas=ap_a)
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"P-5"', "Event-Timestamp": str(now + 6)},
+               nas=ap_a)
+    status, dev, _tag, _ = presence_of(portal, tablet)
+    measured = sql("SELECT interim_s FROM radius_acct WHERE nas_ip = %s AND acct_session_id = 'P-4'", ap_a)
+    check("accounting: the measured interval is recorded (120 s) and applies to the AP's new session (300 s stale)",
+          measured == [(120,)] and dev and dev["state"] == "online"
+          and dev["presence"]["session"]["acct_session_id"] == "P-5"
+          and dev["presence"]["session"]["interim_s"] == 120 and dev["presence"]["stale_after_s"] == 300,
+          (measured, dev and dev["presence"]))
+    accounting({"Acct-Status-Type": "Accounting-Off", "Event-Timestamp": str(now + 7)}, nas=ap_a)
+    status, dev, _tag, _ = presence_of(portal, tablet)
+    check("presence: the AP's Accounting-Off ends its sessions: offline (ap_down)",
+          dev and dev["state"] == "offline" and dev["presence"]["reason"] == "ap_down", dev and dev["presence"])
+
+
+def telemetry_checks(tablet, portal=None):
     """Accounting from the fake access point, the radius role's rights, and fail-open logging.
-    tablet: an active device whose credential is RUN/client/carol-tablet.*"""
+    tablet: an active device whose credential is RUN/client/carol-tablet.*; portal: its owner's
+    logged-in session (the presence checks)."""
     mac = "a4:83:e7:00:00:05"
     connect("carol-tablet", mac=mac)
     token = reply_class()
@@ -580,6 +673,8 @@ def telemetry_checks(tablet):
         sessions = registry.acct_sessions(db, tablet, registry.now() - datetime.timedelta(hours=1), registry.now())
     check("the registry lists the device's sessions", [s["acct_session_id"] for s in sessions] == ["IT-1", "IT-2"],
           sessions)
+    if portal is not None:
+        presence_checks(tablet, portal, mac)
 
     # --- the radius role: the decision view and the logging functions, no table ---------
     check("the radius role reads the decision view", radius_role_can("SELECT * FROM radius_cert"))

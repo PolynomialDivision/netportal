@@ -81,7 +81,7 @@ CREATE INDEX device_mac_mac ON device_mac (mac, first_seen);
 -- WINDOW_GRACE / CURRENT_WINDOW mirror it): last_seen + 15 min (data until the device leaves),
 -- except the device's CURRENT window (its MAC with the newest last_seen, device not revoked):
 -- last_seen + 12 h 15 min, but not beyond now. A device logs in again at least every 12 h
--- (Session-Timeout) and accounting (Interim 300 s) moves last_seen meanwhile, so until either
+-- (Session-Timeout) and accounting (Interim, NETPORTAL_ACCT_INTERIM_S) moves last_seen meanwhile, so until either
 -- arrives the device may still be there. np_device_for_mac(mac, at) reads the view: NULL when
 -- no window or devices of more than one owner contain `at` (revoked devices included; so does
 -- registry.window_conflicts, and the rollup reads window_end from registry.device_windows).
@@ -350,6 +350,139 @@ No Authentik, DAE or CA secrets.
 - HISTORY adds `series.signal_p10_dbm` (day steps, from device_day) and `timeline_days` (null
   unless a day range's timeline covers less than its charts: the 400-day event retention or the
   oldest kept event when the timeline was cut).
+
+## Presence (netportal/presence.py, 2026-10-25)
+
+One decision per device, `presence.decide`, over every source; DEVICE.state, last_seen and
+since, the diagnostics' `offline` ("not connected") and `stale_data` findings, the admin list's
+state filter and the payload's `counts` all read it. Nothing else derives online/offline.
+
+### Sources
+
+| Source | Evidence | Time compared |
+|---|---|---|
+| Prometheus (unpoller) | the device's live MAC present / absent in the snapshot, its association start | Ts = scrape time - unpoller's cache age (house.wifi_data_at); fresh only while the snapshot is at most STALE_AFTER_S (600 s) old |
+| radius_acct | the device's sessions (by device_id: Class, else MAC window; never by MAC alone): started, updated (Start/Interim), stopped, cause, the measured interval | the packets' Event-Timestamp (else arrival) |
+| radius_session.updated | the latest Access-Accept | the database's time |
+| connection_event | UniFi connected / disconnected / roamed of the house SSID (2-10 min late) | the controller's time |
+| incident | open `ap_down` of a session's AP (mapped by BSSID, else NAS address, through unpoller's VAPs) | the incident's start |
+
+The page's loader reads the newest 5 sessions and 3 UniFi events of every device of the page in
+two queries (`registry.latest_sessions`, `registry.latest_connection_events`: a LATERAL index scan
+of radius_acct_device / connection_event_device per device; the NAS's measured interval joined
+from radius_nas). Residents see their own data only (a session in a withheld MAC span counts only
+when linked by Class, as in the timeline).
+
+### Sessions, staleness and the interval
+
+- A Stop ends only its own (nas_ip, acct_session_id); on a roam the new AP's Start can come
+  before the old AP's Stop, which then changes nothing. radius_accounting (0003) compares event
+  times, never arrival order: an Event-Timestamp counts when it lies within 7 days back and is
+  never later than now (an AP's clock ahead is taken as now); updated only moves forward,
+  started is the earliest Start or estimate, a retransmitted Stop keeps the first stop time, a
+  Stop that overtook its Start stays stopped. A reused Acct-Session-Id (a Start newer than the
+  Stop, or an Interim more than an interval after it) opens the session again.
+  Accounting-On/Off close the NAS's sessions that began before it (an older, reordered On/Off
+  ends nothing newer) at the On/Off, or, for a session that had been silent longer than 2 x
+  its interval + 60 s, at that point, leaving its updated (the last contact) alone; they are
+  kept per NAS (radius_nas.reset_at): a Start or Interim from before them that arrives later
+  ends its session there. Presence takes such an AP-closed session's end as its last contact
+  when the close came more than stale_after after it (also for rows closed before 0003).
+- The interval: radius_accounting records the gaps between consecutive updates of a session
+  (Start or Interim, then Interim; 30 s .. 1 day; duplicates, reordered and retransmitted
+  packets have no such gap); radius_acct.interim_s is the smallest (a lost packet or an outage
+  only make longer gaps), radius_nas.interim_s follows the session estimates when they differ
+  from it by more than 10 % (its own exception block: a lock timeout there never loses the
+  session's update). The interval presence counts with is the session's measured one, else its
+  NAS's, clamped to [configured, 4 x configured], else NETPORTAL_ACCT_INTERIM_S (default 300;
+  FreeRADIUS replies the same variable as Acct-Interim-Interval, radius/entrypoint.sh defaults it
+  to 300; the house sets 120: alive for 300 s, at most 1020 s). An open session is alive while
+  now - updated <= stale_after = 2 x interval + 60 s. Older without a Stop it is abandoned (the
+  AP lost power, a Stop got lost). It is superseded, not alive, once another session of the
+  device started after its last update (a roam whose old Stop got lost; the current session is
+  always the newest started). An open ap_down incident of its AP, without an update since the
+  incident began (+60 s), makes it not count either.
+
+### The decision
+
+States: `online | connecting | offline | unknown | never_connected`. Newest authoritative
+evidence wins:
+
+1. Evidence newer than Ts decides (all of it when there is no fresh snapshot). The controller
+   lists a new association, and drops a gone one, up to CONTROLLER_LAG_S (60 s) after it
+   happened: a Start or a Stop up to 60 s before Ts still counts as newer; an Interim must be newer
+   than Ts.
+   1. an alive session with a newer Start/Interim: **online** (radius_acct, `acct_start` /
+      `acct_interim`). When a fresh snapshot does not list the device although the session
+      started more than 60 s before Ts and its Interims go on, the sources disagree: **online**
+      stays (radius_acct, `sources_disagree`, basis inferred, since unchanged; the session goes
+      stale by itself once the Interims stop), so the state does not flip with every Interim;
+   2. a login less than CONNECTING_S (60 s) old, newer than every session's start (a Start up to
+      5 s before it is the login's) and stop, no alive session, no fresh association:
+      **connecting** (radius_auth, `accept_pending`); older without a Start it falls through. A
+      re-authentication inside a running session is not connecting;
+   3. no alive session and the newest session ended after Ts, or a present snapshot whose
+      association began more than 60 s before that Stop (the controller still lists the gone
+      client): **offline** (radius_acct, `acct_stop`; `ap_down` when the AP ended it itself:
+      NAS-Reboot, NAS-Request, NAS-Error);
+   4. a UniFi disconnect newer than Ts and than every session's and login's time, no alive
+      session: **offline** (unifi_syslog, `unifi_disconnect`).
+2. A fresh snapshot: present **online** (prometheus, `association`), absent **offline**
+   (prometheus, `association_gone`; when a source saw the device after the snapshot, e.g. a
+   login that got no Start within 60 s, confirmed_at is that sighting and the basis inferred:
+   since is never later than confirmed_at).
+3. No fresh snapshot (Prometheus off, unavailable, or frozen): 1 covers the alive session, the
+   Stop, the login and the disconnect; the newest session open on an AP with an open ap_down
+   incident: **offline** (inferred, `ap_down`; while Prometheus is down the session's AP comes
+   from the last AP map it gave, kept a day in the process); else **unknown** (`session_stale` when the newest
+   session went silent, `telemetry_unavailable` otherwise). Missing evidence is never offline.
+4. A resident's device whose current MAC is in a conflict now: **unknown** (`mac_conflict`, no
+   evidence, no session); admins get the decision. No MAC, no session, no login:
+   **never_connected** (`no_data`).
+
+since: online - the association start of a fresh snapshot that already saw the session, else the
+session's start joined with the sessions before it that overlap or end within 120 s (roams);
+offline - when it left (the Stop, the disconnect, the incident's start; for Prometheus: when any
+source last saw it); connecting - the login. DEVICE.since stays online-only (v1), DEVICE.last_seen
+is the confirmation time while online, the login while connecting, the leaving time while
+offline, the latest sighting otherwise.
+
+The radio findings and the AP load (weak_signal, high_retries, busy_channel, slow_link,
+ap_overloaded) need a fresh snapshot; `stale_data` is said for an unknown state and for one RADIUS
+or UniFi decided while the snapshot is old.
+
+### API (additive)
+
+DEVICE adds `presence`:
+
+```
+{"state", "since", "confirmed_at", "confirmed_by": prometheus|radius_acct|radius_auth|unifi_syslog|null,
+ "basis": measured|inferred, "reason": association|association_gone|acct_start|acct_interim|
+ sources_disagree|accept_pending|acct_stop|ap_down|unifi_disconnect|session_stale|
+ telemetry_unavailable|mac_conflict|no_data,
+ "session": {"nas_ip", "acct_session_id", "ap": {"name", "house", "floor", "spot", "mac"} | null,
+             "started", "updated", "stopped", "cause", "interim_s", "interim_basis"} | null,
+ "stale_after_s", "poll_s": 5 (connecting or within 120 s of since) | 30,
+ "evidence": [{"source": prometheus|radius_acct|radius_auth|unifi_syslog|incident, "at",
+               "kind": association|association_gone|association_stale|association_gone_stale|
+                       acct_start|acct_interim|acct_stop|accept|connected|disconnected|roamed|ap_down}]}
+```
+
+(times ISO 8601 UTC; evidence newest first, at most 12). The `offline` finding's evidence is
+{last_seen, confirmed_at, confirmed_by, reason}, its basis the presence's. HOUSE adds
+`wifi_data_at` (the snapshot's time). /api/devices and /api/admin/devices add `poll_s` (the
+shortest of the devices shown, after the admin filter) and `counts` ({state: n}, of all, before
+the filter); /api/devices/<id> adds `poll_s`.
+
+Polling (gunicorn 1 worker x 8 threads: no SSE/WebSockets): /api/devices, /api/devices/<id> and
+/api/admin/devices answer with a weak `ETag` (sha256 of the payload, keys sorted, without
+`generated_at`, `wifi_data_age_s`, `age_s`, `associated_s`: the values that change with every
+request) and `Cache-Control: private, no-cache`; `If-None-Match` with it answers 304 (after the
+login check). Every time in the payload is absolute, so the tag changes only with the data (the
+live radio values change with every 60 s snapshot). A 304 keeps the body of the last 200: its
+generated_at and ages are that answer's (the page counts ages from wifi_data_at). A 304 still
+builds the payload; the house-wide registry reads of every dashboard (the rejects and incidents
+of 24 h) are shared for 5 s in the process, so the 5 s polls cost the page's own queries only.
 
 ## Diagnostics (additions)
 

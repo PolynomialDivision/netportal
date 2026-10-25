@@ -15,6 +15,7 @@ decides every Wi-Fi login from the registry.
 | `netportal/disconnect.py` | RFC 5176 Disconnect-Request (immediate revocation) |
 | `netportal/offboarding.py` | reconciliation with Authentik's users API (devices, app grants, portal sessions) |
 | `netportal/telemetry.py` | the "My devices" data: Prometheus (unpoller, the house rules, blackbox, speed test), read on the server only, batched and cached; live status, history, connection timeline, house status |
+| `netportal/presence.py` | the one device state (online, connecting, offline, unknown, never connected) from Prometheus, RADIUS accounting and logins, UniFi events and incidents; design in `docs/TELEMETRY.md` ("Presence") |
 | `netportal/diagnostics.py` | the findings shown per device (weak signal, retries, roaming …), each from measured data with its threshold |
 | `netportal/__main__.py` | `init-db`, `offboard [--every N]`, `collect [--once] [--jobs a,b]`, `job <name>`, `pki` (the ceremony) |
 | `netportal/collect/` | the collector (container netportal-collect): UniFi events from Loki, incidents and nightly rollups from Prometheus, prune; design in `docs/TELEMETRY.md` |
@@ -24,8 +25,9 @@ decides every Wi-Fi login from the registry.
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tests       # unit and profile-format tests
-tests/integration/run.sh                     # whole Wi-Fi path on local Docker (106 checks: logins, rejects with reasons, accounting, logging blocked, DB outage)
+python3 -m unittest discover -s tests       # unit, profile-format and registry (local Docker PostgreSQL) tests (465)
+node --test tests/js/                        # the dashboard scripts (52)
+tests/integration/run.sh                     # whole Wi-Fi path on local Docker (116 checks: logins, rejects with reasons, accounting, presence from accounting, logging blocked, DB outage)
 IMAGES=1 tests/integration/run.sh            # the same against the built images
 ```
 

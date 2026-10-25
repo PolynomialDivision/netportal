@@ -194,7 +194,7 @@ class OneDeviceTests(DashboardApiCase):
     def test_own_device(self):
         self.log_in(RESIDENT_SUB)
         body = self.client.get("/api/devices/%s" % MINE).get_json()
-        self.assertEqual(sorted(body), ["device", "generated_at", "house", "stale", "telemetry"])
+        self.assertEqual(sorted(body), ["device", "generated_at", "house", "poll_s", "stale", "telemetry"])
         self.assertEqual((body["device"]["id"], body["device"]["state"], body["telemetry"]), (MINE, "online", "ok"))
         self.assertNotIn("owner", body["device"])
 

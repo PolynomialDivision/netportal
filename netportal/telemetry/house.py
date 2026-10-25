@@ -1,5 +1,7 @@
 """HOUSE: the internet line, the router, the house's DNS, the latest speed test, and how old the
-Wi-Fi data is (blackbox probes, the house's rules, speedtest-tracker, unpoller's snapshot age)."""
+Wi-Fi data is (blackbox probes, the house's rules, speedtest-tracker, unpoller's snapshot age):
+wifi_data_age_s (seconds, at the query) and wifi_data_at (ISO: the snapshot's time, unpoller's
+poll of the controller; stable until the next snapshot)."""
 
 from .client import SUMMARY_CACHE_SECONDS, Unavailable
 from .common import iso, rounded
@@ -11,7 +13,7 @@ DEGRADED_LOSS_RATIO, DEGRADED_RTT_MS = 0.05, 100
 
 def empty_house():
     return {"internet": "unknown", "internet_loss_ratio": None, "internet_rtt_ms": None, "dns": "unknown",
-            "router": "unknown", "speedtest": None, "wifi_data_age_s": None}
+            "router": "unknown", "speedtest": None, "wifi_data_age_s": None, "wifi_data_at": None}
 
 
 def _up_state(value):
@@ -40,9 +42,13 @@ def house_status(client):
     else:
         house["internet"] = "ok"
     house["speedtest"] = speedtest(client)
-    age = client.vector('max(unpoller_prometheus_cache_age_seconds{job="unifi"} + (time() - '
-                        'timestamp(unpoller_prometheus_cache_age_seconds{job="unifi"})))')
-    house["wifi_data_age_s"] = int(age[0][1]) if age and age[0][1] is not None else None
+    # the age at the query's evaluation; the snapshot time (evaluation - age: unpoller's poll of
+    # the controller) stays the same for every request until the next snapshot (presence's Ts)
+    age = client.samples('max(unpoller_prometheus_cache_age_seconds{job="unifi"} + (time() - '
+                         'timestamp(unpoller_prometheus_cache_age_seconds{job="unifi"})))')
+    if age and age[0][1] is not None:
+        house["wifi_data_age_s"] = int(age[0][1])
+        house["wifi_data_at"] = iso(round(age[0][2] - age[0][1]))
     return house
 
 

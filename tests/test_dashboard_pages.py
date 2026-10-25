@@ -957,6 +957,7 @@ class V2DevicePagesTests(DashboardPagesTestCase):
 
     def test_every_finding_code_renders_in_every_language(self):
         self.devices[1]["diagnostics"] = all_findings()
+        self.devices[1]["state"] = "offline"            # "Not connected" shows only while offline
         for lang in LANGS:
             t = i18n.TEXT[lang]
             for url, sub, admin in (("/devices/%s" % IDS[1], RESIDENT_SUB, False), ("/admin/devices/%s" % IDS[1], ADMIN_SUB, True)):
@@ -1224,6 +1225,262 @@ class V2TextTests(unittest.TestCase):
         self.assertEqual(F.evidence_short(finding("frequent_disconnects", "warn", evidence={"reconnects_24h": 8}), "de"),
                          "8-mal in 24 Stunden")
         self.assertEqual(F.evidence_short(finding("weak_signal", "warn", evidence={"signal_dbm": -79}), "en"), "−79 dBm")
+
+
+# --- device presence (netportal/presence.py: DEVICE.presence) -------------------------------------
+
+def presence(state, reason, confirmed_by=None, confirmed_s=None, since_s=None, session=None, evidence=(), poll_s=30,
+             basis="measured", stale_after_s=660):
+    """DEVICE.presence as presence.public() sends it (times seconds before NOW)."""
+    return {"state": state, "since": None if since_s is None else iso(since_s),
+            "confirmed_at": None if confirmed_s is None else iso(confirmed_s), "confirmed_by": confirmed_by,
+            "basis": basis, "reason": reason, "session": session, "stale_after_s": stale_after_s, "poll_s": poll_s,
+            "evidence": [{"source": src, "at": iso(at_s), "kind": kind} for src, at_s, kind in evidence]}
+
+
+def acct_session(started_s, updated_s, stopped_s=None, cause=None):
+    return {"nas_ip": "10.10.0.21", "acct_session_id": "5F3A1C2B-00000042", "ap": ap("ap-scharni-2-corner"),
+            "started": iso(started_s), "updated": iso(updated_s), "stopped": None if stopped_s is None else iso(stopped_s),
+            "cause": cause, "interim_s": 300, "interim_basis": "measured"}
+
+
+class PresencePagesTests(DashboardPagesTestCase):
+    """The state line from DEVICE.presence: one state, the source that confirmed it and when,
+    why it is unknown; never "offline" next to a fresh connection; the admin's evidence."""
+
+    def card(self, page, i):
+        start = page.index('id="device-%s"' % IDS[i])
+        rest = [page.index('id="device-%s"' % IDS[j], start + 1) for j in range(len(IDS))
+                if j != i and page.find('id="device-%s"' % IDS[j], start + 1) != -1]
+        return visible(page[start:min(rest) if rest else len(page)])
+
+    def state_html(self, page, i=None):
+        part = page if i is None else page[page.index('id="device-%s"' % IDS[i]):]
+        start = part.index('<p class="dev-state')
+        return part[start:part.index("</p>", start)]
+
+    def just_logged_in(self):
+        """The real report: the laptop logged in a few seconds ago; the session's Start is in, the
+        association snapshot (1-3 min late) not yet; a stale diagnostics run still says offline."""
+        self.devices[1].update(
+            state="online", last_seen=iso(12), since=iso(14),
+            presence=presence("online", "acct_start", "radius_acct", confirmed_s=12, since_s=14, poll_s=5,
+                              session=acct_session(14, 12),
+                              evidence=[("radius_auth", 15, "accept"), ("radius_acct", 12, "acct_start"),
+                                        ("prometheus", 95, "association_gone")]),
+            diagnostics=[finding("offline", "info", last_seen=iso(12))])
+
+    def test_a_fresh_login_is_online_with_its_source_never_offline(self):
+        self.just_logged_in()
+        for lang in LANGS:
+            t = i18n.TEXT[lang]
+            for url in ("/", "/devices/%s" % IDS[1]):
+                resp, page = self.get(url, lang)
+                self.assert_csp_safe(resp, page)
+                line = self.state_html(page, 1)
+                self.assertIn('class="dev-state state-online"', line)
+                self.assertIn(t["state_online"], line)
+                self.assertNotIn(t["state_offline"], line)
+                confirmed = i18n.Format.recent(iso(12), lang, iso())
+                self.assertIn(t["pr_confirmed"].split("{")[0].strip(), line)
+                self.assertIn(">%s</time>" % confirmed, line)
+                self.assertIn(esc(t["pr_src_radius_acct"]), line)
+                self.assertIn('data-rel="recent"', line)                       # the script keeps it current
+                self.assertIn('title="%s"' % i18n.Format.stamp(iso(12), lang), line)  # to the second
+                card = self.card(page, 1) if url == "/" else visible(page)
+                self.assertNotIn(esc(t["diag_offline"]), card)                  # no "Not connected" note
+                self.assertNotIn(esc(t["diag_offline_why"]), card)
+        _resp, page = self.get("/")
+        self.assertIn("Confirmed 12 s ago by Wi-Fi session records", re.sub(r"<[^>]+>", "", self.state_html(page, 1)))
+
+    def test_connecting_is_neutral_and_says_what_happens(self):
+        self.devices[2].update(state="connecting", last_seen=iso(3),
+                               presence=presence("connecting", "accept_pending", "radius_auth", confirmed_s=3,
+                                                 since_s=3, poll_s=5),
+                               diagnostics=[finding("offline", "info", last_seen=iso(3 * 3600))])
+        for lang in LANGS:
+            t = i18n.TEXT[lang]
+            _resp, page = self.get("/", lang)
+            line = self.state_html(page, 2)
+            self.assertIn('class="dev-state state-connecting"', line)
+            self.assertIn('<use href="#i-refresh"/>', line)
+            self.assertIn(esc(t["state_connecting"]), line)
+            self.assertIn(esc(t["pr_connecting_line"]), line)
+            self.assertIn(esc(t["pr_src_radius_auth"]), line)
+            self.assertNotIn(t["state_offline"], line)
+            card = self.card(page, 2)
+            self.assertNotIn(esc(t["diag_offline"]), card)
+            self.assertNotIn("sev-bad", card[:card.index('data-part="diag"')])  # not shown as an error
+            self.assertIn('class="dev-icon state-connecting"', card)
+
+    def test_offline_says_since_when_and_keeps_its_note(self):
+        self.devices[2].update(
+            state="offline", last_seen=iso(130),
+            presence=presence("offline", "acct_stop", "radius_acct", confirmed_s=130, since_s=130,
+                              session=acct_session(4000, 400, stopped_s=130, cause="User-Request")),
+            diagnostics=[finding("offline", "info", evidence={"last_seen": iso(130), "confirmed_at": iso(130),
+                                                              "confirmed_by": "radius_acct"}, last_seen=iso(130))])
+        for lang in LANGS:
+            t = i18n.TEXT[lang]
+            _resp, page = self.get("/devices/%s" % IDS[2], lang)
+            line = self.state_html(page)
+            self.assertIn('class="dev-state state-offline"', line)
+            self.assertIn(esc(t["pr_offline_since"].split("{")[0].strip()), line)
+            self.assertIn(i18n.Format.recent(iso(130), lang, iso()), line)
+            self.assertIn(esc(t["pr_src_radius_acct"]), line)
+            shown = visible(page)
+            self.assertIn(esc(t["diag_offline"]), shown)                         # the note, while offline
+            self.assertIn(esc(t["evk_confirmed_by"]), shown)                    # "based on" the confirmation
+            self.assertIn(esc(t["pr_src_radius_acct"]), shown[shown.index('class="diag"'):])
+            self.assertNotIn(esc(t["pr_admin_title"]), shown)                   # the evidence is the admins'
+        _resp, page = self.get("/devices/%s" % IDS[2])
+        self.assertIn("Offline disconnected 2 min ago Confirmed 2 min ago by Wi-Fi session records",
+                      re.sub(r"<[^>]+>", "", self.state_html(page)))
+
+    def test_unknown_says_why(self):
+        for reason in i18n.PRESENCE_REASONS + ("brand_new_code",):
+            self.devices[0].update(state="unknown", since=None, ap=None, last_seen=None, signal_dbm=None, health=None,
+                                   presence=presence("unknown", reason, basis="inferred"), diagnostics=[])
+            for lang in LANGS:
+                t = i18n.TEXT[lang]
+                _resp, page = self.get("/", lang)
+                line = self.state_html(page, 0)
+                self.assertIn('class="dev-state state-unknown"', line)
+                key = "pr_reason_" + (reason if reason in i18n.PRESENCE_REASONS else "other")
+                self.assertIn(esc(t[key]), line, (lang, reason))
+                self.assertNotIn(t["state_offline"], line)
+                self.assertNotIn(t["pr_confirmed"].split("{")[0].strip(), line)   # nothing confirmed
+                self.assertNotIn(reason, visible(line).replace(esc(t[key]), ""))  # no code for residents
+
+    def test_every_state_in_every_language(self):
+        states = {0: presence("online", "association", "prometheus", confirmed_s=40, since_s=8130),
+                  1: presence("connecting", "accept_pending", "radius_auth", confirmed_s=2, poll_s=5),
+                  2: presence("offline", "association_gone", "prometheus", confirmed_s=50, since_s=3 * 3600),
+                  3: presence("never_connected", None, basis="inferred"),
+                  4: presence("unknown", "telemetry_unavailable", basis="inferred")}
+        for i, p in states.items():
+            self.devices[i].update(state=p["state"], presence=p)
+        for lang in LANGS:
+            t = i18n.TEXT[lang]
+            resp, page = self.get("/admin", lang, sub=ADMIN_SUB)
+            self.assert_csp_safe(resp, page)
+            self.assertNotIn("{", visible(page))
+            for i, p in states.items():
+                item = page[page.index('<li class="adm-item" data-device="%s"' % IDS[i]):]
+                item = item[:item.index("</li>\n")]
+                self.assertIn('data-state="%s"' % p["state"], item)
+                self.assertIn('class="dev-state state-%s"' % p["state"], item)
+                self.assertIn(esc(t["state_" + p["state"]]), item)
+            self.assertIn('<option value="connecting">%s</option>' % esc(t["state_connecting"]), page)
+        _resp, page = self.get("/admin?state=connecting", sub=ADMIN_SUB)
+        self.assertEqual([n for n, hidden in AdminPageTests.names(self, page) if not hidden], ["MacBook Air"])
+
+    def test_admins_see_how_the_state_was_decided(self):
+        self.just_logged_in()
+        for lang in LANGS:
+            t = i18n.TEXT[lang]
+            for url in ("/admin/devices/%s" % IDS[1], "/admin"):
+                resp, page = self.get(url, lang, sub=ADMIN_SUB)
+                self.assert_csp_safe(resp, page)
+                shown = visible(page)
+                shown = shown[shown.index('data-device="%s"' % IDS[1]):]
+                block = shown[shown.index('data-part="presence"'):]
+                block = block[:block.index("</details>")]
+                self.assertIn(esc(t["pr_admin_title"]), block)
+                self.assertIn('<span class="mono">acct_start</span>', block)               # the reason code
+                self.assertIn(esc(t["pr_reason_acct_start"]), block)
+                self.assertIn("10.10.0.21", block)                                          # the session
+                self.assertIn("5F3A1C2B-00000042", block)
+                self.assertIn(esc(i18n.Format.room(ap("ap-scharni-2-corner"), lang)), block)
+                self.assertIn(esc(t["pr_admin_started"].split("{")[0].strip()), block)
+                self.assertIn(esc(t["pr_admin_updated"].split("{")[0].strip()), block)
+                self.assertIn("660 s", block)                                               # stale_after_s
+                self.assertIn(esc(t["pr_admin_stale_value"].format(duration=i18n.Format.duration(660, lang))), block)
+                self.assertIn(esc(t["src_admin_radius_acct"]), block)                      # confirmed by
+                for kind in ("accept", "acct_start", "association_gone"):                  # the evidence
+                    self.assertIn('<span class="mono">%s</span>' % kind, block)
+                self.assertLess(block.index(">accept<"), block.index(">association_gone<"))  # newest first
+                self.assertNotIn("{", block)
+        _resp, page = self.get("/devices/%s" % IDS[1])                                     # the resident
+        self.assertNotIn('data-part="presence"', page)
+
+    def test_without_presence_the_v1_line_stays(self):
+        _resp, page = self.get("/")
+        t = i18n.TEXT["en"]
+        self.assertIn(t["since_line"].split("{")[0], self.state_html(page, 0))
+        self.assertIn(t["seen_line"].split("{")[0], self.state_html(page, 2))
+        self.assertNotIn(t["pr_confirmed"].split("{")[0].strip(), visible(page))    # nothing claimed
+        self.assertNotIn('data-part="presence"', page)
+
+    def test_texts_and_formatting(self):
+        F = i18n.Format
+        for lang, text in i18n.TEXT.items():
+            for state in i18n.PRESENCE_STATES:
+                self.assertTrue(text.get("state_" + state), (lang, state))
+                self.assertIn(i18n.PRESENCE_ICON[state], [m for m in re.findall(r'id="i-([a-z0-9-]+)"', (
+                    Path(__file__).resolve().parent.parent / "netportal" / "templates" / "base.html").read_text())])
+            for code in i18n.PRESENCE_REASONS:
+                self.assertTrue(text.get("pr_reason_" + code), (lang, code))
+            for src in i18n.PRESENCE_SOURCES:
+                self.assertTrue(text.get("pr_src_" + src), (lang, src))
+                self.assertTrue(text.get("src_admin_" + src), (lang, src))
+        self.assertEqual(F.recent(iso(2), "en", iso()), "just now")
+        self.assertEqual(F.recent(iso(12), "en", iso()), "12 s ago")
+        self.assertEqual(F.recent(iso(12), "de", iso()), "vor 12 Sek.")
+        self.assertEqual(F.recent(iso(12), "uk", iso()), "12 с тому")
+        self.assertEqual(F.recent(iso(300), "en", iso()), "5 min ago")
+        self.assertEqual(F.stamp("2026-10-25T14:52:13Z", "de"), "25.10.2026 15:52:13")
+        self.assertEqual(F.parts({"text": "a {x} b {y}", "values": {"x": "<1>", "y": {"time": "t", "text": "now"}}}),
+                         [("text", "a "), ("text", "<1>"), ("text", " b "), ("time", {"time": "t", "text": "now"})])
+
+    def test_the_backends_presence_renders(self):
+        """presence.decide/public (the backend) for the reported case and the other ways a state
+        comes about, through the real templates: the shapes fit, nothing contradicts."""
+        from netportal import presence as backend
+        now = NOW.timestamp()
+        snapshot = backend.association({"present": False, "start": None, "last_seen": now - 3700}, "ok", now - 100, False)
+        cases = {
+            "online": backend.decide(now, snapshot, sessions=[{
+                "nas_ip": "10.10.0.23", "acct_session_id": "A-1", "link": "class", "mac": "a4:83:e7:00:00:01",
+                "ap_name": "ap-colbe-0-far", "ap_mac": "d0:21:f9:00:00:03", "started": now - 14, "updated": now - 12,
+                "stopped": None, "cause": None, "interim_s": None, "nas_interim_s": 300}], accept=now - 15),
+            "connecting": backend.decide(now, snapshot, accept=now - 3),
+            "offline": backend.decide(now, snapshot),
+            "unknown": backend.decide(now, None, sessions=[{
+                "nas_ip": "10.10.0.23", "acct_session_id": "A-0", "link": "class", "mac": None, "ap_name": None,
+                "ap_mac": None, "started": now - 9000, "updated": now - 5000, "stopped": None, "cause": None,
+                "interim_s": 300, "nas_interim_s": None}]),
+        }
+        for state, decided in cases.items():
+            self.assertEqual(decided["state"], state)
+            public = backend.public(decided)
+            self.devices[1].update(state=state, presence=public, last_seen=public["since"] if state != "unknown" else None,
+                                   diagnostics=[finding("offline", "info", evidence={"last_seen": iso(3700)})])
+            for lang in LANGS:
+                t = i18n.TEXT[lang]
+                for url, sub in (("/", RESIDENT_SUB), ("/admin/devices/%s" % IDS[1], ADMIN_SUB)):
+                    resp, page = self.get(url, lang, sub=sub)
+                    self.assert_csp_safe(resp, page)
+                    line = self.state_html(page, 1 if url == "/" else None)
+                    self.assertIn('class="dev-state state-%s"' % state, line)
+                    for other in i18n.PRESENCE_STATES:
+                        if other != state:
+                            self.assertNotIn(">%s<" % esc(t["state_" + other]), line, (state, lang, other))
+                    card = self.card(page, 1) if url == "/" else visible(page)
+                    self.assertEqual(esc(t["diag_offline"]) in card, state == "offline", (state, lang))
+                    self.assertNotIn("{", visible(page))
+        _resp, page = self.get("/admin/devices/%s" % IDS[1], sub=ADMIN_SUB)
+        self.assertIn("session_stale", page)
+
+    def test_the_backends_codes_are_known(self):
+        from netportal import presence as backend
+        self.assertEqual(tuple(backend.STATES), i18n.PRESENCE_STATES)
+        source = (Path(__file__).resolve().parent.parent / "netportal" / "presence.py").read_text()
+        reasons = set(re.findall(r'"(acct_(?:start|interim|stop)|association[a-z_]*|accept_pending|unifi_disconnect|session_stale|'
+                                 r'ap_down|telemetry_unavailable|no_data|mac_conflict)"', source))
+        self.assertLessEqual(reasons, set(i18n.PRESENCE_REASONS))
+        by = set(re.findall(r'"(prometheus|radius_acct|radius_auth|unifi_syslog)"', source))
+        self.assertLessEqual(by, set(i18n.PRESENCE_SOURCES))
 
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@
 // (state line, facts, findings, house strip, banners, the admin row's summary). Change both.
 // Text goes in as text nodes only (never innerHTML): names and AP names come from users.
 
+import { findingsShown, PRESENCE_ICON, presenceOf, presenceView, RELATIVE_KINDS, relText, segmentParts, stateOf } from "./presence.js";
+
 const SVG = "http://www.w3.org/2000/svg";
-export const STATE_ICON = { online: "wifi", offline: "wifi-off", never_connected: "never", unknown: "help" };
+export const STATE_ICON = PRESENCE_ICON;
 export const TONE_ICON = { ok: "check", warn: "warn", bad: "bad", info: "info", unknown: "help" };
 const HOUSE_TONE = { ok: "ok", degraded: "warn", down: "bad" };
 // The data a finding rests on: its params, else the device's own value (as in _dash.html).
@@ -59,27 +61,88 @@ export function fillNodes(template, values) {
 
 const known = (v) => v !== null && v !== undefined;
 
+/** <time>: "when" (14:05), "date", or "ago" (5 min ago, kept current by the page: data-rel). */
 export function timeEl(f, iso, kind = "when", now = Date.now()) {
   const text = kind === "ago" ? f.ago(iso, now) : kind === "date" ? f.date(iso) : f.when(iso, now);
-  return h("time", { datetime: iso }, text);
+  return h("time", { datetime: iso, "data-rel": kind === "ago" ? "ago" : null }, text);
 }
 
-export function stateLine(d, f, ctx) {
-  const t = f.t, state = d.state || "unknown";
-  const more = (...nodes) => [" ", h("span", { class: "state-more" }, ...nodes)];
-  let extra = [];
-  if (state === "online" && d.since) {
-    const seconds = (ctx.now - Date.parse(d.since)) / 1000;
-    extra = more(fillNodes(t("since_line"), { time: timeEl(f, d.since, "when", ctx.now), duration: f.duration(seconds) }));
-  } else if (state === "never_connected") {
-    extra = more(f.fill(t("never_line"), { ssid: ctx.ssid || "" }));
-  } else if (d.last_seen) {
-    extra = more(fillNodes(t("seen_line"), { when: timeEl(f, d.last_seen, "ago", ctx.now) }));
-  } else if (state === "unknown" && !(d.diagnostics || []).length) {
-    extra = more(t("unknown_line"));
+/** A presence moment ({time, kind, text, title}): the time to the second in its title; the
+ *  relative ones carry data-rel (the page updates their text without a request). */
+export function momentEl(m) {
+  return h("time", { datetime: m.time, title: m.title, "data-rel": RELATIVE_KINDS.includes(m.kind) ? m.kind : null }, m.text);
+}
+
+/** Every <time data-rel> under root, as of `now` (no request: between two polls). */
+export function tickTimes(root, f, now = Date.now()) {
+  let changed = 0;
+  for (const node of root.querySelectorAll("time[data-rel]")) {
+    const text = relText(f, node.getAttribute("data-rel"), node.getAttribute("datetime"), now);
+    if (node.textContent !== text) { node.textContent = text; changed += 1; }
   }
-  return h("p", { class: `dev-state state-${state}`, "data-part": "state" },
-    icon(STATE_ICON[state] || "help"), h("strong", {}, t(`state_${state}`)), extra);
+  return changed;
+}
+
+export function segmentNodes(segment) {
+  return segmentParts(segment).map(([kind, v]) => (kind === "time" ? momentEl(v) : v)).filter((x) => x !== "");
+}
+
+/** The state under the name: icon, the word, since when or why (presence.js presenceView),
+ *  and which source confirmed it when (templates/_dash.html state_line). */
+export function stateLine(d, f, ctx) {
+  const v = presenceView(d, f, ctx.now, { ssid: ctx.ssid || "" });
+  const more = v.more.flatMap((seg, i) => [i ? " · " : "", ...segmentNodes(seg)]);
+  return h("p", { class: `dev-state state-${v.state}`, "data-part": "state" },
+    icon(v.icon), h("strong", {}, v.label),
+    more.length ? [" ", h("span", { class: "state-more" }, more)] : null,
+    v.confirmed ? [" ", h("span", { class: "state-confirmed" }, segmentNodes(v.confirmed))] : null);
+}
+
+const atMs = (e) => { const v = Date.parse(e && e.at); return Number.isNaN(v) ? -Infinity : v; };
+const newestFirst = (list) => list.filter((e) => e && typeof e === "object").sort((a, b) => (atMs(b) > atMs(a) ? 1 : atMs(b) < atMs(a) ? -1 : 0));
+
+/** An admin's view of how the state was decided: reason code, basis, the session (AP, started,
+ *  updated), when it counts as stale, the poll hint and the evidence (templates/_dash.html
+ *  presence_admin). */
+export function presenceAdmin(d, f, now = Date.now()) {
+  const t = f.t, p = presenceOf(d);
+  const box = h("div", { class: "presence-admin", "data-part": "presence" });
+  if (p.derived) return box;
+  const when = (v) => (v ? momentEl({ time: v, kind: "recent", text: f.recent(v, now), title: f.stamp(v) }) : "–");
+  const src = (s) => { const k = `src_admin_${s}`; return t(k) === k ? String(s ?? "–") : t(k); };
+  const row = (label, ...dd) => h("div", {}, h("dt", {}, label), h("dd", {}, ...dd));
+  const s = p.session;
+  const apOf = (ap) => (ap && typeof ap === "object" ? f.room(ap) : ap ? f.room(f.apFromName(ap)) : null);
+  const rows = [
+    row(t("pr_admin_state"), h("span", { class: "mono" }, p.state),
+      p.basis ? [" · ", t(`basis_${p.basis}`) === `basis_${p.basis}` ? p.basis : t(`basis_${p.basis}`)] : null),
+    row(t("pr_admin_reason"), h("span", { class: "mono" }, p.reason || "–"),
+      p.reason ? [" ", h("span", { class: "muted" }, t(`pr_reason_${p.reason}`) === `pr_reason_${p.reason}` ? t("pr_reason_other") : t(`pr_reason_${p.reason}`))] : null),
+    row(t("pr_admin_since"), when(p.since)),
+    row(t("pr_admin_confirmed"), when(p.confirmed_at), p.confirmed_by ? [" · ", src(p.confirmed_by)] : null),
+    row(t("pr_admin_session"), s ? [
+      apOf(s.ap) ? [apOf(s.ap), " "] : null,
+      s.nas_ip ? h("span", { class: "mono muted" }, s.nas_ip) : null,
+      s.acct_session_id ? [" ", h("span", { class: "mono muted" }, s.acct_session_id)] : null,
+      h("br"),
+      s.started ? fillNodes(t("pr_admin_started"), { when: when(s.started) }) : null,
+      s.updated ? [s.started ? " · " : "", fillNodes(t("pr_admin_updated"), { when: when(s.updated) })] : null,
+      s.stopped ? [" · ", fillNodes(t("pr_admin_stopped"), { when: when(s.stopped) })] : null,
+      s.cause ? [" ", h("span", { class: "mono muted" }, String(s.cause))] : null,
+      s.interim_s ? [" · ", f.fill(t("pr_admin_interim"), { duration: f.duration(s.interim_s) }),
+        s.interim_basis ? [" ", h("span", { class: "muted" }, `(${t(`basis_${s.interim_basis}`) === `basis_${s.interim_basis}` ? s.interim_basis : t(`basis_${s.interim_basis}`)})`)] : null] : null,
+    ] : h("span", { class: "muted" }, t("pr_admin_session_none"))),
+    p.stale_after_s ? row(t("pr_admin_stale_after"), f.fill(t("pr_admin_stale_value"), { duration: f.duration(p.stale_after_s) }),
+      " ", h("span", { class: "mono muted" }, `${p.stale_after_s} s`)) : null,
+    p.poll_s ? row(t("pr_admin_poll"), f.duration(p.poll_s)) : null,
+    row(t("pr_admin_evidence"), p.evidence.length
+      ? h("ol", { class: "pr-evidence" }, newestFirst(p.evidence).slice(0, 20).map((e) =>
+        h("li", {}, when(e.at), " · ", src(e.source), " · ", h("span", { class: "mono" }, String(e.kind ?? "–")))))
+      : h("span", { class: "muted" }, t("pr_admin_evidence_none"))),
+  ];
+  box.appendChild(h("details", { class: "pr-admin" }, h("summary", {}, icon("list"), t("pr_admin_title")),
+    h("dl", { class: "mini-kv" }, rows)));
+  return box;
 }
 
 export function bars(n, tone) {
@@ -195,7 +258,7 @@ function adminN(finding) {
 
 export function findings(d, f, { full = false, telemetry = "ok", limit = 0, admin = false } = {}) {
   const t = f.t, texts = (key) => (f.t(key) === key ? null : f.t(key));
-  const all = d.diagnostics || [];
+  const all = findingsShown(d);
   const list = limit ? all.slice(0, limit) : all;
   const box = h("div", { class: "diag", "data-part": "diag" });
   if (list.length) {
@@ -227,7 +290,7 @@ export function findings(d, f, { full = false, telemetry = "ok", limit = 0, admi
       box.appendChild(h("p", { class: "diag-more" }, h("a", { href: `/devices/${encodeURIComponent(d.id)}` },
         f.fill(t("diag_more"), { n: all.length - list.length }))));
     }
-  } else if (d.state === "online" && telemetry === "ok") {
+  } else if (stateOf(d) === "online" && telemetry === "ok") {
     box.appendChild(h("p", { class: "all-good" }, icon("check"), t("all_good")));
   }
   return box;
@@ -340,14 +403,14 @@ export function problemsOf(d) {
 }
 
 export function summaryParts(d, f) {
-  const t = f.t, problems = problemsOf(d);
+  const t = f.t, problems = problemsOf(d), state = stateOf(d);
   const lvl = known(d.signal_dbm) ? f.signalLevel(d.signal_dbm) : null;
   const worst = problems.some((x) => x.severity === "bad") ? "bad" : "warn";
   return {
-    "sum-state": h("span", { class: `adm-state state-${d.state}`, "data-part": "sum-state" }, icon(STATE_ICON[d.state] || "help"),
-      h("span", { class: "sr" }, t(`state_${d.state}`))),
+    "sum-state": h("span", { class: `adm-state state-${state}`, "data-part": "sum-state" }, icon(STATE_ICON[state] || "help"),
+      h("span", { class: "sr" }, t(`state_${state}`))),
     "sum-name": h("strong", { class: "adm-name", "data-part": "sum-name" }, d.name),
-    "sum-room": h("span", { class: "adm-room", "data-part": "sum-room" }, d.ap ? f.room(d.ap) : t(`state_${d.state}`)),
+    "sum-room": h("span", { class: "adm-room", "data-part": "sum-room" }, d.ap ? f.room(d.ap) : t(`state_${state}`)),
     "sum-signal": h("span", { class: "adm-signal", "data-part": "sum-signal" }, lvl ? [bars(lvl.bars, lvl.tone), f.dbm(d.signal_dbm)] : null),
     "sum-badge": h("span", { class: "adm-badge", "data-part": "sum-badge" }, problems.length
       ? h("span", { class: `badge sev-${worst}` }, icon(TONE_ICON[worst]), f.fill(t("adm_problems_n"), { n: problems.length })) : null),

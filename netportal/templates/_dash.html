@@ -23,9 +23,17 @@
 
 {%- macro icon(name, cls="") -%}<svg class="icon{% if cls %} {{ cls }}{% endif %}" aria-hidden="true"><use href="#i-{{ name }}"/></svg>{%- endmacro -%}
 
-{%- macro time(iso, kind="when") -%}<time datetime="{{ fmt.iso(iso) if fmt is defined else iso }}">{{ x(kind, iso) }}</time>{%- endmacro -%}
+{#- a moment: "ago" ones carry data-rel (the script keeps their text current between requests) -#}
+{%- macro time(iso, kind="when") -%}<time datetime="{{ fmt.iso(iso) if fmt is defined else iso }}"{% if kind == "ago" %} data-rel="ago"{% endif %}>{{ x(kind, iso) }}</time>{%- endmacro -%}
 
-{%- set state_icon = {"online": "wifi", "offline": "wifi-off", "never_connected": "never", "unknown": "help"} -%}
+{%- set state_icon = {"online": "wifi", "connecting": "refresh", "offline": "wifi-off", "never_connected": "never", "unknown": "help"} -%}
+{#- the one state of a device (its presence first), wherever a page shows one -#}
+{%- macro state_of(d) -%}{{ fmt.state_of(d) if fmt is defined else (d.state or "unknown") }}{%- endmacro -%}
+
+{#- a presence moment (i18n.Format.moment): to the second in the title; relative ones data-rel -#}
+{%- macro moment(m) -%}<time datetime="{{ m.time }}" title="{{ m.title }}"{% if m.kind in ("recent", "ago", "elapsed") %} data-rel="{{ m.kind }}"{% endif %}>{{ m.text }}</time>{%- endmacro -%}
+{#- a text with its values (i18n.Format.parts): strings escaped, moments as <time> -#}
+{%- macro segment(seg) -%}{% for kind, v in fmt.parts(seg) %}{% if kind == "time" %}{{ moment(v) }}{% else %}{{ v }}{% endif %}{% endfor %}{%- endmacro -%}
 {%- set tone_icon = {"ok": "check", "warn": "warn", "bad": "bad", "info": "info", "unknown": "help"} -%}
 
 {%- macro signal_level(dbm) -%}
@@ -55,8 +63,16 @@
 <span class="dir"><span aria-hidden="true">↑</span><span class="sr">{{ t.dir_up }}</span> {{ x(kind, up) }}</span>
 {%- endmacro -%}
 
-{#- the state line under the name: icon, word, and since when -#}
+{#- the state line under the name: icon, word, since when or why, and which source confirmed it
+    when (i18n.Format.presence_view; static/render.js stateLine). Without `fmt`: v1's line. -#}
 {%- macro state_line(d) -%}
+{%- if fmt is defined -%}
+{%- set v = fmt.presence_view(d, lang, now, settings.ssid if settings is defined else "") -%}
+<p class="dev-state state-{{ v.state }}" data-part="state">{{ icon(v.icon) }}<strong>{{ v.label }}</strong>
+{%- if v.more %} <span class="state-more">{% for seg in v.more %}{% if not loop.first %} · {% endif %}{{ segment(seg) }}{% endfor %}</span>{% endif %}
+{%- if v.confirmed %} <span class="state-confirmed">{{ segment(v.confirmed) }}</span>{% endif -%}
+</p>
+{%- else -%}
 {%- set state = d.state or "unknown" -%}
 <p class="dev-state state-{{ state }}" data-part="state">{{ icon(state_icon.get(state, "help")) }}<strong>{{ t["state_" ~ state] }}</strong>
 {%- if state == "online" and d.since %} <span class="state-more">{{ (t.since_line|e).format(time=time(d.since), duration=x("elapsed", d.since)) }}</span>
@@ -65,6 +81,48 @@
 {%- elif state == "unknown" and not d.diagnostics %} <span class="state-more">{{ t.unknown_line }}</span>
 {%- endif -%}
 </p>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- an admin's view of how the state was decided: reason code, basis, the session (AP, started,
+    updated), when it counts as stale, the poll hint and the evidence (render.js presenceAdmin) -#}
+{%- macro presence_admin(d) -%}
+{%- set p = fmt.presence(d) if fmt is defined else none -%}
+<div class="presence-admin" data-part="presence">
+{%- if p and not p.derived %}
+  <details class="pr-admin"><summary>{{ icon("list") }}{{ t.pr_admin_title }}</summary>
+  <dl class="mini-kv">
+    <div><dt>{{ t.pr_admin_state }}</dt><dd><span class="mono">{{ p.state }}</span>{% if p.basis %} · {{ t.get("basis_" ~ p.basis, p.basis) }}{% endif %}</dd></div>
+    <div><dt>{{ t.pr_admin_reason }}</dt><dd><span class="mono">{{ p.reason or "–" }}</span>{% if p.reason %} <span class="muted">{{ t.get("pr_reason_" ~ p.reason, t.pr_reason_other) }}</span>{% endif %}</dd></div>
+    <div><dt>{{ t.pr_admin_since }}</dt><dd>{% if p.since %}{{ moment(fmt.moment(p.since, "recent", lang, now)) }}{% else %}–{% endif %}</dd></div>
+    <div><dt>{{ t.pr_admin_confirmed }}</dt><dd>{% if p.confirmed_at %}{{ moment(fmt.moment(p.confirmed_at, "recent", lang, now)) }}{% else %}–{% endif %}{% if p.confirmed_by %} · {{ t.get("src_admin_" ~ p.confirmed_by, p.confirmed_by) }}{% endif %}</dd></div>
+    {%- set s = p.session %}
+    <div><dt>{{ t.pr_admin_session }}</dt><dd>
+    {%- if s %}
+      {%- if s.ap %}{{ x("room", s.ap if s.ap is mapping else fmt.ap_from_name(s.ap)) }} {% endif %}
+      {%- if s.nas_ip %}<span class="mono muted">{{ s.nas_ip }}</span>{% endif %}{% if s.acct_session_id %} <span class="mono muted">{{ s.acct_session_id }}</span>{% endif %}<br>
+      {%- if s.started %}{{ (t.pr_admin_started|e).format(when=moment(fmt.moment(s.started, "recent", lang, now))) }}{% endif %}
+      {%- if s.updated %}{% if s.started %} · {% endif %}{{ (t.pr_admin_updated|e).format(when=moment(fmt.moment(s.updated, "recent", lang, now))) }}{% endif %}
+      {%- if s.stopped %} · {{ (t.pr_admin_stopped|e).format(when=moment(fmt.moment(s.stopped, "recent", lang, now))) }}{% endif %}
+      {%- if s.cause %} <span class="mono muted">{{ s.cause }}</span>{% endif %}
+      {%- if s.interim_s %} · {{ t.pr_admin_interim.format(duration=x("duration", s.interim_s)) }}{% if s.interim_basis %} <span class="muted">({{ t.get("basis_" ~ s.interim_basis, s.interim_basis) }})</span>{% endif %}{% endif %}
+    {%- else %}<span class="muted">{{ t.pr_admin_session_none }}</span>{% endif %}</dd></div>
+    {%- if p.stale_after_s %}
+    <div><dt>{{ t.pr_admin_stale_after }}</dt><dd>{{ t.pr_admin_stale_value.format(duration=x("duration", p.stale_after_s)) }} <span class="mono muted">{{ p.stale_after_s }} s</span></dd></div>
+    {%- endif %}
+    {%- if p.poll_s %}<div><dt>{{ t.pr_admin_poll }}</dt><dd>{{ x("duration", p.poll_s) }}</dd></div>{% endif %}
+    <div><dt>{{ t.pr_admin_evidence }}</dt><dd>
+    {%- if p.evidence %}
+      <ol class="pr-evidence">
+      {%- for e in fmt.presence_evidence(p) %}
+        <li>{% if e.at %}{{ moment(fmt.moment(e.at, "recent", lang, now)) }}{% else %}–{% endif %} · {{ t.get("src_admin_" ~ e.source, e.source or "–") }} · <span class="mono">{{ e.kind or "–" }}</span></li>
+      {%- endfor %}
+      </ol>
+    {%- else %}<span class="muted">{{ t.pr_admin_evidence_none }}</span>{% endif %}</dd></div>
+  </dl>
+  </details>
+{%- endif %}
+</div>
 {%- endmacro -%}
 
 {#- what the Wi-Fi knows about the device now; a fact only when its value is known -#}
@@ -134,7 +192,7 @@
     explanation and what it is based on, `limit` shows only the first ones (the rest: a link to
     the device page) -#}
 {%- macro findings(d, full=False, limit=none, admin=False) -%}
-{%- set all = d.diagnostics or [] -%}
+{%- set all = fmt.findings_shown(d) if fmt is defined else (d.diagnostics or []) -%}
 {%- set list = all[:limit] if limit else all -%}
 <div class="diag" data-part="diag">
 {%- if list %}
@@ -162,7 +220,7 @@
   {%- if all|length > list|length %}
   <p class="diag-more"><a href="/devices/{{ d.id }}">{{ (t.diag_more|e).format(n=all|length - list|length) }}</a></p>
   {%- endif %}
-{%- elif d.state == "online" and (not dashboard is defined or dashboard.telemetry == "ok") %}
+{%- elif state_of(d) == "online" and (not dashboard is defined or dashboard.telemetry == "ok") %}
   <p class="all-good">{{ icon("check") }}{{ t.all_good }}</p>
 {%- endif %}
 </div>
@@ -263,7 +321,7 @@
 {%- endmacro -%}
 
 {%- macro device_icon(d) -%}
-<span class="dev-icon state-{{ d.state or 'unknown' }}" aria-hidden="true"><svg class="icon"><use href="#i-{{ 'laptop' if d.platform in ('apple-mac', 'letswifi') else 'phone' }}"/></svg></span>
+<span class="dev-icon state-{{ state_of(d) }}" aria-hidden="true"><svg class="icon"><use href="#i-{{ 'laptop' if d.platform in ('apple-mac', 'letswifi') else 'phone' }}"/></svg></span>
 {%- endmacro -%}
 
 {#- the name as a heading with a small edit button; the button opens the rename form (a plain

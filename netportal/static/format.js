@@ -47,7 +47,7 @@ export const EVIDENCE_SPEC = {
   poor_coverage: [["aps", "ap_signals"]],
   incident_correlated: [["incident", "incident"], ["disconnects", "times"]],
   stale_data: [["age_s", "duration"], ["threshold_s", "limit_duration"]],
-  offline: [["last_seen", "ago"]],
+  offline: [["confirmed_at", "recent"], ["confirmed_by", "source"], ["last_seen", "ago"]],
   mac_conflict: [["owners", "count"]],
   never_connected: [],
 };
@@ -56,7 +56,8 @@ export const EVIDENCE_FORMAT = {
   reconnects_24h: "count", link_rx_bps: "bitrate", throughput_bps: "bitrate", age_s: "duration", associated_s: "duration",
   last_at: "when", last_accept: "when", last_seen: "ago", expires: "date", days_left: "days", count_24h: "count",
   macs_30d: "count", clients: "count", owners: "count", reasons: "reasons", causes: "causes", ap: "room",
-  aps: "ap_signals", band: "band", bands_7d: "bands", incident: "incident", disconnects: "times",
+  aps: "ap_signals", band: "band", bands_7d: "bands", incident: "incident", disconnects: "times", confirmed_at: "recent",
+  confirmed_by: "source",
 };
 export const EVIDENCE_SHORT = {
   frequent_disconnects: ["reconnects_24h", "times_24h"], auth_failures: ["count_24h", "times_24h"],
@@ -180,21 +181,40 @@ export function createFormatter(lang, texts, { timeZone = HOUSE_TZ } = {}) {
     return fill(t("ago_fmt"), { when: duration(seconds, 1) });
   }
 
+  /** A moment to the second, for what was just confirmed: "just now" (under 5 s), "12 s ago",
+   *  beyond a minute as ago() (i18n.Format.recent). */
+  function recent(value, now = Date.now()) {
+    const when = toDate(value);
+    if (!when) return NONE;
+    const seconds = ((toDate(now) || new Date()).getTime() - when.getTime()) / 1000;
+    if (seconds < 5) return t("ago_now");
+    if (seconds < 60) return fill(t("ago_fmt"), { when: fill(t("dur_s"), { n: Math.floor(seconds) }) });
+    return ago(value, now);
+  }
+
+  /** How long since `start` ("2 h 15 min"; i18n.Format.elapsed). */
+  function elapsed(start, now = Date.now()) {
+    const begin = toDate(start);
+    if (!begin) return NONE;
+    return duration(((toDate(now) || new Date()).getTime() - begin.getTime()) / 1000);
+  }
+
   // The house's wall clock for a moment, without depending on the browser's own zone.
   const partsFormat = new Intl.DateTimeFormat("en-GB", {
-    timeZone, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", hourCycle: "h23",
+    timeZone, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric",
+    hourCycle: "h23",
   });
   function wall(date) {
     const p = {};
     for (const { type, value } of partsFormat.formatToParts(date)) p[type] = Number(value);
-    return { year: p.year, month: p.month, day: p.day, hour: p.hour % 24, minute: p.minute };
+    return { year: p.year, month: p.month, day: p.day, hour: p.hour % 24, minute: p.minute, second: p.second };
   }
   function strftime(w, pattern) {
     const pad = (n) => String(n).padStart(2, "0");
     const months = texts && Array.isArray(texts.months) ? texts.months : [];
-    return pattern.replace(/%[YmdeHMb]/g, (code) => ({
+    return pattern.replace(/%[YmdeHMSb]/g, (code) => ({
       "%Y": String(w.year).padStart(4, "0"), "%m": pad(w.month), "%d": pad(w.day), "%e": String(w.day),
-      "%H": pad(w.hour), "%M": pad(w.minute), "%b": months[w.month - 1] || pad(w.month),
+      "%H": pad(w.hour), "%M": pad(w.minute), "%S": pad(w.second ?? 0), "%b": months[w.month - 1] || pad(w.month),
     })[code]);
   }
   const dayNumber = (w) => Date.UTC(w.year, w.month - 1, w.day) / 86400000;
@@ -213,6 +233,11 @@ export function createFormatter(lang, texts, { timeZone = HOUSE_TZ } = {}) {
   function date(value) {
     const d = toDate(value);
     return d ? strftime(wall(d), t("date_format")) : NONE;
+  }
+  /** The full moment with seconds in the house's time (a tooltip; i18n.Format.stamp). */
+  function stamp(value) {
+    const d = toDate(value);
+    return d ? strftime(wall(d), `${t("date_format")} %H:%M:%S`) : NONE;
   }
   /** A chart axis label: the clock for short spans, the day for long ones. */
   function axisTime(value, spanSeconds) {
@@ -286,6 +311,13 @@ export function createFormatter(lang, texts, { timeZone = HOUSE_TZ } = {}) {
         case "days": return fill(t("days_n"), { n: value });
         case "when": return when(value);
         case "ago": return ago(value);
+        case "recent": return recent(value);
+        case "source": {
+          const own = t(admin ? `src_admin_${value}` : `pr_src_${value}`);
+          if (!own.startsWith(admin ? "src_admin_" : "pr_src_")) return own;
+          const plainKey = t(`src_${value}`);
+          return admin || plainKey === `src_${value}` ? String(value) : plainKey;
+        }
         case "date": return date(value);
         case "times": return value.slice(0, 3).map((v) => when(v)).join(", ") + (value.length > 3 ? " …" : "");
         case "band": return bandName(value);
@@ -334,7 +366,8 @@ export function createFormatter(lang, texts, { timeZone = HOUSE_TZ } = {}) {
     return first ? first[1] : null;
   }
 
-  const api = { lang, t, fill, number, evidenceShort, bytes, bitrate, percent, dbm, db, ms, duration, ago, when, date, day, axisTime,
+  const api = { lang, t, fill, number, evidenceShort, bytes, bitrate, percent, dbm, db, ms, duration, ago, recent, elapsed, stamp,
+    when, date, day, axisTime,
     room, proto, bandName, wifi, signalLevel, healthLevel, scope, incidentText, evidenceItems, evidenceValue,
     causeKey, reasonKey, apFromName };
   return api;

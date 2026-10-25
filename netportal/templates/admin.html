@@ -31,24 +31,25 @@
 {% set want_state = request.args.get("state") or "" %}
 {% set want_problem = request.args.get("problem") or "" %}
 {% set sort = request.args.get("sort") if request.args.get("sort") in ("name", "owner", "state", "signal", "health", "seen") else "name" %}
-{% set state_order = {"offline": 0, "never_connected": 1, "unknown": 2, "online": 3} %}
+{% set state_order = {"offline": 0, "never_connected": 1, "unknown": 2, "connecting": 3, "online": 4} %}
 {% set ns = namespace(shown=0) %}
 {% set keyed = [] %}
 {% for d in all|sort(attribute="name") %}
   {% set owner = d.owner or {} %}
+  {% set st = dash.state_of(d)|string %}
   {% set problems = (d.diagnostics or [])|selectattr("severity", "in", ["warn", "bad"])|list %}
   {% set codes = (d.diagnostics or [])|map(attribute="code")|list %}
   {% set hay = [d.name, owner.username, owner.display, d.mac]|select|join(" ")|lower %}
   {% set match = (not q or q in hay or q_mac in hay)
-       and (not want_state or d.state == want_state)
+       and (not want_state or st == want_state)
        and (not want_problem or (want_problem == "with" and problems) or (want_problem == "without" and not problems)
             or want_problem in codes) %}
   {% if match %}{% set ns.shown = ns.shown + 1 %}{% endif %}
   {% if sort == "owner" %}{% set key = ((owner.display or owner.username or "")|lower) %}
-  {% elif sort == "state" %}{% set key = state_order.get(d.state, 2) %}
+  {% elif sort == "state" %}{% set key = state_order.get(st, 2) %}
   {% elif sort == "signal" %}{% set key = d.signal_dbm if d.signal_dbm is not none and d.signal_dbm is defined else 999 %}
   {% elif sort == "health" %}{% set key = d.health if d.health is not none and d.health is defined else 999 %}
-  {% elif sort == "seen" %}{% set key = "~" if d.state == "online" else (d.last_seen|string if d.last_seen else "") %}
+  {% elif sort == "seen" %}{% set key = "~" if st in ("online", "connecting") else (d.last_seen|string if d.last_seen else "") %}
   {% else %}{% set key = d.name|lower %}{% endif %}
   {% set _ = keyed.append([key, d, match, problems, codes]) %}
 {% endfor %}
@@ -56,18 +57,19 @@
 
 {% macro admin_row(d, shown, problems, codes) %}
 {% set owner = d.owner or {} %}
+{% set st = dash.state_of(d)|string %}
 {% set row = rows.get(d.id|string) %}
 <li class="adm-item" data-device="{{ d.id }}" data-name="{{ d.name|lower }}" data-owner="{{ ((owner.display or '') ~ ' ' ~ (owner.username or ''))|lower }}"
-    data-mac="{{ d.mac or '' }}" data-state="{{ d.state }}" data-codes="{{ codes|join(' ') }}" data-problems="{{ problems|length }}"
+    data-mac="{{ d.mac or '' }}" data-state="{{ st }}" data-codes="{{ codes|join(' ') }}" data-problems="{{ problems|length }}"
     data-signal="{{ d.signal_dbm if d.signal_dbm is not none and d.signal_dbm is defined else '' }}"
     data-health="{{ d.health if d.health is not none and d.health is defined else '' }}"
-    data-seen="{{ '~' if d.state == 'online' else ((fmt.iso(d.last_seen) if fmt is defined else d.last_seen|string) if d.last_seen else '') }}"{% if not shown %} hidden{% endif %}>
+    data-seen="{{ '~' if st in ('online', 'connecting') else ((fmt.iso(d.last_seen) if fmt is defined else d.last_seen|string) if d.last_seen else '') }}"{% if not shown %} hidden{% endif %}>
   <details class="adm-row">
     <summary>
-      <span class="adm-state state-{{ d.state }}" data-part="sum-state">{{ dash.icon(dash.state_icon.get(d.state, "help")) }}<span class="sr">{{ t["state_" ~ d.state] }}</span></span>
+      <span class="adm-state state-{{ st }}" data-part="sum-state">{{ dash.icon(dash.state_icon.get(st, "help")) }}<span class="sr">{{ t["state_" ~ st] }}</span></span>
       <span class="adm-main"><strong class="adm-name" data-part="sum-name">{{ d.name }}</strong><span class="adm-owner">{{ owner.display or owner.username or "–" }}</span></span>
       <span class="adm-info">
-      <span class="adm-room" data-part="sum-room">{{ dash.x("room", d.ap) if d.ap else t["state_" ~ d.state] }}</span>
+      <span class="adm-room" data-part="sum-room">{{ dash.x("room", d.ap) if d.ap else t["state_" ~ st] }}</span>
       <span class="adm-signal" data-part="sum-signal">{% if d.signal_dbm is not none and d.signal_dbm is defined %}{% set lvl = dash.signal_level(d.signal_dbm).split("|") %}{{ dash.bars(lvl[0]|int, lvl[2]) }}{{ dash.x("dbm", d.signal_dbm) }}{% endif %}</span>
       <span class="adm-badge" data-part="sum-badge">{% if problems %}{% set worst = "bad" if problems|selectattr("severity", "equalto", "bad")|list else "warn" %}<span class="badge sev-{{ worst }}">{{ dash.icon(dash.tone_icon[worst]) }}{{ (t.adm_problems_n|e).format(n=problems|length) }}</span>{% endif %}</span>
       </span>
@@ -75,6 +77,7 @@
     </summary>
     <div class="adm-body">
       {{ dash.state_line(d) }}
+      {{ dash.presence_admin(d) }}
       {{ dash.live(d) }}
       {{ dash.findings(d, admin=True) }}
       <p class="meta">
@@ -173,7 +176,7 @@
     <label class="f-select"><span>{{ t.adm_state }}</span>
       <select name="state">
         <option value="">{{ t.adm_any }}</option>
-        {% for s in ("online", "offline", "never_connected", "unknown") %}<option value="{{ s }}"{% if want_state == s %} selected{% endif %}>{{ t["state_" ~ s] }}</option>{% endfor %}
+        {% for s in ("online", "connecting", "offline", "never_connected", "unknown") %}<option value="{{ s }}"{% if want_state == s %} selected{% endif %}>{{ t["state_" ~ s] }}</option>{% endfor %}
       </select></label>
     <label class="f-select"><span>{{ t.adm_problem }}</span>
       <select name="problem">

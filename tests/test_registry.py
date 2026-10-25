@@ -51,7 +51,7 @@ class NormaliseMacTests(unittest.TestCase):
 class MigrationFileTests(unittest.TestCase):
     def test_versions_names_checksums(self):
         files = registry.migration_files()
-        self.assertEqual([(v, n) for v, n, _, _ in files], [(1, "baseline"), (2, "telemetry")])
+        self.assertEqual([(v, n) for v, n, _, _ in files], [(1, "baseline"), (2, "telemetry"), (3, "presence")])
         for _, _, sql, checksum in files:
             self.assertEqual(checksum, hashlib.sha256(sql.encode()).hexdigest())
 
@@ -120,9 +120,10 @@ class MigrateRunnerTests(unittest.TestCase):
     def test_applies_missing_in_order_under_the_lock(self):
         db = FakeDb({1: self.files[0][3]})
         result = registry.migrate(db)
-        self.assertEqual(result["applied"], [2])
+        self.assertEqual(result["applied"], [2, 3])
         self.assertIn("pg_advisory_xact_lock", db.executed[0])
         self.assertIn(self.files[1][2], db.executed)
+        self.assertLess(db.executed.index(self.files[1][2]), db.executed.index(self.files[2][2]))
         self.assertNotIn(self.files[0][2], db.executed)
         self.assertEqual((db.commits, db.rollbacks), (1, 0))
 
@@ -134,7 +135,7 @@ class MigrateRunnerTests(unittest.TestCase):
         self.assertFalse(any("REVOKE" in sql for sql in db.executed))     # grants not run either
 
     def test_newer_schema_is_left_alone(self):
-        db = FakeDb({1: self.files[0][3], 2: self.files[1][3], 99: "f" * 64})
+        db = FakeDb({1: self.files[0][3], 2: self.files[1][3], 3: self.files[2][3], 99: "f" * 64})
         with self.assertLogs("netportal.registry", "INFO") as logs:
             result = registry.migrate(db)
         self.assertEqual(result["applied"], [])

@@ -3,7 +3,8 @@
 # device CA chain), /etc/netportal-secrets/radius-server.key and clients.conf (the access
 # points). Environment:
 # RADIUS_DB_HOST, RADIUS_DB_NAME, RADIUS_DB_PASSWORD, RADIUS_STATUS_SECRET, DEVICE_CA_DN,
-# RADIUS_SESSION_TIMEOUT (seconds).
+# RADIUS_SESSION_TIMEOUT (seconds), NETPORTAL_ACCT_INTERIM_S (accounting interval, seconds; default
+# 300, set by the entrypoint).
 # Built from the repository root (docker build -f radius/Dockerfile .): a git context with a
 # subdirectory (repo.git#<commit>:radius) fails in buildx 0.38 ("failed to stat policy file
 # Dockerfile.rego ... 404") whenever the git source is not cached yet.

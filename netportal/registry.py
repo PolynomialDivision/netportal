@@ -552,23 +552,73 @@ def auth_failures(db, since, until=None, limit=500):
 
 
 ACCT_COLUMNS = ("nas_ip", "acct_session_id", "link", "mac", "bssid", "ssid", "framed_ip", "started", "updated",
-                "stopped", "session_time_s", "input_octets", "output_octets", "terminate_cause")
+                "stopped", "session_time_s", "input_octets", "output_octets", "terminate_cause", "interim_s")
 
 
 def acct_sessions(db, device_id, since, until, limit=1000):
     """The device's accounting sessions overlapping [since, until], oldest first (the newest
     `limit`): [{"nas_ip", "acct_session_id", "link", "mac", "bssid", "ssid", "framed_ip",
     "started", "updated", "stopped", "session_time_s", "input_octets", "output_octets",
-    "terminate_cause"}]. stopped None: open (or its Stop never came: see updated)."""
+    "terminate_cause", "interim_s"}]. stopped None: open (or its Stop never came: see updated);
+    interim_s: the measured accounting interval (None: not measured yet)."""
     rows = list(db.execute("""
         SELECT host(nas_ip) AS nas_ip, acct_session_id, link, mac::text AS mac, bssid::text AS bssid, ssid,
                host(framed_ip) AS framed_ip, started, updated, stopped, session_time_s, input_octets,
-               output_octets, terminate_cause
+               output_octets, terminate_cause, interim_s
         FROM radius_acct
         WHERE device_id = %s AND coalesce(started, updated) <= %s AND coalesce(stopped, updated) >= %s
         ORDER BY coalesce(started, updated) DESC LIMIT %s""", (str(device_id), until, since, _limit(limit))))
     rows.reverse()
     return rows
+
+
+# The presence rules (netportal/presence.py) read a few of each device's newest sessions and
+# UniFi events: the alive ones and the latest ended ones are always among them.
+PRESENCE_SESSIONS, PRESENCE_EVENTS = 5, 3
+
+
+def latest_sessions(db, device_ids, per_device=PRESENCE_SESSIONS):
+    """{device_id: [session]} of the given devices, newest update first, at most per_device each,
+    in one query (an index scan of radius_acct_device per device): [{"nas_ip", "acct_session_id",
+    "link", "mac", "bssid", "ssid", "started", "updated", "stopped", "terminate_cause",
+    "session_time_s", "interim_s" (measured, None: not yet), "nas_interim_s" (the NAS's latest
+    measured interval)}]. Every requested id is a key."""
+    result = {d: [] for d in _ids(device_ids)}
+    if not result:
+        return result
+    for r in db.execute("""
+            SELECT d.id::text AS device_id, s.*
+            FROM unnest(%s::uuid[]) AS d(id)
+            CROSS JOIN LATERAL (
+                SELECT host(a.nas_ip) AS nas_ip, a.acct_session_id, a.link, a.mac::text AS mac,
+                       a.bssid::text AS bssid, a.ssid, a.started, a.updated, a.stopped, a.terminate_cause,
+                       a.session_time_s, a.interim_s, n.interim_s AS nas_interim_s
+                FROM radius_acct a LEFT JOIN radius_nas n ON n.nas_ip = a.nas_ip
+                WHERE a.device_id = d.id
+                ORDER BY a.updated DESC LIMIT %s) s""", (list(result), _limit(per_device, 100))):
+        result[r.pop("device_id")].append(r)
+    return result
+
+
+def latest_connection_events(db, device_ids, per_device=PRESENCE_EVENTS, ssid=None):
+    """{device_id: [event]} of the given devices: their newest UniFi connected / disconnected /
+    roamed events (of this SSID, or without one, when given), newest first, at most per_device
+    each, in one query (connection_event_device): [{"at", "kind", "mac", "ap_mac", "ap_name"}].
+    Every requested id is a key."""
+    result = {d: [] for d in _ids(device_ids)}
+    if not result:
+        return result
+    for r in db.execute("""
+            SELECT d.id::text AS device_id, e.*
+            FROM unnest(%s::uuid[]) AS d(id)
+            CROSS JOIN LATERAL (
+                SELECT c.at, c.kind, c.mac::text AS mac, c.ap_mac::text AS ap_mac, c.ap_name
+                FROM connection_event c
+                WHERE c.device_id = d.id AND c.kind IN ('connected', 'disconnected', 'roamed')
+                  AND (%s::text IS NULL OR c.ssid IS NULL OR c.ssid = %s)
+                ORDER BY c.at DESC, c.id DESC LIMIT %s) e""", (list(result), ssid, ssid, _limit(per_device, 100))):
+        result[r.pop("device_id")].append(r)
+    return result
 
 
 # --- UniFi connection events -------------------------------------------------------------------

@@ -31,6 +31,10 @@ sql sql_log {
 		# the two pools apart by it.
 		send_application_name = yes
 	}
+	# Opened on demand (unlike the decision's pool, mods/sql): a logging call that finds no free
+	# connection only loses its row (a login without Class), and a pool that kept all four open
+	# would retry them on every request while the database is gone, so accounting answers came
+	# too late (integration test, database down). connect_timeout keeps a reconnect short.
 	pool {
 		start = 1
 		min = 1
@@ -41,5 +45,6 @@ sql sql_log {
 		max_retries = 0
 		lifetime = 0
 		idle_timeout = 60
+		connect_timeout = 1.0
 	}
 }

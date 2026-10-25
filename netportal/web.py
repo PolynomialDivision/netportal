@@ -16,6 +16,7 @@ import base64
 import datetime
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -26,7 +27,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.flask_client import OAuth
 from flask import Flask, abort, g, jsonify, redirect, render_template, request, session, url_for
 
-from . import config, disconnect, enroll, i18n, metrics, registry, telemetry
+from . import config, disconnect, enroll, i18n, metrics, presence, registry, telemetry
 
 log = logging.getLogger("netportal")
 
@@ -52,8 +53,12 @@ LIMIT_RE = re.compile(r"[0-9]{1,4}")
 INCIDENT_RANGES = {"7d": 7 * 86400, "30d": 30 * 86400, "90d": 90 * 86400, "1y": 365 * 86400}
 INCIDENT_KINDS = ("internet_down", "internet_degraded", "router_down", "dns_down", "ap_down", "ap_restarted",
                   "switch_down", "switch_port_down", "unifi_data_stale", "radius_down")
-# The device states the admin list filters by.
-DEVICE_STATES = ("online", "offline", "never_connected", "unknown")
+# The device states the admin list filters by (presence.STATES).
+DEVICE_STATES = ("online", "connecting", "offline", "never_connected", "unknown")
+# What the device APIs' ETag leaves out: values that change with every request (the request's
+# time, ages counted to it) rather than with the data; the absolute times stay in (presence's
+# confirmed_at, since; house.wifi_data_at).
+ETAG_VOLATILE = frozenset({"generated_at", "wifi_data_age_s", "age_s", "associated_s"})
 # The app's authorization request, as the consent form sends it back (templates/consent.html).
 CONSENT_ARGS = ("client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state",
                 "scope")
@@ -276,7 +281,8 @@ def create_app(settings=None):
         withheld from residents for that time (a device sends its own MAC: it could send someone
         else's); admins see the data and the conflict. detail: one device's page (its 24 h of
         accounting and UniFi events for the findings)."""
-        payload = telemetry.dashboard(budget(), rows, owners=owners, admin=is_admin(), db=g.db, detail=detail)
+        payload = telemetry.dashboard(budget(), rows, owners=owners, admin=is_admin(), db=g.db, detail=detail,
+                                      interim_s=settings.acct_interim_s)
         for device, row in zip(payload["devices"], rows):
             device["expires_soon"] = enroll.expires_soon(row.get("expires"))
         return payload
@@ -294,6 +300,7 @@ def create_app(settings=None):
                                   or (d["mac"] and mac_q in d["mac"])]
         if state in DEVICE_STATES:
             payload["devices"] = [d for d in payload["devices"] if d["state"] == state]
+        payload["poll_s"] = presence.poll_s(payload["devices"])     # of the devices shown; counts: of all
         return payload
 
     # --- login --------------------------------------------------------------------------------
@@ -528,10 +535,23 @@ def create_app(settings=None):
 
     # --- the dashboard's JSON API (same login as the pages) ------------------------------------
 
+    def polled(payload):
+        """A device API's answer for the page's polling: top-level poll_s (presence's hint),
+        an ETag over the payload without the per-request values (ETAG_VOLATILE), 304 when the
+        browser's If-None-Match has it. Cache-Control private, no-cache: the browser keeps the
+        answer but asks again every time (the login is checked first, every time)."""
+        payload.setdefault("poll_s", presence.poll_s(payload.get("devices") or [payload.get("device") or {}]))
+        tag = etag(payload)
+        resp = app.response_class(status=304) if tag in if_none_match(request.headers.get("If-None-Match")) \
+            else jsonify(payload)
+        resp.headers["ETag"] = tag
+        resp.headers["Cache-Control"] = "private, no-cache"
+        return resp
+
     @app.get("/api/devices")
     def api_devices():
         user = api_user()
-        return jsonify(dashboard(registry.devices(g.db, owner=user["sub"])))
+        return polled(dashboard(registry.devices(g.db, owner=user["sub"])))
 
     @app.get("/api/devices/<uuid:device_id>")
     def api_device(device_id):
@@ -540,7 +560,8 @@ def create_app(settings=None):
         user = api_user()
         payload = device_payload(own_device(device_id, user), user)
         payload["device"] = payload.pop("devices")[0]
-        return jsonify(payload)
+        payload.pop("counts", None)
+        return polled(payload)
 
     @app.get("/api/devices/<uuid:device_id>/history")
     def api_history(device_id):
@@ -559,7 +580,7 @@ def create_app(settings=None):
     @app.get("/api/admin/devices")
     def api_admin_devices():
         api_user(admin=True)
-        return jsonify(admin_dashboard(request.args.get("q", ""), request.args.get("state", "")))
+        return polled(admin_dashboard(request.args.get("q", ""), request.args.get("state", "")))
 
     @app.get("/api/admin/overview")
     def api_admin_overview():
@@ -814,6 +835,44 @@ def parse_time(text, default):
     if value.tzinfo is None:
         value = value.replace(tzinfo=datetime.timezone.utc)
     return value.timestamp()
+
+
+def _stable(value):
+    """The payload without ETAG_VOLATILE keys (at any depth)."""
+    if isinstance(value, dict):
+        return {k: _stable(v) for k, v in value.items() if k not in ETAG_VOLATILE}
+    if isinstance(value, list):
+        return [_stable(v) for v in value]
+    return value
+
+
+def etag(payload):
+    """A weak ETag of a JSON payload: the same data, the same tag (keys sorted; the
+    per-request values left out)."""
+    body = json.dumps(_stable(payload), sort_keys=True, separators=(",", ":"), default=str)
+    return 'W/"%s"' % hashlib.sha256(body.encode()).hexdigest()[:32]
+
+
+def if_none_match(header):
+    """The tags of an If-None-Match header (weak and strong compare alike for a GET; "*" matches
+    any)."""
+    if not header:
+        return set()
+    tags = set()
+    for part in header.split(","):
+        part = part.strip()
+        if part == "*":
+            return _Any()
+        if part.startswith("W/"):
+            part = part[2:]
+        if part:
+            tags.add('W/' + part)
+    return tags
+
+
+class _Any:
+    def __contains__(self, _item):
+        return True
 
 
 def json_error(code, status):

@@ -45,6 +45,13 @@ def _parse_vector(data):
     return [(_labels(r["metric"]), number(r["value"][1])) for r in data["result"]]
 
 
+def _parse_samples(data):
+    """[(labels, value, evaluation time)] of a vector (house.house_status: the snapshot time)."""
+    if data["resultType"] != "vector":
+        raise ValueError("not a vector")
+    return [(_labels(r["metric"]), number(r["value"][1]), float(r["value"][0])) for r in data["result"]]
+
+
 def _parse_matrix(data):
     if data["resultType"] != "matrix":
         raise ValueError("not a matrix")
@@ -73,6 +80,10 @@ class Prometheus:
         """[(labels, value)] of an instant query."""
         return self._get("query", self._params(promql, time=at), _parse_vector, ttl, deadline)
 
+    def samples(self, promql, at=None, ttl=CACHE_SECONDS, deadline=None):
+        """[(labels, value, evaluation time)] of an instant query."""
+        return self._get("query", self._params(promql, time=at), _parse_samples, ttl, deadline)
+
     def matrix(self, promql, at=None, ttl=CACHE_SECONDS, deadline=None):
         """[(labels, [(t, value)])] of an instant query of a range (a subquery)."""
         return self._get("query", self._params(promql, time=at), _parse_matrix, ttl, deadline)
@@ -97,7 +108,7 @@ class Prometheus:
         return max(0.05, left)
 
     def _get(self, path, params, parse, ttl, deadline):
-        key = (path, tuple(sorted(params.items())))
+        key = (path, tuple(sorted(params.items())), parse.__name__)
         refused = None
         with self._lock:
             hit = self._lookup(key)
@@ -184,6 +195,9 @@ class Budget:
 
     def matrix(self, promql, at=None, ttl=CACHE_SECONDS):
         return self.client.matrix(promql, at, ttl, self.deadline)
+
+    def samples(self, promql, at=None, ttl=CACHE_SECONDS):
+        return self.client.samples(promql, at, ttl, self.deadline)
 
     def range(self, promql, start, end, step, ttl=CACHE_SECONDS):
         return self.client.range(promql, start, end, step, ttl, self.deadline)

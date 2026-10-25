@@ -1,19 +1,24 @@
-// The "My devices" pages come alive: a refresh every 30 seconds from the JSON API (paused while
-// the tab is hidden), honest states (updating, offline, portal unreachable, stale data, login
-// ended), the inline rename, the admin list's search, filters and sorting, the device page's
+// The "My devices" pages come alive: a refresh from the JSON API (live.js: conditional requests
+// with the last ETag, every 30 seconds or every 5 while a device connects, backoff on errors,
+// paused while the tab is hidden; relative times tick between requests), honest states
+// (updating, offline, portal unreachable, stale data, login ended), the inline rename, the admin list's search, filters and sorting, the device page's
 // charts (lines up to 90 days, day bars beyond) and merged connection timeline, the admin
 // overview, the access point and incident pages, and a device's raw data on demand. Without
 // this script every page is complete as the server sent it. No libraries, no inline code, no
 // eval, same-origin requests only (the CSP allows nothing else).
 
 import { createFormatter, toDate } from "./format.js";
+import { createClient, createPoller, LoginEnded, Offline, POLL, pollMs, WIFI_AGE_BANNER_S, withAges } from "./live.js";
+import { stateOf } from "./presence.js";
 import * as R from "./render.js";
 import * as A from "./admin.js";
 import { apName, apSlots, availability, barChart, bytesPerDay, incidentLanes, laneChart, lineChart, summary, timelineChart,
   timelineSegments, toMs, toPoints } from "./charts.js";
 
-const REFRESH_MS = 30e3;          // the live data
-const TIMEOUT_MS = 15e3;          // a request that takes longer counts as unreachable
+const REFRESH_MS = POLL.defaultMs; // the live data, unless the payload's poll_s says otherwise
+const TICK_MS = 5e3;              // relative times ("12 s ago") between two requests
+const BUSY_AFTER_MS = 600;        // a request shows "updating" only when it takes this long
+const OVERVIEW_EVERY_MS = 30e3;   // the admin overview: not every 5 s while a device connects
 const HISTORY_EVERY_MS = 5 * 60e3; // the 24-hour charts follow along every 5 minutes
 const RAW_MAX_MS = 31 * 86400e3;     // /api/admin/devices/<id>/raw answers at most 31 days
 const RANGE_MS = { "24h": 86400e3, "7d": 7 * 86400e3, "30d": 30 * 86400e3, "90d": 90 * 86400e3, "1y": 365 * 86400e3 };
@@ -25,27 +30,8 @@ function readJson(id) {
   try { return JSON.parse(node.textContent); } catch { return null; }
 }
 
-class LoginEnded extends Error {}
-class HttpError extends Error {
-  constructor(status) { super(`HTTP ${status}`); this.status = status; }
-}
-
-/** GET (or POST) JSON from the portal. An ended session answers 401, or (from an older
- *  portal) a redirect to the login, which is not followed: both throw LoginEnded. */
-async function requestJson(url, options = {}) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { credentials: "same-origin", redirect: "manual", cache: "no-store", ...options,
-      headers: { Accept: "application/json", ...(options.headers || {}) }, signal: ctrl.signal });
-    if (res.type === "opaqueredirect" || res.status === 401) throw new LoginEnded();
-    const body = (res.headers.get("Content-Type") || "").includes("json") ? await res.json() : null;
-    if (!res.ok) { const e = new HttpError(res.status); e.body = body; throw e; }
-    return body;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const client = createClient();
+const requestJson = (url, options) => client.json(url, options);
 
 function main() {
   const texts = readJson("np-texts"), config = readJson("np-config");
@@ -53,8 +39,10 @@ function main() {
   const f = createFormatter(config.lang || document.documentElement.lang || "en", texts);
   const t = f.t;
   const page = config.page;
-  let data = readJson("np-data") || {};
-  const ctx = { ssid: config.ssid, now: Date.now() };
+  let data = readJson("np-data") || {};        // the body as the portal sent it (a 304 keeps it)
+  let view = data;                               // the same with its ages as of now (live.js withAges)
+  const age = () => { view = withAges(data, client.now()); return view; };
+  const ctx = { ssid: config.ssid, now: client.now() };
 
   const announcer = document.querySelector("[data-announce]");
   const liveText = document.querySelector("[data-live-text]");
@@ -81,7 +69,7 @@ function main() {
     } else if (problem === "unreachable") {
       out.push(R.bannerNodes("warn", t("live_unreachable")));
     }
-    if (problem && problem !== "login" && Date.now() - lastOkAt > STALE_AFTER_MS && !data.stale) {
+    if (problem && problem !== "login" && Date.now() - lastOkAt > STALE_AFTER_MS && !view.stale) {
       out.push(R.bannerNodes("warn", ...R.fillNodes(t("live_stale"), { when: R.timeEl(f, new Date(lastOkAt).toISOString(), "when") })));
     }
     if (changed) {
@@ -92,9 +80,10 @@ function main() {
 
   function drawStatus() {
     const box = document.querySelector("[data-part=banners]");
-    if (box) box.replaceWith(R.banners(data, f, connectionBanners()));
+    if (box) box.replaceWith(R.banners(view, f, connectionBanners()));
     if (liveText) {
-      const when = data.generated_at ? R.timeEl(f, data.generated_at, "when") : null;
+      // the last answer (a 304 too: the data was checked then, it had not changed)
+      const when = lastOkAt ? R.timeEl(f, new Date(lastOkAt).toISOString(), "when") : null;
       liveText.replaceChildren(...(busy ? [t("live_updating")]
         : when ? [...R.fillNodes(t("live_updated"), { when }), " · ", t("live_auto")] : [t("live_auto")]));
     }
@@ -104,7 +93,7 @@ function main() {
   }
 
   // --- drawing the devices ----------------------------------------------------------------
-  const previous = new Map((data.devices || []).map((d) => [d.id, d.state]));
+  const previous = new Map((data.devices || []).map((d) => [d.id, stateOf(d)]));
 
   function replacePart(root, part, node) {
     const old = root.querySelector(`[data-part="${part}"]`);
@@ -114,12 +103,31 @@ function main() {
   function drawCard(root, d, full, limit = 0) {
     const admin = page === "admin" || Boolean(config.admin);
     replacePart(root, "state", R.stateLine(d, f, ctx));
+    if (admin) {
+      const open = Boolean(root.querySelector("[data-part=presence] details")?.open);   // stays as the admin left it
+      const box = R.presenceAdmin(d, f, ctx.now);
+      if (open && box.querySelector("details")) box.querySelector("details").open = true;
+      replacePart(root, "presence", box);
+    }
     replacePart(root, "auth-alert", R.authAlert(d, f, ctx, admin));
     replacePart(root, "live", R.live(d, f));
     replacePart(root, "conn", R.howConnects(d, f, ctx, { full, admin }));
-    replacePart(root, "diag", R.findings(d, f, { full, telemetry: data.telemetry, limit, admin }));
+    drawDiag(root, d, full, limit);
     const box = root.querySelector("[data-name-box]");
     if (box && !box.querySelector("details").open) showName(box, d.name);
+  }
+
+  function drawDiag(root, d, full, limit = 0) {
+    const admin = page === "admin" || Boolean(config.admin);
+    replacePart(root, "diag", R.findings(d, f, { full, telemetry: view.telemetry, limit, admin }));
+  }
+
+  /** A device's card on this page and how it shows its findings: [root, full, limit]. */
+  function cardOf(d) {
+    if (page === "device") return d.id === config.device ? [document.querySelector(".dev-detail"), true, 0] : [null];
+    const node = document.querySelector(`[data-device="${CSS.escape(d.id)}"]`);
+    if (!node) return [null];
+    return page === "admin" ? [node.querySelector(".adm-body"), false, 0] : [node, false, 2];
   }
 
   /** The name in the heading, the edit button's label and the (closed) form's field. */
@@ -136,20 +144,22 @@ function main() {
     const parts = R.summaryParts(d, f);
     for (const [part, node] of Object.entries(parts)) replacePart(item, part, node);
     drawCard(item.querySelector(".adm-body"), d, false);
+    const state = stateOf(d);
     Object.assign(item.dataset, {
-      name: (d.name || "").toLowerCase(), state: d.state, mac: d.mac || "",
+      name: (d.name || "").toLowerCase(), state, mac: d.mac || "",
       owner: `${d.owner?.display || ""} ${d.owner?.username || ""}`.toLowerCase(),
       codes: (d.diagnostics || []).map((x) => x.code).join(" "), problems: String(R.problemsOf(d).length),
-      signal: d.signal_dbm ?? "", health: d.health ?? "", seen: d.state === "online" ? "~" : d.last_seen || "",
+      signal: d.signal_dbm ?? "", health: d.health ?? "", seen: ["online", "connecting"].includes(state) ? "~" : d.last_seen || "",
     });
   }
 
   function drawAll() {
-    ctx.now = Date.now();
+    ctx.now = client.now();
+    age();
     if (page === "aps") { drawAps(); drawStatus(); return; }
     if (page === "incidents") { drawIncidents(); drawStatus(); return; }
     if (page === "admin") drawOverview();
-    const devices = data.devices || [];
+    const devices = view.devices || [];
     const onPage = [...document.querySelectorAll("[data-device]")].map((n) => n.dataset.device);
     const ids = devices.map((d) => d.id);
     if (page === "device") {
@@ -165,83 +175,132 @@ function main() {
       }
       if (page === "admin") applyFilters();
     }
-    if (data.house && document.querySelector("[data-part=house]")) {
-      const strip = R.houseStrip(data.house, f);
-      strip.hidden = data.telemetry !== "ok";
+    if (view.house && document.querySelector("[data-part=house]")) {
+      const strip = R.houseStrip(view.house, f);
+      strip.hidden = view.telemetry !== "ok";
       replacePart(document, "house", strip);
     }
+    let moved = false;
     for (const d of devices) {
-      if (previous.has(d.id) && previous.get(d.id) !== d.state) {
-        announce(f.fill(t("announce_state"), { name: d.name, state: t(`state_${d.state}`) }));
+      const state = stateOf(d);
+      if (previous.has(d.id) && previous.get(d.id) !== state) {
+        announce(f.fill(t("announce_state"), { name: d.name, state: t(`state_${state}`) }));
+        moved = true;
       }
-      previous.set(d.id, d.state);
+      previous.set(d.id, state);
     }
     drawStatus();
+    return moved;
   }
 
-  // --- the refresh ------------------------------------------------------------------------
-  let timer = 0, lastFetch = 0;
-  async function refresh() {
-    clearTimeout(timer);
-    if (problem === "login") return;
-    if (navigator.onLine === false) {
-      problem = "offline";
-      drawStatus();
-      announce(t("live_offline"));
-      return;
-    }
-    busy = true;
-    drawStatus();
-    lastFetch = Date.now();
-    try {
-      data = await fetchPage();
-      lastOkAt = Date.now();
-      problem = null;
-    } catch (err) {
-      problem = err instanceof LoginEnded ? "login" : navigator.onLine === false ? "offline" : "unreachable";
-      announce(problem === "login" ? t("live_login") : problem === "offline" ? t("live_offline") : t("live_unreachable"));
-    } finally {
-      busy = false;
-    }
-    drawAll();
-    if (page === "device" && hist.range === "24h" && Date.now() - hist.loadedAt > HISTORY_EVERY_MS && !problem) {
-      loadHistory(hist.range, { quiet: true });
-    }
-    schedule();
-  }
+  // --- the refresh (live.js: one timer chain, conditional requests) -----------------------
+  let busyTimer = 0, overview = { at: 0, body: data.overview || null };
 
-  /** This page's fresh data: the device page asks for its one device (an admin's view of
-   *  someone else's too), the admin overview for its devices and the overview together. */
+  /** This page's fresh data and whether any of it changed (false: every part answered 304).
+   *  The device page asks for its one device (an admin's view of someone else's too), the admin
+   *  overview for its devices and, at most every 30 seconds, the overview. */
   async function fetchPage() {
     if (page === "device") {
-      const fresh = await requestJson(`/api/devices/${encodeURIComponent(config.device)}`);
-      return { ...fresh, devices: fresh.device ? [fresh.device] : [] };
+      const r = await client.request(`/api/devices/${encodeURIComponent(config.device)}`, { conditional: true });
+      return { fresh: r.fresh, data: { ...r.body, devices: r.body && r.body.device ? [r.body.device] : [] } };
     }
     if (page === "admin" && config.overview) {
-      const [devices, overview] = await Promise.all([requestJson(config.api), requestJson(config.overview)]);
-      return { ...devices, overview };
+      const due = Date.now() - overview.at >= OVERVIEW_EVERY_MS || !overview.body;
+      const [devices, ov] = await Promise.all([client.request(config.api, { conditional: true }),
+        due ? client.request(config.overview, { conditional: true }) : Promise.resolve({ body: overview.body, fresh: false })]);
+      if (due) overview = { at: Date.now(), body: ov.body };
+      return { fresh: devices.fresh || ov.fresh, data: { ...devices.body, overview: ov.body } };
     }
     if (page === "incidents") {
       const to = new Date(), from = new Date(to.getTime() - (RANGE_MS[config.range] || RANGE_MS["7d"]));
       const params = new URLSearchParams({ range: config.range || "7d", from: from.toISOString(), to: to.toISOString() });
       if (config.kind) params.set("kind", config.kind);
-      return requestJson(`${config.api}?${params}`);
+      return { fresh: true, data: await requestJson(`${config.api}?${params}`) };
     }
-    return requestJson(config.api);
+    return client.request(config.api, { conditional: true }).then((r) => ({ fresh: r.fresh, data: r.body }));
   }
 
-  function schedule() {
-    clearTimeout(timer);
-    if (document.hidden || problem === "login") return;
-    timer = setTimeout(refresh, REFRESH_MS);
+  /** One poll: fetch, draw what changed (a 304 keeps the DOM, only the relative times move),
+   *  and the next interval from the payload's poll_s. */
+  async function run() {
+    if (navigator.onLine === false) throw new Offline();
+    clearTimeout(busyTimer);
+    busyTimer = setTimeout(() => { busy = true; drawStatus(); }, BUSY_AFTER_MS);
+    let result;
+    try {
+      result = await fetchPage();
+    } finally {
+      clearTimeout(busyTimer);
+      busy = false;
+    }
+    lastOkAt = Date.now();
+    const recovered = problem !== null;
+    problem = null;
+    let moved = false;
+    if (result.fresh || recovered) {
+      if (result.fresh) data = result.data;
+      moved = drawAll();
+    } else {
+      tick();                                     // the ages may have moved on: redrawn as needed
+      drawStatus();
+    }
+    // the timeline follows along: every 5 minutes, and at once when the state changed (it shows
+    // the connection that made the device online)
+    if (page === "device" && hist.range === "24h" && (moved || Date.now() - hist.loadedAt > HISTORY_EVERY_MS)) {
+      loadHistory(hist.range, { quiet: true });
+    }
+    return pollMs(data, REFRESH_MS);
   }
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) clearTimeout(timer);
-    else if (Date.now() - lastFetch >= REFRESH_MS) refresh();
-    else schedule();
-  });
-  window.addEventListener("online", () => refresh());
+  function failed(err) {
+    problem = err instanceof LoginEnded ? "login" : err instanceof Offline || navigator.onLine === false ? "offline" : "unreachable";
+    announce(problem === "login" ? t("live_login") : problem === "offline" ? t("live_offline") : t("live_unreachable"));
+    tick();
+    drawStatus();
+    return problem === "login" ? "stop" : problem === "offline" ? "pause" : undefined;
+  }
+
+  const poller = createPoller({ run, onError: failed, initialMs: pollMs(data, REFRESH_MS) });
+
+  /** What the ages show (a part is redrawn only when its text would change). */
+  function ageKeys(v) {
+    const wifi = v.house ? v.house.wifi_data_age_s : null;
+    const fr = v.overview && v.overview.freshness;
+    const diag = new Map((v.devices || []).map((d) => [d.id, JSON.stringify((d.diagnostics || [])
+      .filter((x) => x && x.code === "stale_data").map((x) => f.duration((x.evidence || x.params || {}).age_s)))]));
+    return {
+      status: JSON.stringify([Boolean(v.stale), typeof wifi === "number" && wifi > WIFI_AGE_BANNER_S ? f.duration(wifi) : null]),
+      fresh: fr ? JSON.stringify([f.duration(fr.wifi_data_age_s), f.duration(fr.oldest_job_success_age_s),
+        (v.overview.jobs || []).map(A.jobState)]) : "",
+      diag,
+    };
+  }
+
+  /** The relative times ("12 s ago", "for 2 h 5 min") and the data's ages ("The Wi-Fi system's
+   *  data is 6 min old", a stale_data finding, the overview's freshness) as of now, without a
+   *  request: a body a 304 keeps does not freeze them. */
+  function tick() {
+    if (document.hidden) return;
+    const before = ageKeys(view);
+    age();
+    const after = ageKeys(view);
+    ctx.now = client.now();
+    if (after.status !== before.status) drawStatus();
+    if (after.fresh !== before.fresh && page === "admin" && view.overview) {
+      const ov = view.overview;
+      replacePart(document, "ov-fresh", A.freshness(ov.freshness, ov.jobs, f, ov.jobs_available));
+    }
+    for (const d of view.devices || []) {
+      if (after.diag.get(d.id) === before.diag.get(d.id)) continue;
+      const [root, full, limit] = cardOf(d);
+      if (root) drawDiag(root, d, full, limit);
+    }
+    R.tickTimes(document, f, client.now());
+  }
+  setInterval(tick, TICK_MS);
+  document.addEventListener("visibilitychange", tick);
+
+  window.addEventListener("online", () => poller.poll());
   window.addEventListener("offline", () => { problem = "offline"; drawStatus(); announce(t("live_offline")); });
 
   // --- inline rename ----------------------------------------------------------------------
@@ -291,11 +350,11 @@ function main() {
         close();
         say(t("saved"), "ok");
         const id = box.closest("[data-device]")?.dataset.device;
-        for (const d of data.devices || []) if (d.id === id) d.name = saved;
+        for (const d of [...(data.devices || []), ...(view.devices || [])]) if (d.id === id) d.name = saved;
         setTimeout(() => { if (status.textContent === t("saved")) say(""); }, 4000);
       } catch (err) {
         // the field stays open with what was typed: nothing is lost
-        if (err instanceof LoginEnded) { problem = "login"; drawStatus(); say(t("live_login"), "bad"); }
+        if (err instanceof LoginEnded) { problem = "login"; poller.stop(); drawStatus(); say(t("live_login"), "bad"); }
         else say(t("save_failed"), "bad");
         input.focus();
       } finally {
@@ -307,7 +366,7 @@ function main() {
 
   // --- the admin list: search, filters, sorting -----------------------------------------
   const filters = document.querySelector("form[data-filters]");
-  const STATE_ORDER = { offline: 0, never_connected: 1, unknown: 2, online: 3 };
+  const STATE_ORDER = { offline: 0, never_connected: 1, unknown: 2, connecting: 3, online: 4 };
   function applyFilters() {
     if (!filters) return;
     const q = (filters.elements.namedItem("q").value || "").trim().toLowerCase();
@@ -591,7 +650,7 @@ function main() {
       }
     } catch (err) {
       if (ticket !== hist.request) return;
-      if (err instanceof LoginEnded) { problem = "login"; drawStatus(); }
+      if (err instanceof LoginEnded) { problem = "login"; poller.stop(); drawStatus(); }
       if (status) {
         const retry = R.h("button", { type: "button", class: "pill" }, t("retry"));
         retry.addEventListener("click", () => loadHistory(hist.range));
@@ -671,7 +730,7 @@ function main() {
       if (button) button.hidden = true;
     } catch (err) {
       if (ticket !== raw.request) return;
-      if (err instanceof LoginEnded) { problem = "login"; drawStatus(); }
+      if (err instanceof LoginEnded) { problem = "login"; poller.stop(); drawStatus(); }
       const retry = R.h("button", { type: "button", class: "pill" }, t("retry"));
       retry.addEventListener("click", () => loadRaw());
       status.replaceChildren(R.icon("warn"), err instanceof LoginEnded ? t("live_login") : t("raw_error"), " ", retry);
@@ -695,7 +754,7 @@ function main() {
 
   // --- the admin overview ---------------------------------------------------------------------
   function drawOverview() {
-    const ov = data.overview;
+    const ov = view.overview;
     if (!ov) return;
     replacePart(document, "ov-incidents", A.overviewIncidents(ov, f, ctx.now));
     replacePart(document, "ov-aps", A.overviewAps(ov, f));
@@ -906,9 +965,9 @@ function main() {
 
   // --- start --------------------------------------------------------------------------------
   document.documentElement.classList.add("js");
-  if (Date.now() - lastOkAt > REFRESH_MS) refresh();      // a page from the back/forward cache, or old data
-  else { drawAll(); schedule(); }
-  window.addEventListener("pageshow", (e) => { if (e.persisted) refresh(); });
+  if (Date.now() - lastOkAt > REFRESH_MS) poller.poll();      // a page from the back/forward cache, or old data
+  else { drawAll(); poller.start(pollMs(data, REFRESH_MS)); }
+  window.addEventListener("pageshow", (e) => { if (e.persisted) poller.poll(); });
 }
 
 main();

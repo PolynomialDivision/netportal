@@ -18,7 +18,8 @@ from netportal.telemetry import identity  # noqa: E402
 UTC = datetime.timezone.utc
 NOW = 1_800_000_000
 FUNCTIONS = ("device_windows", "window_conflicts", "device_for_mac", "auth_events", "auth_failures", "acct_sessions",
-             "connection_events", "device_days", "ap_days", "incidents", "job_status")
+             "connection_events", "device_days", "ap_days", "incidents", "job_status", "latest_sessions",
+             "latest_connection_events")
 
 
 def dt(t):
@@ -91,6 +92,21 @@ class FakeRegistry:
 
     def connection_events(self, db, device_id, since, until, limit=2000):
         return self._rows("connection_events", self.events, device_id, since, until, limit)
+
+    def latest_sessions(self, db, device_ids, per_device=5):
+        """As registry.latest_sessions: each device's newest sessions by updated (acct rows)."""
+        self.calls.append(("latest_sessions", tuple(str(i) for i in device_ids)))
+        return {str(i): sorted(self.acct.get(str(i), []), key=lambda r: _t(r["updated"]), reverse=True)[:per_device]
+                for i in device_ids}
+
+    def latest_connection_events(self, db, device_ids, per_device=3, ssid=None):
+        self.calls.append(("latest_connection_events", tuple(str(i) for i in device_ids)))
+        out = {}
+        for i in device_ids:
+            rows = [e for e in self.events.get(str(i), []) if e.get("kind") in ("connected", "disconnected", "roamed")
+                    and (ssid is None or e.get("ssid") in (None, ssid))]
+            out[str(i)] = sorted(rows, key=lambda r: _t(r["at"]), reverse=True)[:per_device]
+        return out
 
     def device_days(self, db, device_id, since_day, until_day):
         self.calls.append(("device_days", str(device_id), since_day, until_day))

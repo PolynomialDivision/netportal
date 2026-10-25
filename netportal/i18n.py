@@ -322,10 +322,10 @@ DASHBOARD_TEXT = {
         "house_speed_note": "Speed of the house's internet line, measured at the router. Not the speed of a single device.",
         "house_wifi_age": "The Wi-Fi system's data is {age} old.",
         "live_updated": "Updated {when}",
-        "live_auto": "updates by itself every 30 seconds",
+        "live_auto": "updates by itself",
         "live_updating": "Updating…",
         "live_offline": "You are offline. The page updates again when your connection is back.",
-        "live_unreachable": "The portal cannot be reached right now. Trying again in 30 seconds.",
+        "live_unreachable": "The portal cannot be reached right now. The page keeps trying, less often the longer it lasts.",
         "live_login": "Your login has ended.",
         "live_login_link": "Log in again",
         "live_stale": "This data may be out of date (from {when}).",
@@ -545,10 +545,10 @@ DASHBOARD_TEXT = {
         "house_speed_note": "Geschwindigkeit der Internetleitung des Hauses, gemessen am Router. Nicht die Geschwindigkeit eines einzelnen Geräts.",
         "house_wifi_age": "Die Daten des WLAN-Systems sind {age} alt.",
         "live_updated": "Aktualisiert {when}",
-        "live_auto": "aktualisiert sich alle 30 Sekunden",
+        "live_auto": "aktualisiert sich selbst",
         "live_updating": "Wird aktualisiert…",
         "live_offline": "Du bist offline. Die Seite aktualisiert sich wieder, sobald die Verbindung zurück ist.",
-        "live_unreachable": "Das Portal ist gerade nicht erreichbar. Neuer Versuch in 30 Sekunden.",
+        "live_unreachable": "Das Portal ist gerade nicht erreichbar. Die Seite versucht es weiter, je länger es dauert, desto seltener.",
         "live_login": "Deine Anmeldung ist abgelaufen.",
         "live_login_link": "Neu anmelden",
         "live_stale": "Diese Daten sind vielleicht nicht aktuell (Stand {when}).",
@@ -768,10 +768,10 @@ DASHBOARD_TEXT = {
         "house_speed_note": "Швидкість інтернет-лінії будинку, виміряна на роутері. Це не швидкість окремого пристрою.",
         "house_wifi_age": "Дані системи Wi-Fi застарілі на {age}.",
         "live_updated": "Оновлено {when}",
-        "live_auto": "оновлюється сама кожні 30 секунд",
+        "live_auto": "оновлюється автоматично",
         "live_updating": "Оновлення…",
         "live_offline": "Ви офлайн. Сторінка знову оновиться, щойно з’явиться з’єднання.",
-        "live_unreachable": "Портал зараз недоступний. Нова спроба за 30 секунд.",
+        "live_unreachable": "Портал зараз недоступний. Сторінка пробує знову, і що довше це триває, то рідше.",
         "live_login": "Ваш вхід завершився.",
         "live_login_link": "Увійти знову",
         "live_stale": "Ці дані можуть бути застарілими (станом на {when}).",
@@ -2274,6 +2274,158 @@ TELEMETRY_TEXT = {
 for _lang, _texts in TELEMETRY_TEXT.items():
     TEXT[_lang].update(_texts)
 
+# Device presence (netportal/presence.py, DEVICE.presence): the status in words, which source
+# confirmed it and when, why it is unknown, and the admin's view of how it was decided.
+# pr_src_<source> are the plain words for a resident (PRESENCE_SOURCES), pr_reason_<code> one
+# sentence per reason code (PRESENCE_REASONS).
+PRESENCE_TEXT = {
+    "en": {
+        "state_connecting": "Connecting…",
+        "pr_connecting_line": "Login accepted, the Wi-Fi connection is being set up.",
+        "pr_offline_since": "disconnected {when}",
+        "pr_confirmed": "Confirmed {when} by {source}",
+        "pr_confirmed_plain": "Confirmed {when}",
+        "pr_src_prometheus": "access point data",
+        "pr_src_radius_acct": "Wi-Fi session records",
+        "pr_src_radius_auth": "login server",
+        "pr_src_unifi_syslog": "UniFi log",
+        "pr_reason_association": "The access point lists the device as connected.",
+        "pr_reason_acct_start": "A new Wi-Fi session has started.",
+        "pr_reason_acct_interim": "The access point is still reporting the Wi-Fi session.",
+        "pr_reason_accept_pending": "The login was accepted; the Wi-Fi session has not started yet.",
+        "pr_reason_acct_stop": "The Wi-Fi session has ended.",
+        "pr_reason_association_gone": "The access point no longer lists the device.",
+        "pr_reason_unifi_disconnect": "The access point logged that the device left.",
+        "pr_reason_session_stale": "The access point stopped reporting the last session, so the status cannot be confirmed.",
+        "pr_reason_sources_disagree": "The session is still reporting, but the access point list does not show the device; it counts as connected until the session goes quiet.",
+        "pr_reason_ap_down": "Its access point is not responding, so the status cannot be checked.",
+        "pr_reason_telemetry_unavailable": "The Wi-Fi data is not available right now.",
+        "pr_reason_no_data": "There is no recent Wi-Fi data about this device.",
+        "pr_reason_mac_conflict": "Its Wi-Fi address is also used by another device, so its data cannot be told apart.",
+        "pr_reason_other": "The status cannot be determined right now.",
+        "evk_confirmed_at": "confirmed",
+        "evk_confirmed_by": "by",
+        "pr_admin_title": "How the status was decided",
+        "pr_admin_state": "State",
+        "pr_admin_reason": "Reason",
+        "pr_admin_basis": "Basis",
+        "pr_admin_since": "Since",
+        "pr_admin_confirmed": "Confirmed",
+        "pr_admin_session": "Session",
+        "pr_admin_session_none": "no open session",
+        "pr_admin_started": "started {when}",
+        "pr_admin_updated": "updated {when}",
+        "pr_admin_stopped": "stopped {when}",
+        "pr_admin_interim": "interval {duration}",
+        "pr_admin_stale_after": "Stale after",
+        "pr_admin_stale_value": "{duration} without an update",
+        "pr_admin_poll": "Page checks every",
+        "pr_admin_evidence": "Evidence",
+        "pr_admin_evidence_none": "none",
+    },
+    "de": {
+        "state_connecting": "Verbindet…",
+        "pr_connecting_line": "Anmeldung angenommen, die WLAN-Verbindung wird aufgebaut.",
+        "pr_offline_since": "getrennt {when}",
+        "pr_confirmed": "Bestätigt {when} · Quelle: {source}",
+        "pr_confirmed_plain": "Bestätigt {when}",
+        "pr_src_prometheus": "Access-Point-Daten",
+        "pr_src_radius_acct": "WLAN-Sitzungsdaten",
+        "pr_src_radius_auth": "Anmeldeserver",
+        "pr_src_unifi_syslog": "UniFi-Protokoll",
+        "pr_reason_association": "Der Access Point führt das Gerät als verbunden.",
+        "pr_reason_acct_start": "Eine neue WLAN-Sitzung hat begonnen.",
+        "pr_reason_acct_interim": "Der Access Point meldet die WLAN-Sitzung weiterhin.",
+        "pr_reason_accept_pending": "Die Anmeldung wurde angenommen, die WLAN-Sitzung hat aber noch nicht begonnen.",
+        "pr_reason_acct_stop": "Die WLAN-Sitzung wurde beendet.",
+        "pr_reason_association_gone": "Der Access Point führt das Gerät nicht mehr.",
+        "pr_reason_unifi_disconnect": "Der Access Point hat protokolliert, dass sich das Gerät getrennt hat.",
+        "pr_reason_session_stale": "Der Access Point meldet die letzte Sitzung nicht mehr, daher lässt sich der Status nicht bestätigen.",
+        "pr_reason_sources_disagree": "Die Sitzung meldet sich weiter, aber die Liste des Access Points zeigt das Gerät nicht; es gilt als verbunden, bis die Sitzung verstummt.",
+        "pr_reason_ap_down": "Sein Access Point antwortet nicht, daher lässt sich der Status nicht prüfen.",
+        "pr_reason_telemetry_unavailable": "Die WLAN-Daten sind gerade nicht verfügbar.",
+        "pr_reason_no_data": "Zu diesem Gerät gibt es keine aktuellen WLAN-Daten.",
+        "pr_reason_mac_conflict": "Seine WLAN-Adresse nutzt auch ein anderes Gerät, daher lassen sich die Daten nicht auseinanderhalten.",
+        "pr_reason_other": "Der Status lässt sich gerade nicht bestimmen.",
+        "evk_confirmed_at": "bestätigt",
+        "evk_confirmed_by": "Quelle",
+        "pr_admin_title": "Wie der Status ermittelt wurde",
+        "pr_admin_state": "Status",
+        "pr_admin_reason": "Grund",
+        "pr_admin_basis": "Grundlage",
+        "pr_admin_since": "Seit",
+        "pr_admin_confirmed": "Bestätigt",
+        "pr_admin_session": "Sitzung",
+        "pr_admin_session_none": "keine offene Sitzung",
+        "pr_admin_started": "begonnen {when}",
+        "pr_admin_updated": "aktualisiert {when}",
+        "pr_admin_stopped": "beendet {when}",
+        "pr_admin_interim": "Intervall {duration}",
+        "pr_admin_stale_after": "Veraltet nach",
+        "pr_admin_stale_value": "{duration} ohne Aktualisierung",
+        "pr_admin_poll": "Seite prüft alle",
+        "pr_admin_evidence": "Belege",
+        "pr_admin_evidence_none": "keine",
+    },
+    "uk": {
+        "state_connecting": "Підключається…",
+        "pr_connecting_line": "Вхід прийнято, з’єднання Wi-Fi встановлюється.",
+        "pr_offline_since": "відключено {when}",
+        "pr_confirmed": "Підтверджено {when} · джерело: {source}",
+        "pr_confirmed_plain": "Підтверджено {when}",
+        "pr_src_prometheus": "дані точки доступу",
+        "pr_src_radius_acct": "записи сеансів Wi-Fi",
+        "pr_src_radius_auth": "сервер входу",
+        "pr_src_unifi_syslog": "журнал UniFi",
+        "pr_reason_association": "Точка доступу показує пристрій як підключений.",
+        "pr_reason_acct_start": "Почався новий сеанс Wi-Fi.",
+        "pr_reason_acct_interim": "Точка доступу й далі повідомляє про сеанс Wi-Fi.",
+        "pr_reason_accept_pending": "Вхід прийнято, але сеанс Wi-Fi ще не почався.",
+        "pr_reason_acct_stop": "Сеанс Wi-Fi завершився.",
+        "pr_reason_association_gone": "Точка доступу більше не показує пристрій.",
+        "pr_reason_unifi_disconnect": "Точка доступу записала, що пристрій відключився.",
+        "pr_reason_session_stale": "Точка доступу перестала повідомляти про останній сеанс, тому стан не можна підтвердити.",
+        "pr_reason_sources_disagree": "Сеанс і далі надсилає дані, але список точки доступу не показує пристрій; він вважається підключеним, доки сеанс не замовкне.",
+        "pr_reason_ap_down": "Його точка доступу не відповідає, тому стан не можна перевірити.",
+        "pr_reason_telemetry_unavailable": "Дані Wi-Fi зараз недоступні.",
+        "pr_reason_no_data": "Немає свіжих даних Wi-Fi про цей пристрій.",
+        "pr_reason_mac_conflict": "Його адресу Wi-Fi використовує ще інший пристрій, тому дані не можна розрізнити.",
+        "pr_reason_other": "Зараз неможливо визначити стан.",
+        "evk_confirmed_at": "підтверджено",
+        "evk_confirmed_by": "джерело",
+        "pr_admin_title": "Як визначено стан",
+        "pr_admin_state": "Стан",
+        "pr_admin_reason": "Причина",
+        "pr_admin_basis": "Основа",
+        "pr_admin_since": "З",
+        "pr_admin_confirmed": "Підтверджено",
+        "pr_admin_session": "Сеанс",
+        "pr_admin_session_none": "немає відкритого сеансу",
+        "pr_admin_started": "почався {when}",
+        "pr_admin_updated": "оновлено {when}",
+        "pr_admin_stopped": "завершився {when}",
+        "pr_admin_interim": "інтервал {duration}",
+        "pr_admin_stale_after": "Застаріває через",
+        "pr_admin_stale_value": "{duration} без оновлення",
+        "pr_admin_poll": "Сторінка перевіряє кожні",
+        "pr_admin_evidence": "Докази",
+        "pr_admin_evidence_none": "немає",
+    },
+}
+for _lang, _texts in PRESENCE_TEXT.items():
+    TEXT[_lang].update(_texts)
+
+# The presence service's codes (netportal/presence.py, docs/TELEMETRY.md): its states, the
+# sources that confirm a state (pr_src_<source>), the reasons (pr_reason_<code>; an unknown code
+# reads as "other"), and each state's icon (static/presence.js has the same tables).
+PRESENCE_STATES = ("online", "connecting", "offline", "unknown", "never_connected")
+PRESENCE_SOURCES = ("prometheus", "radius_acct", "radius_auth", "unifi_syslog")
+PRESENCE_REASONS = ("association", "acct_start", "acct_interim", "accept_pending", "acct_stop", "association_gone",
+                    "unifi_disconnect", "session_stale", "ap_down", "telemetry_unavailable", "no_data", "mac_conflict",
+                    "sources_disagree", "other")
+PRESENCE_ICON = {"online": "wifi", "connecting": "refresh", "offline": "wifi-off", "unknown": "help",
+                 "never_connected": "never"}
+
 # The findings diagnostics.py can report (each has diag_<code>, diag_<code>_why, diag_<code>_do;
 # a finding with other texts for admins also has diag_<code>_admin_why/_admin_do, with {n} from
 # its params).
@@ -2448,6 +2600,32 @@ class Format:
         return t["ago_fmt"].format(when=Format.duration(seconds, lang, parts=1))
 
     @staticmethod
+    def recent(value, lang, now=None):
+        """A moment to the second, for what was just confirmed: "just now" (under 5 s), "12 s ago",
+        beyond a minute as ago()."""
+        import datetime as dt
+        when = parse_time(value)
+        if when is None:
+            return Format.NONE
+        now = parse_time(now) or dt.datetime.now(dt.UTC)
+        seconds = (now - when).total_seconds()
+        t = _texts(lang)
+        if seconds < 5:
+            return t["ago_now"]
+        if seconds < 60:
+            return t["ago_fmt"].format(when=t["dur_s"].format(n=int(seconds)))
+        return Format.ago(value, lang, now)
+
+    @staticmethod
+    def stamp(value, lang):
+        """The full moment with seconds in the house's time (a tooltip): "2026-10-25 16:52:13"."""
+        from zoneinfo import ZoneInfo
+        moment = parse_time(value)
+        if moment is None:
+            return Format.NONE
+        return Format.strftime(moment.astimezone(ZoneInfo(HOUSE_TZ)), _texts(lang)["date_format"] + " %H:%M:%S", lang)
+
+    @staticmethod
     def elapsed(start, lang, now=None):
         """How long since `start`, as a duration ("2 h 15 min")."""
         import datetime as dt
@@ -2459,11 +2637,12 @@ class Format:
 
     @staticmethod
     def strftime(when, pattern, lang):
-        """%Y %m %d %e (day without a leading zero) %H %M %b (the language's short month); no locale needed."""
+        """%Y %m %d %e (day without a leading zero) %H %M %S %b (the language's short month); no locale needed."""
         months = _texts(lang)["months"]
         return (pattern.replace("%Y", "%04d" % when.year).replace("%m", "%02d" % when.month)
                 .replace("%d", "%02d" % when.day).replace("%e", str(when.day)).replace("%H", "%02d" % when.hour)
-                .replace("%M", "%02d" % when.minute).replace("%b", months[when.month - 1]))
+                .replace("%M", "%02d" % when.minute).replace("%S", "%02d" % when.second)
+                .replace("%b", months[when.month - 1]))
 
     @staticmethod
     def when(value, lang, now=None):
@@ -2687,6 +2866,11 @@ class Format:
                 return Format.when(value, lang)
             if kind == "ago":
                 return Format.ago(value, lang)
+            if kind == "recent":
+                return Format.recent(value, lang)
+            if kind == "source":
+                return t.get("src_admin_%s" % value, str(value)) if admin else \
+                    t.get("pr_src_%s" % value) or t.get("src_%s" % value, str(value))
             if kind == "date":
                 return Format.date(value, lang)
             if kind == "times":
@@ -2803,6 +2987,137 @@ class Format:
         sizes = {"7d": 7, "30d": 30, "90d": 90, "1y": 365}
         return min(keys, key=lambda k: abs(sizes.get(k, 0) - days))
 
+    # --- device presence (DEVICE.presence; static/presence.js answers alike) -------------------
+
+    @staticmethod
+    def presence(device):
+        """The device's presence with its state checked. A payload without one (an older API,
+        the registry-only cards) gets one from v1's `state` alone, marked derived: then nothing
+        is claimed about when or by what it was confirmed."""
+        d = device or {}
+        p = d.get("presence") if isinstance(d.get("presence"), dict) else None
+        state = (p or {}).get("state")
+        if state not in PRESENCE_STATES:
+            state = d.get("state") if d.get("state") in PRESENCE_STATES else "unknown"
+        out = {"state": state, "since": None, "confirmed_at": None, "confirmed_by": None, "basis": None,
+               "reason": None, "session": None, "stale_after_s": None, "poll_s": None, "evidence": [],
+               "derived": p is None}
+        for key in ("since", "confirmed_at", "confirmed_by", "basis", "reason", "session", "stale_after_s", "poll_s",
+                    "evidence"):
+            if p and p.get(key) is not None:
+                out[key] = p[key]
+        if not isinstance(out["evidence"], list):
+            out["evidence"] = []
+        if not isinstance(out["session"], dict):
+            out["session"] = None
+        return out
+
+    @staticmethod
+    def presence_evidence(presence, limit=20):
+        """A presence's evidence for an admin: the newest first (by its time), at most `limit`."""
+        items = [e for e in (presence or {}).get("evidence") or [] if isinstance(e, dict)]
+
+        def when(e):
+            moment = parse_time(e.get("at"))
+            return moment.timestamp() if moment else float("-inf")
+        items.sort(key=when, reverse=True)
+        return items[:limit]
+
+    @staticmethod
+    def state_of(device):
+        """The one state every part of a page shows for a device (presence first)."""
+        return Format.presence(device)["state"]
+
+    @staticmethod
+    def rel(kind, value, lang, now=None):
+        """A moment as the page shows it and the script keeps current (<time data-rel>)."""
+        if kind == "recent":
+            return Format.recent(value, lang, now)
+        if kind == "ago":
+            return Format.ago(value, lang, now)
+        if kind == "elapsed":
+            return Format.elapsed(value, lang, now)
+        return Format.when(value, lang, now)
+
+    @staticmethod
+    def moment(value, kind, lang, now=None):
+        """A moment for a segment: {time, kind, text, title} (the title: to the second)."""
+        return {"time": Format.iso(value), "kind": kind, "text": Format.rel(kind, value, lang, now),
+                "title": Format.stamp(value, lang)}
+
+    @staticmethod
+    def presence_view(device, lang, now=None, ssid=""):
+        """What the state line says: {state, icon, label, more: [segment], confirmed: segment or
+        None}, a segment being {text: a text with {placeholders}, values: {name: str or moment}}.
+        One state only: nothing next to "offline" says connected, "connecting" is not an error,
+        an unknown state says why (its reason), and only a measured presence says when and by
+        which source it was confirmed."""
+        t = _texts(lang)
+        d = device or {}
+        p = Format.presence(d)
+        state = p["state"]
+
+        def seg(key, **values):
+            return {"text": t[key], "values": values}
+
+        def at(value, kind):
+            return Format.moment(value, kind, lang, now)
+
+        more = []
+        if state == "online":
+            since = p["since"] or d.get("since")
+            if parse_time(since):
+                more.append(seg("since_line", time=at(since, "when"), duration=at(since, "elapsed")))
+        elif state == "connecting":
+            more.append(seg("pr_connecting_line"))
+        elif state == "never_connected":
+            more.append(seg("never_line", ssid=ssid or ""))
+        elif state == "offline":
+            if not p["derived"] and parse_time(p["since"]):
+                more.append(seg("pr_offline_since", when=at(p["since"], "recent")))
+            elif parse_time(d.get("last_seen")):
+                more.append(seg("seen_line", when=at(d["last_seen"], "ago")))
+        else:
+            codes = [f.get("code") for f in d.get("diagnostics") or [] if isinstance(f, dict)]
+            reason = p["reason"]
+            if not p["derived"] and reason and not (reason == "mac_conflict" and "mac_conflict" in codes):
+                more.append(seg("pr_reason_" + (reason if reason in PRESENCE_REASONS else "other")))
+            if parse_time(d.get("last_seen")):
+                more.append(seg("seen_line", when=at(d["last_seen"], "ago")))
+            elif not more and not d.get("diagnostics"):
+                more.append(seg("unknown_line"))
+        confirmed = None
+        if not p["derived"] and state in ("online", "connecting", "offline") and parse_time(p["confirmed_at"]):
+            source = p["confirmed_by"]
+            words = t.get("pr_src_%s" % source) or t.get("src_%s" % source) or (str(source) if source else None)
+            confirmed = seg("pr_confirmed", when=at(p["confirmed_at"], "recent"), source=words) if words else \
+                seg("pr_confirmed_plain", when=at(p["confirmed_at"], "recent"))
+        return {"state": state, "icon": PRESENCE_ICON[state], "label": t["state_" + state], "more": more,
+                "confirmed": confirmed}
+
+    @staticmethod
+    def parts(segment):
+        """A segment as [(kind, value)] for the template: ("text", str) and ("time", moment)."""
+        import re
+        text, values = segment.get("text") or "", segment.get("values") or {}
+        out, last = [], 0
+        for m in re.finditer(r"\{(\w+)\}", text):
+            if m.start() > last:
+                out.append(("text", text[last:m.start()]))
+            value = values.get(m.group(1), m.group(0))
+            out.append(("time", value) if isinstance(value, dict) else ("text", "" if value is None else str(value)))
+            last = m.end()
+        if last < len(text):
+            out.append(("text", text[last:]))
+        return out
+
+    @staticmethod
+    def findings_shown(device):
+        """The findings a page shows: "Not connected" (offline) only while the state is offline."""
+        state = Format.state_of(device)
+        return [f for f in (device or {}).get("diagnostics") or []
+                if not (isinstance(f, dict) and f.get("code") == "offline" and state != "offline")]
+
     @staticmethod
     def day(value, lang):
         """A day of the day bars ("2026-10-24" or a moment): "24 Oct"."""
@@ -2840,7 +3155,7 @@ EVIDENCE_SPEC = {
     "poor_coverage": [("aps", "ap_signals")],
     "incident_correlated": [("incident", "incident"), ("disconnects", "times")],
     "stale_data": [("age_s", "duration"), ("threshold_s", "limit_duration")],
-    "offline": [("last_seen", "ago")],
+    "offline": [("confirmed_at", "recent"), ("confirmed_by", "source"), ("last_seen", "ago")],
     "mac_conflict": [("owners", "count")],
     "never_connected": [],
 }
@@ -2850,7 +3165,8 @@ EVIDENCE_FORMAT = {
     "age_s": "duration", "associated_s": "duration", "last_at": "when", "last_accept": "when", "last_seen": "ago",
     "expires": "date", "days_left": "days", "count_24h": "count", "macs_30d": "count", "clients": "count",
     "owners": "count", "reasons": "reasons", "causes": "causes", "ap": "room", "aps": "ap_signals", "band": "band",
-    "bands_7d": "bands", "incident": "incident", "disconnects": "times",
+    "bands_7d": "bands", "incident": "incident", "disconnects": "times", "confirmed_at": "recent",
+    "confirmed_by": "source",
 }
 # What a card shows beside a finding's title: (key, kind); the kinds of SHORT_TEXTS are counts in
 # a sentence ("8 times in 24 hours").
@@ -2869,4 +3185,4 @@ def template_globals():
     """What the dashboard templates need besides the context processor's values: web.py adds it
     with app.jinja_env.globals.update(i18n.template_globals())."""
     return {"fmt": Format, "diagnoses": DIAGNOSES, "event_kinds": EVENT_KINDS, "incident_kinds": INCIDENT_KINDS,
-            "history_ranges": RANGES}
+            "history_ranges": RANGES, "presence_states": PRESENCE_STATES}

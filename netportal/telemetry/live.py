@@ -27,13 +27,15 @@ Only the house's EAP-TLS network counts (essid = NETPORTAL_SSID, on every client
 byte counters and the retry ratio carry no essid and are joined to the uptime series that does).
 """
 
+import datetime
+import threading
 import time
 
-from .. import diagnostics, registry
+from .. import diagnostics, presence, registry
 from . import identity as ident
 from . import timeline as tl
 from .client import SUMMARY_CACHE_SECONDS, Unavailable
-from .common import (BANDS, ap_info, by_mac, fit, iso, latest, normalise_mac, rounded, selectors, small_int,
+from .common import (BANDS, ap_info, by_mac, fit, iso, normalise_mac, rounded, selectors, small_int,
                      unix)
 from .house import empty_house, house_status
 
@@ -255,6 +257,50 @@ def ap_map(client):
         vaps = client.vector(AP_BSSIDS, ttl=SUMMARY_CACHE_SECONDS)
     except Unavailable:
         return tl.ApMap()
+    found = _ap_map(info, vaps)
+    if found.bssids or found.nas:
+        with _LOCK:
+            _LAST_APS[:] = [time.monotonic(), found]
+    return found
+
+
+# The last AP map Prometheus gave (process-wide): presence places sessions at their AP with it
+# while Prometheus is down (an open ap_down incident still ends a session there). APs rarely
+# change their address or BSSIDs; kept a day.
+_LAST_APS, KNOWN_APS_S = [0.0, None], 86400
+_LOCK = threading.Lock()
+
+
+def known_aps():
+    """The last AP map Prometheus answered (at most KNOWN_APS_S old), else an empty one."""
+    with _LOCK:
+        at, found = _LAST_APS
+    return found if found is not None and time.monotonic() - at <= KNOWN_APS_S else tl.ApMap()
+
+
+# House-wide registry reads every dashboard makes (the rejects and incidents of 24 h): shared for
+# SHARED_S between requests, so the 5 s polls of a connecting device stay cheap. Keyed by the
+# registry function (tests patch in their own).
+SHARED_S = 5
+_SHARED = {}
+
+
+def _shared(name, fn, *args):
+    key = (name, fn)
+    now = time.monotonic()
+    with _LOCK:
+        hit = _SHARED.get(key)
+        if hit is not None and now - hit[0] <= SHARED_S:
+            return hit[1]
+    value = fn(*args)
+    with _LOCK:
+        for k in [k for k, v in _SHARED.items() if now - v[0] > SHARED_S]:
+            del _SHARED[k]
+        _SHARED[key] = (now, value)
+    return value
+
+
+def _ap_map(info, vaps):
     names, nas, bssids = {}, {}, {}
     for labels, _v in info:
         mac = normalise_mac(labels.get("mac"))
@@ -271,35 +317,43 @@ def ap_map(client):
 
 # --- DEVICE -----------------------------------------------------------------------------------
 
+def snapshot_time(house, now):
+    """Ts: the Wi-Fi snapshot's time (house.wifi_data_at; else now - its age; None: unknown)."""
+    at = house.get("wifi_data_at")
+    if at:
+        try:
+            return datetime.datetime.fromisoformat(at).timestamp()
+        except (TypeError, ValueError):
+            pass
+    age = house.get("wifi_data_age_s")
+    return None if age is None else now - age
+
+
 def device_entry(row, mac, status, telemetry, house, now, summary=None, conflict=0, admin=False, extra=None):
     """DEVICE from a registry row (registry.DEVICE_LIST) and its live status. conflict: the
     number of other people whose devices claim the same MAC now; residents then see no
-    telemetry. extra (v2, live.dashboard): {"identity", "context", "last_auth"}."""
+    telemetry. extra (v2, live.dashboard): {"identity", "context", "last_auth", "sources",
+    "presence": {"sessions": [presence.session], "events": [presence.event]}, "ap_down"
+    (presence.ap_down), "interim_s" (the configured accounting interval)}. The state, last_seen
+    and since are presence.decide's (the only place a state is derived)."""
     extra = extra or {}
     stale = telemetry == "ok" and diagnostics.is_stale(house.get("wifi_data_age_s"))
-    withheld = conflict and not admin
-    if not mac:
-        state = "never_connected"
-    elif telemetry != "ok" or stale or withheld:
-        state = "unknown"
-    elif status and status["present"]:
-        state = "online"
-    else:
-        state = "offline"
+    withheld = bool(conflict and not admin)
+    found = extra.get("presence") or {}
+    decided = presence.decide(
+        now, presence.association(status, telemetry, snapshot_time(house, now), stale),
+        sessions=found.get("sessions") or (), accept=unix(row.get("last_seen")), events=found.get("events") or (),
+        down=extra.get("ap_down"), interim_s=extra.get("interim_s"), withheld=withheld, never=not mac)
+    state = decided["state"]
     status = empty_status() if withheld or not status else status
-    if state == "online":
-        last_seen = now - (house.get("wifi_data_age_s") or 0)
-    elif state == "offline":
-        last_seen = latest(status["last_seen"], row.get("last_seen"))
-    else:
-        last_seen = unix(row.get("last_seen"))   # RADIUS: the device's latest login
     device = {
         "id": str(row["id"]), "name": row["name"], "platform": row["platform"], "policy": row.get("policy"),
         "created": iso(row.get("created")), "expires": iso(row.get("expires")), "revoked": bool(row.get("revoked")),
-        "mac": mac, "state": state, "last_seen": iso(last_seen),
-        "since": iso(status["start"]) if state == "online" else None,
+        "mac": mac, "state": state, "last_seen": iso(decided["last_seen"]),
+        "since": iso(decided["since"]) if state == "online" else None,
     }
     device.update({f: status[f] for f in LIVE_FIELDS})
+    device["presence"] = presence.public(decided)
     identity, context = extra.get("identity"), dict(extra.get("context") or {})
     _identity_fields(device, identity, extra.get("last_auth"), admin)
     if withheld:
@@ -307,7 +361,8 @@ def device_entry(row, mac, status, telemetry, house, now, summary=None, conflict
         found += diagnostics.auth_findings(context) + diagnostics.cert_findings(context)
         device["diagnostics"] = sorted(found, key=lambda f: diagnostics.SEVERITY_ORDER[f["severity"]])
     else:
-        summary = dict(summary or {}, associated_s=now - status["start"] if state == "online" else None)
+        since = decided["since"]
+        summary = dict(summary or {}, associated_s=now - since if state == "online" and since is not None else None)
         device["diagnostics"] = diagnostics.findings(device, summary, house.get("wifi_data_age_s"), telemetry, context)
         if conflict:
             device["diagnostics"].insert(0, diagnostics.finding("mac_conflict", "warn", evidence={
@@ -315,7 +370,7 @@ def device_entry(row, mac, status, telemetry, house, now, summary=None, conflict
                 owners=conflict))
     device["findings"] = device["diagnostics"]
     device["facts"] = facts(device, house, telemetry, withheld)
-    device["sources"] = sources(device, status, telemetry, extra)
+    device["sources"] = sources(device, status, telemetry, extra, decided)
     return device
 
 
@@ -348,7 +403,7 @@ def facts(device, house, telemetry, withheld):
     return out
 
 
-def sources(device, status, telemetry, extra):
+def sources(device, status, telemetry, extra, decided=None):
     found = {"registry"}
     if device.get("last_auth"):
         found.add("radius_auth")
@@ -356,6 +411,7 @@ def sources(device, status, telemetry, extra):
                                          or any(status[f] is not None for f in LIVE_FIELDS)):
         found.add("prometheus")
     found |= set(extra.get("sources") or ())
+    found |= {e["source"] for e in (decided or {}).get("evidence") or () if e["source"] in ("radius_acct", "unifi_syslog")}
     return sorted(found)
 
 
@@ -433,9 +489,14 @@ def _detail_events(db, row, identity, now, aps):
     return events, found
 
 
-def dashboard(client, rows, owners=None, now=None, claims=None, admin=False, db=None, detail=False):
+def dashboard(client, rows, owners=None, now=None, claims=None, admin=False, db=None, detail=False, interim_s=None):
     """The /api/devices payload for these registry rows. client None: telemetry "off".
-    owners ({sub: {"username", "display"}}) adds each device's owner.
+    owners ({sub: {"username", "display"}}) adds each device's owner. interim_s: the configured
+    accounting interval (settings.acct_interim_s; presence.DEFAULT_INTERIM_S when None).
+
+    Presence (presence.py): with db, every device's newest accounting sessions and UniFi events
+    (two queries for the page, presence.load), the open ap_down incidents; the payload adds
+    "poll_s" (the shortest of the devices' presence.poll_s) and "counts" ({state: n}).
 
     With db (v2): the devices' MAC windows and conflicts from the registry (identity.py), the
     house's RADIUS rejects and incidents of the last 24 h; detail (one device's page): its
@@ -447,8 +508,8 @@ def dashboard(client, rows, owners=None, now=None, claims=None, admin=False, db=
     telemetry, house, statuses, summaries = ("off" if client is None else "ok"), empty_house(), {}, {}
     if db is not None:
         identities = ident.from_registry(db, rows, now, admin, since=now - ident.RECENT_S)
-        failures = registry.auth_failures(db, ident._dt(now - 86400)) if rows else []
-        incidents = registry.incidents(db, ident._dt(now - 86400)) if rows else []
+        failures = _shared("auth_failures", registry.auth_failures, db, ident._dt(now - 86400)) if rows else []
+        incidents = _shared("incidents", registry.incidents, db, ident._dt(now - 86400)) if rows else []
     else:
         identities, failures, incidents = ident.from_rows(rows, claims, now, admin), [], []
     bounds = {}
@@ -479,11 +540,20 @@ def dashboard(client, rows, owners=None, now=None, claims=None, admin=False, db=
                 ended_seen[key] = last_seen_until(client, mac, start, end)
         except Unavailable:
             telemetry, statuses, summaries, load, cover, ended_seen = "unavailable", {}, {}, {}, {}, {}
-    aps = ap_map(client) if (detail and db is not None and telemetry == "ok") else tl.ApMap()
+    found_presence = presence.load(db, [r["id"] for r in rows], ssid=getattr(client, "ssid", None)) \
+        if db is not None and rows else {}
+    has_sessions = any(f["sessions"] for f in found_presence.values())
+    aps = tl.ApMap()
+    if db is not None and (detail or has_sessions):
+        aps = ap_map(client) if telemetry == "ok" else known_aps()
+    down = presence.ap_down(incidents)
     devices = []
     for row in rows:
         identity = identities[str(row["id"])]
         withheld = identity.withheld_now()
+        raw = found_presence.get(str(row["id"])) or {}
+        evidence = {"sessions": presence.own([presence.session(r, aps) for r in raw.get("sessions") or ()], identity),
+                    "events": presence.own([presence.event(r) for r in raw.get("events") or ()], identity)}
         macs = [] if withheld else sorted(identity.live_bounds())
         mac = _primary(macs, statuses, identity)
         conflict = identity.conflict_owners_now() if admin else (1 if withheld else 0)
@@ -500,7 +570,8 @@ def dashboard(client, rows, owners=None, now=None, claims=None, admin=False, db=
                 if ap not in cov or (c.get("samples") or 0) > (cov[ap].get("samples") or 0):
                     cov[ap] = c
         context = _context(row, identity, summary, status, rejects, load, cov, incidents, now, events)
-        extra = {"identity": identity, "context": context, "last_auth": last_auth(row, rejects), "sources": found}
+        extra = {"identity": identity, "context": context, "last_auth": last_auth(row, rejects), "sources": found,
+                 "presence": evidence, "ap_down": down, "interim_s": interim_s}
         device = device_entry(row, mac or identity.current_mac, status, telemetry, house, now, summary, conflict, admin,
                               extra)
         if owners is not None:
@@ -509,7 +580,7 @@ def dashboard(client, rows, owners=None, now=None, claims=None, admin=False, db=
         devices.append(device)
     return {"generated_at": iso(now), "telemetry": telemetry,
             "stale": telemetry == "ok" and diagnostics.is_stale(house["wifi_data_age_s"]),
-            "house": house, "devices": devices}
+            "house": house, "devices": devices, "poll_s": presence.poll_s(devices), "counts": presence.counts(devices)}
 
 
 def _primary(macs, statuses, identity):

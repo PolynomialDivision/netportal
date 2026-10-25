@@ -36,7 +36,16 @@ class StateTests(unittest.TestCase):
     def test_offline(self):
         found = dx.findings({"state": "offline", "mac": "02:00:00:00:00:0a", "last_seen": "x"}, None, 30)
         self.assertEqual(found, [{"code": "offline", "severity": "info", "params": {"last_seen": "x"},
-                                  "basis": "measured", "evidence": {"last_seen": "x"}}])
+                                  "basis": "measured", "evidence": {"last_seen": "x", "confirmed_at": None,
+                                                                    "confirmed_by": None, "reason": None}}])
+        # presence's confirmation is what the finding rests on
+        found = dx.findings({"state": "offline", "mac": "02:00:00:00:00:0a", "last_seen": "x", "presence": {
+            "confirmed_at": "y", "confirmed_by": "radius_acct", "reason": "acct_stop", "basis": "measured"}}, None, 30)
+        self.assertEqual(found[0]["evidence"], {"last_seen": "x", "confirmed_at": "y", "confirmed_by": "radius_acct",
+                                                "reason": "acct_stop"})
+        # connecting and unknown are never "not connected"
+        for state in ("connecting", "unknown"):
+            self.assertNotIn("offline", codes({"state": state, "mac": "02:00:00:00:00:0a"}))
 
     def test_stale_only_while_prometheus_answers(self):
         unknown = {"state": "unknown", "mac": "02:00:00:00:00:0a"}

@@ -56,14 +56,14 @@ export NETPORTAL_BASE_URL=http://127.0.0.1:18080 NETPORTAL_REALM=scharni.org NET
   NETPORTAL_DEVICE_CA_KEY_B64="$device_ca_key_b64" \
   NETPORTAL_DAE_SECRET=it-dae-secret \
   NETPORTAL_AUTHENTIK_API=http://127.0.0.1:19000/api/v3 NETPORTAL_AUTHENTIK_TOKEN=mock-reader-token \
-  NETPORTAL_PASSPOINT=true AUTHLIB_INSECURE_TRANSPORT=1
+  NETPORTAL_PASSPOINT=true NETPORTAL_ACCT_INTERIM_S=120 AUTHLIB_INSECURE_TRANSPORT=1
 if [ -n "${IMAGES:-}" ]; then
   docker build -q -t netportal:it "$root" >/dev/null
   : > "$run/portal.env"
   for v in NETPORTAL_BASE_URL NETPORTAL_REALM NETPORTAL_SSID NETPORTAL_RADIUS_SERVER_NAME NETPORTAL_DISPLAY_NAME \
            NETPORTAL_DATABASE_URL NETPORTAL_SESSION_SECRET NETPORTAL_OIDC_ISSUER NETPORTAL_OIDC_CLIENT_ID \
            NETPORTAL_OIDC_CLIENT_SECRET NETPORTAL_POLICIES NETPORTAL_ADMIN_GROUPS NETPORTAL_DAE_SECRET \
-           NETPORTAL_AUTHENTIK_API NETPORTAL_AUTHENTIK_TOKEN NETPORTAL_PASSPOINT AUTHLIB_INSECURE_TRANSPORT \
+           NETPORTAL_AUTHENTIK_API NETPORTAL_AUTHENTIK_TOKEN NETPORTAL_PASSPOINT NETPORTAL_ACCT_INTERIM_S AUTHLIB_INSECURE_TRANSPORT \
            NETPORTAL_DEVICE_CA_KEY_B64; do
     printf '%s=%s\n' "$v" "${!v}" >> "$run/portal.env"
   done
@@ -82,6 +82,7 @@ for _ in $(seq 30); do curl -sf -o /dev/null http://127.0.0.1:18080/healthz && b
 # --- RADIUS (the production configuration in radius/) and the fake access point
 radius_env=(-e RADIUS_DB_HOST=10.199.0.5 -e RADIUS_DB_NAME=netportal -e RADIUS_DB_PASSWORD="$RADIUS_DB_PASS"
   -e RADIUS_STATUS_SECRET="$STATUS_SECRET" -e DEVICE_CA_DN="/CN=Test Device CA" -e RADIUS_SESSION_TIMEOUT=43200
+  -e NETPORTAL_ACCT_INTERIM_S=120
   -v "$here/clients.conf:/etc/freeradius/clients.conf:ro" -v "$run/pki:/etc/netportal:ro"
   -v "$run/pki/radius-server.key:/etc/netportal-secrets/radius-server.key:ro")
 # The RADIUS image is always the one from radius/Dockerfile (its entrypoint matters).

@@ -163,19 +163,20 @@ class MigrationTests(unittest.TestCase):
         name = fresh_database()
         with registry.connect(dsn(name)) as db:
             first = registry.migrate(db)
-            self.assertEqual(first["applied"], [1, 2])
-            self.assertEqual(first["version"], 2)
+            self.assertEqual(first["applied"], [1, 2, 3])
+            self.assertEqual(first["version"], 3)
             self.assertTrue(first["radius_role"])
             second = registry.migrate(db)
             self.assertEqual(second["applied"], [])
-            self.assertEqual(second["version"], 2)
+            self.assertEqual(second["version"], 3)
             tables = {r["table_name"] for r in db.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")}
             self.assertLessEqual({"device", "credential", "radius_session", "device_mac", "radius_auth", "radius_acct",
                                   "connection_event", "device_day", "ap_day", "incident", "job",
-                                  "schema_migration"}, tables)
+                                  "schema_migration", "radius_nas"}, tables)
             rows = list(db.execute("SELECT version, name, checksum FROM schema_migration ORDER BY version"))
-            self.assertEqual([(r["version"], r["name"]) for r in rows], [(1, "baseline"), (2, "telemetry")])
+            self.assertEqual([(r["version"], r["name"]) for r in rows],
+                             [(1, "baseline"), (2, "telemetry"), (3, "presence")])
             self.assertEqual([r["checksum"] for r in rows], [f[3] for f in registry.migration_files()])
 
     def test_upgrade_from_schema_sql(self):
@@ -199,7 +200,7 @@ class MigrationTests(unittest.TestCase):
             db.execute("INSERT INTO job (name, last_success) VALUES ('offboarding', now())")
             db.commit()
             result = registry.migrate(db)
-            self.assertEqual(result["applied"], [1, 2])
+            self.assertEqual(result["applied"], [1, 2, 3])
             macs = list(db.execute("SELECT device_id, mac::text AS mac, first_seen, last_seen, auth_count, randomized "
                                    "FROM device_mac"))
             self.assertEqual(len(macs), 1, macs)
@@ -231,7 +232,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_migration_files(self):
         files = registry.migration_files()
-        self.assertEqual([f[:2] for f in files], [(1, "baseline"), (2, "telemetry")])
+        self.assertEqual([f[:2] for f in files], [(1, "baseline"), (2, "telemetry"), (3, "presence")])
         self.assertFalse((ROOT / "netportal" / "schema.sql").exists())
 
     def test_missing_radius_role_warns(self):
@@ -267,7 +268,22 @@ class MigrationTests(unittest.TestCase):
         for t in threads:
             t.join()
         self.assertEqual(errors, [])
-        self.assertEqual(sorted(results), [[], [], [1, 2]])
+        self.assertEqual(sorted(results), [[], [], [1, 2, 3]])
+
+    def test_upgrade_from_the_deployed_0002(self):
+        """Production runs 0001 and 0002: migrate applies 0003 only and keeps the sessions."""
+        name = fresh_database()
+        files = registry.migration_files()
+        with registry.connect(dsn(name)) as db:
+            with mock.patch.object(registry, "migration_files", return_value=files[:2]):
+                self.assertEqual(registry.migrate(db)["applied"], [1, 2])
+            db.execute("""INSERT INTO radius_acct (nas_ip, acct_session_id, link, started, updated)
+                          VALUES ('10.0.0.2', 'OLD-1', 'none', now() - interval '1 hour', now())""")
+            db.commit()
+            result = registry.migrate(db)
+            self.assertEqual((result["applied"], result["version"]), ([3], 3))
+            row = db.execute("SELECT acct_session_id, interim_s FROM radius_acct").fetchone()
+            self.assertEqual(row, {"acct_session_id": "OLD-1", "interim_s": None})
 
 
 # --- rights -----------------------------------------------------------------------------------
@@ -578,6 +594,138 @@ class AccountingTests(DbCase):
         accounting(self.db, "Accounting-Off", "", "", mac="", nas="10.0.0.8")
         self.assertEqual(self.session("B1", "10.0.0.8")["terminate_cause"], "NAS-Request")
 
+    def test_the_measured_interval(self):
+        ts = int(time.time()) - 1000
+        accounting(self.db, "Start", "M1", "", nas="10.0.0.40", ts=str(ts))
+        self.assertIsNone(self.session("M1", "10.0.0.40")["interim_s"])
+        accounting(self.db, "Interim-Update", "M1", "", nas="10.0.0.40", ts=str(ts + 120))
+        self.assertEqual(self.session("M1", "10.0.0.40")["interim_s"], 120)
+        accounting(self.db, "Interim-Update", "M1", "", nas="10.0.0.40", ts=str(ts + 120))     # duplicate
+        accounting(self.db, "Interim-Update", "M1", "", nas="10.0.0.40", ts=str(ts + 60))      # reordered, older
+        s = self.session("M1", "10.0.0.40")
+        self.assertEqual((s["interim_s"], s["updated"]), (120, datetime.datetime.fromtimestamp(ts + 120, UTC)))
+        accounting(self.db, "Interim-Update", "M1", "", nas="10.0.0.40", ts=str(ts + 130))     # a retransmission
+        self.assertEqual(self.session("M1", "10.0.0.40")["interim_s"], 120)
+        accounting(self.db, "Interim-Update", "M1", "", nas="10.0.0.40", ts=str(ts + 360))     # one lost: 240
+        accounting(self.db, "Interim-Update", "M1", "", nas="10.0.0.40", ts=str(ts + 960))     # an outage: 600
+        self.assertEqual(self.session("M1", "10.0.0.40")["interim_s"], 120)                  # the smallest gap
+        self.assertEqual(self.scalar("SELECT interim_s FROM radius_nas WHERE nas_ip = '10.0.0.40'"), 120)
+        # another session's estimate within 10 % does not rewrite the NAS's; a different one does
+        nas_at = self.scalar("SELECT interim_at FROM radius_nas WHERE nas_ip = '10.0.0.40'")
+        accounting(self.db, "Start", "M2", "", nas="10.0.0.40", ts=str(ts + 100))
+        accounting(self.db, "Interim-Update", "M2", "", nas="10.0.0.40", ts=str(ts + 230))     # 130
+        self.assertEqual(self.scalar("SELECT interim_at FROM radius_nas WHERE nas_ip = '10.0.0.40'"), nas_at)
+        accounting(self.db, "Start", "M3", "", nas="10.0.0.40", ts=str(ts + 100))
+        accounting(self.db, "Interim-Update", "M3", "", nas="10.0.0.40", ts=str(ts + 400))     # 300
+        self.assertEqual(self.scalar("SELECT interim_s FROM radius_nas WHERE nas_ip = '10.0.0.40'"), 300)
+        # a Stop measures nothing
+        accounting(self.db, "Stop", "M1", "", nas="10.0.0.40", ts=str(ts + 970))
+        self.assertEqual(self.session("M1", "10.0.0.40")["interim_s"], 120)
+
+    def test_a_locked_radius_nas_row_does_not_lose_the_session_update(self):
+        # review 7: the NAS row's write has its own exception block
+        ts = int(time.time()) - 1000
+        accounting(self.db, "Start", "LK", "", nas="10.0.0.44", ts=str(ts))
+        self.db.commit()
+        other = registry.connect(dsn(self.dbname))
+        self.addCleanup(other.close)
+        other.execute("INSERT INTO radius_nas (nas_ip, interim_s) VALUES ('10.0.0.44', 999)")
+        try:
+            accounting(self.db, "Interim-Update", "LK", "", nas="10.0.0.44", ts=str(ts + 120))
+            s = self.session("LK", "10.0.0.44")
+            self.assertEqual((s["interim_s"], s["updated"]), (120, datetime.datetime.fromtimestamp(ts + 120, UTC)))
+        finally:
+            other.rollback()
+
+    def test_a_clock_ahead_is_taken_as_now(self):
+        # review 8: an Event-Timestamp in the future is never later than the arrival
+        accounting(self.db, "Start", "FU", "", ts=str(int(time.time()) + 240))
+        started = self.session("FU")["started"]
+        self.assertLessEqual(started, datetime.datetime.now(UTC))
+
+    def test_a_reused_session_id_opens_again(self):
+        # review 9: a Start newer than the Stop, or an Interim well after it
+        ts = int(time.time()) - 3000
+        accounting(self.db, "Start", "RU", "", ts=str(ts))
+        accounting(self.db, "Stop", "RU", "", cause="User-Request", ts=str(ts + 100))
+        accounting(self.db, "Start", "RU", "", ts=str(ts + 500))
+        s = self.session("RU")
+        self.assertEqual((s["started"], s["stopped"], s["terminate_cause"]),
+                         (datetime.datetime.fromtimestamp(ts + 500, UTC), None, None))
+        accounting(self.db, "Stop", "RU", "", ts=str(ts + 600))
+        accounting(self.db, "Interim-Update", "RU", "", time="60", ts=str(ts + 620))           # within an interval
+        self.assertIsNotNone(self.session("RU")["stopped"])
+        accounting(self.db, "Interim-Update", "RU", "", time="60", ts=str(ts + 1000))          # well after
+        s = self.session("RU")
+        self.assertEqual((s["stopped"], s["started"]), (None, datetime.datetime.fromtimestamp(ts + 940, UTC)))
+
+    def test_reordered_stop_and_start(self):
+        ts = int(time.time()) - 1000
+        # the Stop overtakes the Start (and an Interim): the session ends up stopped
+        accounting(self.db, "Stop", "R1", "", time="600", cause="User-Request", ts=str(ts + 600))
+        accounting(self.db, "Start", "R1", "", ts=str(ts))
+        accounting(self.db, "Interim-Update", "R1", "", time="300", ts=str(ts + 300))
+        s = self.session("R1")
+        self.assertEqual((s["started"], s["updated"], s["stopped"], s["terminate_cause"]),
+                         (datetime.datetime.fromtimestamp(ts, UTC), datetime.datetime.fromtimestamp(ts + 600, UTC),
+                          datetime.datetime.fromtimestamp(ts + 600, UTC), "User-Request"))
+        # a retransmitted Stop (no Event-Timestamp: its arrival) keeps the first stop time
+        accounting(self.db, "Stop", "R1", "", time="600", cause="User-Request")
+        self.assertEqual(self.session("R1")["stopped"], datetime.datetime.fromtimestamp(ts + 600, UTC))
+        # a retransmitted Start (its Event-Timestamp) keeps the start and the Stop
+        accounting(self.db, "Start", "R1", "", ts=str(ts))
+        s = self.session("R1")
+        self.assertEqual((s["started"], s["stopped"]), (datetime.datetime.fromtimestamp(ts, UTC),
+                                                        datetime.datetime.fromtimestamp(ts + 600, UTC)))
+
+    def test_a_stop_ends_only_its_own_session(self):
+        ts = int(time.time()) - 600
+        accounting(self.db, "Start", "OLD", "", nas="10.0.0.41", ts=str(ts))
+        accounting(self.db, "Start", "NEW", "", nas="10.0.0.42", ts=str(ts + 300))             # the roam's new AP
+        accounting(self.db, "Stop", "OLD", "", nas="10.0.0.41", cause="User-Request", ts=str(ts + 310))
+        self.assertIsNotNone(self.session("OLD", "10.0.0.41")["stopped"])
+        self.assertIsNone(self.session("NEW", "10.0.0.42")["stopped"])
+        # the same session id at another AP is another session
+        accounting(self.db, "Start", "OLD", "", nas="10.0.0.42", ts=str(ts + 320))
+        self.assertIsNone(self.session("OLD", "10.0.0.42")["stopped"])
+
+    def test_accounting_on_and_reordering(self):
+        nas, ts = "10.0.0.43", int(time.time()) - 600
+        accounting(self.db, "Start", "N1", "", nas=nas, ts=str(ts + 200))
+        accounting(self.db, "Accounting-On", "", "", mac="", nas=nas, ts=str(ts + 100))      # older, arrives late
+        self.assertIsNone(self.session("N1", nas)["stopped"])
+        # a Start from before the reboot that arrives after the Accounting-On: ended by it
+        accounting(self.db, "Start", "N0", "", nas=nas, ts=str(ts + 50))
+        s = self.session("N0", nas)
+        self.assertEqual((s["stopped"], s["terminate_cause"]),
+                         (datetime.datetime.fromtimestamp(ts + 100, UTC), "NAS-Reboot"))
+        # a newer Accounting-Off closes N1; an older Off after it changes nothing
+        accounting(self.db, "Accounting-Off", "", "", mac="", nas=nas, ts=str(ts + 300))
+        accounting(self.db, "Accounting-Off", "", "", mac="", nas=nas, ts=str(ts + 250))
+        s = self.session("N1", nas)
+        self.assertEqual((s["stopped"], s["terminate_cause"]),
+                         (datetime.datetime.fromtimestamp(ts + 300, UTC), "NAS-Request"))
+        self.assertEqual(self.scalar("SELECT reset_at FROM radius_nas WHERE nas_ip = %s", nas),
+                         datetime.datetime.fromtimestamp(ts + 300, UTC))
+        # a session updated after the reset is not ended by a late older packet
+        accounting(self.db, "Start", "N2", "", nas=nas, ts=str(ts + 400))
+        accounting(self.db, "Interim-Update", "N2", "", nas=nas, ts=str(ts + 280))
+        self.assertIsNone(self.session("N2", nas)["stopped"])
+
+    def test_accounting_on_keeps_the_last_contact_of_abandoned_sessions(self):
+        # review 1: a session silent for 3 days is closed at its last contact + 2 x interval +
+        # 60 s, not at the reboot, and its updated stays
+        nas, ts = "10.0.0.45", int(time.time()) - 6 * 86400
+        accounting(self.db, "Start", "AB", "", nas=nas, ts=str(ts))
+        accounting(self.db, "Start", "LIVE", "", nas=nas, ts=str(int(time.time()) - 100))
+        accounting(self.db, "Accounting-On", "", "", mac="", nas=nas)
+        s = self.session("AB", nas)
+        self.assertEqual((s["updated"], s["stopped"], s["terminate_cause"]),
+                         (datetime.datetime.fromtimestamp(ts, UTC), datetime.datetime.fromtimestamp(ts + 660, UTC),
+                          "NAS-Reboot"))
+        live = self.session("LIVE", nas)
+        self.assertLess(abs((live["stopped"] - datetime.datetime.now(UTC)).total_seconds()), 60)
+
     def test_implausible_event_timestamp(self):
         accounting(self.db, "Start", "T1", "", ts="1000")      # 1970: the AP's clock is not set
         started = self.session("T1")["started"]
@@ -740,6 +888,42 @@ class InterfaceTests(DbCase):
         recent = registry.acct_sessions(self.db, dev, now - datetime.timedelta(seconds=300), now)
         self.assertEqual([r["acct_session_id"] for r in recent], ["Q2"])
 
+    def test_latest_sessions_and_events_for_a_page(self):
+        dev, serial = self.device()
+        dev2, serial2 = self.device()
+        token, token2 = login(self.db, dev, serial), login(self.db, dev2, serial2, mac="AA-BB-CC-DD-EE-02")
+        ts = int(time.time()) - 3000
+        for i in range(7):
+            accounting(self.db, "Start", "L%d" % i, token, nas="10.0.0.50", ts=str(ts + i * 100))
+        accounting(self.db, "Interim-Update", "L6", token, nas="10.0.0.50", ts=str(ts + 720))
+        accounting(self.db, "Start", "K1", token2, nas="10.0.0.51", mac="AA-BB-CC-DD-EE-02", ts=str(ts))
+        self.db.commit()
+        found = registry.latest_sessions(self.db, [dev, dev2, uuid.uuid4()])
+        self.assertEqual(len(found), 3)
+        self.assertEqual([r["acct_session_id"] for r in found[str(dev)]], ["L6", "L5", "L4", "L3", "L2"])
+        self.assertEqual((found[str(dev)][0]["interim_s"], found[str(dev)][0]["nas_interim_s"],
+                          found[str(dev)][1]["nas_interim_s"]), (120, 120, 120))
+        self.assertEqual([r["acct_session_id"] for r in found[str(dev2)]], ["K1"])
+        self.assertEqual(found[str(dev2)][0]["nas_interim_s"], None)
+        self.assertEqual(registry.latest_sessions(self.db, []), {})
+        mac = "aa:bb:cc:dd:ee:72"
+        self.window(dev, mac, T0, T0 + DAY)
+        rows = [{"at": T0 + i * HOUR, "kind": kind, "mac": mac, "ssid": ssid, "dedup_key": "p%d" % i}
+                for i, (kind, ssid) in enumerate([("connected", "Scharni"), ("other", "Scharni"),
+                                                  ("disconnected", "Scharni"), ("connected", "Guests"),
+                                                  ("roamed", None)])]
+        registry.insert_connection_events(self.db, rows)
+        events = registry.latest_connection_events(self.db, [dev, dev2], ssid="Scharni")
+        self.assertEqual([e["kind"] for e in events[str(dev)]], ["roamed", "disconnected", "connected"])
+        self.assertEqual(events[str(dev2)], [])
+        self.assertEqual(len(registry.latest_connection_events(self.db, [dev])[str(dev)]), 3)
+        self.assertEqual(registry.latest_connection_events(self.db, [dev], per_device=1)[str(dev)][0]["kind"], "roamed")
+        self.db.execute("SET enable_seqscan = off")         # a tiny table: show that the index serves it
+        plan = "\n".join(r["QUERY PLAN"] for r in self.db.execute(
+            "EXPLAIN SELECT * FROM radius_acct WHERE device_id = %s ORDER BY updated DESC LIMIT 5", (dev,)))
+        self.assertIn("radius_acct_device", plan)
+        self.db.execute("RESET enable_seqscan")
+
     def test_connection_events(self):
         dev, _ = self.device()
         mac = "aa:bb:cc:dd:ee:71"
@@ -879,7 +1063,7 @@ class InterfaceTests(DbCase):
 
     def test_stats(self):
         row = registry.stats(self.db)
-        self.assertEqual((row["radius_role"], row["schema_version"]), (True, 2))
+        self.assertEqual((row["radius_role"], row["schema_version"]), (True, 3))
 
 
 if __name__ == "__main__":

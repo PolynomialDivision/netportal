@@ -24,11 +24,15 @@ sql {
 	postgresql {
 		send_application_name = yes
 	}
+	# All connections open from the start (start = min = max): a pool that opens them on demand
+	# fails a request that finds none free while one is still being opened, which here is a
+	# reject; a burst of logins (every client of a restarted access point at once) hits that
+	# (integration test: ten logins at once, 9 of 10 got in).
 	pool {
-		start = 2
-		min = 1
+		start = 8
+		min = 8
 		max = 8
-		spare = 2
+		spare = 0
 		uses = 0
 		retry_delay = 1
 		lifetime = 0

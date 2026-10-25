@@ -32,6 +32,7 @@
   </div>
   {{ dash.live_line(dashboard if dashboard is defined else none) }}
   {{ dash.banners(dashboard if dashboard is defined else none) }}
+  {% if from_admin %}{{ dash.presence_admin(d) }}{% endif %}
   {{ dash.auth_alert(d, admin=from_admin) }}
   {{ dash.live(d) }}
   {{ dash.how_connects(d, full=True, admin=from_admin) }}
