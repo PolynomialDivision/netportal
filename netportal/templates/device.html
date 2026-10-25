@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% import "_dash.html" as dash with context %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='dashboard.js') }}"></script>{% endblock %}
+{% block body_attrs %} class="wide" data-page="device"{% endblock %}
+{# One device: its live card, the connection timeline and charts (drawn by static/dashboard.js
+   from /api/devices/<id>/history), and what the registry and the Wi-Fi know about it.
+   Context: device (DEVICE), optionally dashboard (for generated_at, telemetry, stale),
+   history (a /history payload: the event list without JavaScript) and row (the registry row). #}
+{% set d = device %}
+{% set from_admin = request.args.get("from") == "admin" and user and user.admin %}
+{% set ranges = ("24h", "7d", "30d") %}
+{% set rng = request.args.get("range") if request.args.get("range") in ranges
+             else (history.range if history is defined and history and history.range in ranges else "24h") %}
+{% set has_history = history is defined and history %}
+{% set expires = d.expires if d.expires is defined and d.expires else (row.expires if row is defined and row else none) %}
+{% macro ap_of(ap) %}{{ dash.x("room", ap if ap is mapping else {"name": ap}) }}{% endmacro %}
+{% macro band_of(band) %}{{ dash.x("band", band) }}{% endmacro %}
+{% block body %}
+<p class="backlink"><a href="{{ url_for('admin') if from_admin else url_for('index') }}">{{ dash.icon("back") }}{{ t.admin if from_admin else t.back_devices }}</a></p>
+
+<article class="card dev dev-detail" id="device-{{ d.id }}" data-device="{{ d.id }}">
+  <div class="dev-head">
+    {{ dash.device_icon(d) }}
+    <div class="dev-title">
+      {{ dash.name_block(d, "h1") }}
+      {{ dash.state_line(d) }}
+    </div>
+  </div>
+  {{ dash.live_line(dashboard if dashboard is defined else none) }}
+  {{ dash.banners(dashboard if dashboard is defined else none) }}
+  {{ dash.live(d) }}
+  {{ dash.findings(d, full=True, admin=from_admin) }}
+</article>
+
+<section class="history" aria-labelledby="history-h" data-history data-range="{{ rng }}">
+  <div class="section-head">
+    <h2 id="history-h">{{ dash.icon("chart") }}{{ t.history_title }}</h2>
+    <nav class="range{% if not has_history %} needs-js{% endif %}" aria-label="{{ t.range_label }}">
+      {% for r in ranges %}<a href="?range={{ r }}{% if from_admin %}&amp;from=admin{% endif %}" data-range="{{ r }}"{% if r == rng %} aria-current="true"{% endif %}>{{ t["range_" ~ r] }}</a>{% endfor %}
+    </nav>
+  </div>
+  <p class="history-status" data-history-status role="status"><noscript>{{ t.ch_needs_js if has_history else t.ch_needs_js_all }}</noscript></p>
+
+  <div class="card timeline-card{% if not has_history %} needs-js{% endif %}">
+    <h3>{{ t.tl_title }}</h3>
+    <div class="timeline" data-timeline></div>
+    <p class="tl-info" data-timeline-info aria-live="polite"></p>
+    <ul class="tl-legend" data-timeline-legend aria-label="{{ t.tl_legend }}"></ul>
+    <ol class="events" data-events>
+    {% if history is defined and history and history.timeline %}
+      {% for e in (history.timeline|sort(attribute="at", reverse=True))[:50] %}
+      <li class="ev ev-{{ e.kind }}">
+        <span class="ev-time">{{ dash.time(e.at) }}</span>
+        <span class="ev-text">
+        {%- if e.kind == "connected" -%}
+          {{ (t.tl_connected|e).format(where=ap_of(e.ap) ~ (" (" ~ band_of(e.band) ~ ")" if e.band else "")) }}{% if e.duration_s %} <span class="muted">{{ (t.tl_for|e).format(duration=dash.x("duration", e.duration_s)) }}</span>{% endif %}
+        {%- elif e.kind == "disconnected" -%}{{ t.tl_disconnected }}{% if e.duration_s %} <span class="muted">{{ (t.tl_for|e).format(duration=dash.x("duration", e.duration_s)) }}</span>{% endif %}
+        {%- elif e.kind == "roamed" -%}{{ (t.tl_roamed|e).format(old=ap_of(e.from_ap), new=ap_of(e.ap)) }}
+        {%- elif e.kind == "band_changed" -%}{{ (t.tl_band|e).format(old=band_of(e.from_band), new=band_of(e.band)) }}
+        {%- endif -%}
+        </span>
+      </li>
+      {% endfor %}
+    {% elif history is defined and history %}
+      <li class="ev ev-none">{{ t.tl_none }}</li>
+    {% endif %}
+    </ol>
+  </div>
+
+  <div class="chart-grid needs-js">
+    {% for key, sub in (("signal", t.ch_signal_sub), ("quality", t.ch_quality_sub), ("traffic", t.ch_traffic_sub),
+                        ("link", t.ch_link_sub), ("online", t.ch_online_sub)) %}
+    <figure class="card chart" data-chart="{{ key }}">
+      <figcaption>
+        <h3>{{ t["ch_" ~ key] }}</h3>
+        <p class="chart-sub">{{ sub }}</p>
+      </figcaption>
+      <ul class="chart-legend" data-legend hidden></ul>
+      <div class="chart-host" data-host></div>
+      <p class="chart-summary" data-summary></p>
+    </figure>
+    {% endfor %}
+  </div>
+  <p class="chart-hint muted small" data-chart-hint hidden>{{ t.chart_hint }}</p>
+</section>
+
+<section class="card details" aria-labelledby="details-h">
+  <h2 id="details-h">{{ t.dt_title }}</h2>
+  <dl class="kv">
+    {% if d.owner %}<div><dt>{{ t.dt_owner }}</dt><dd>{{ d.owner.display or d.owner.username }}{% if d.owner.username and d.owner.display and d.owner.display != d.owner.username %} <span class="muted">({{ d.owner.username }})</span>{% endif %}</dd></div>{% endif %}
+    <div><dt>{{ t.dt_platform }}</dt><dd>{{ t[platform_label.get(d.platform, 'for_app')] }}</dd></div>
+    <div><dt>{{ t.dt_enrolled }}</dt><dd>{{ dash.x("date", d.created) }}</dd></div>
+    {% if expires %}<div><dt>{{ t.dt_expires }}</dt><dd>{{ dash.x("date", expires) }}</dd></div>{% endif %}
+    {% if d.mac %}<div><dt>{{ t.dt_mac }}</dt><dd class="mono">{{ d.mac }}</dd></div>{% endif %}
+    {% if d.ip %}<div><dt>{{ t.dt_ip }}</dt><dd class="mono">{{ d.ip }}</dd></div>{% endif %}
+    {% if d.ssid %}<div><dt>{{ t.dt_ssid }}</dt><dd>{{ d.ssid }}</dd></div>{% endif %}
+    {% if d.ap %}<div><dt>{{ t.dt_ap }}</dt><dd>{{ dash.x("room", d.ap) }} <span class="muted mono">{{ d.ap.name }}</span></dd></div>{% endif %}
+    {% if d.band or d.channel %}<div><dt>{{ t.f_wifi }}</dt><dd>{{ dash.x("wifi", d) }}</dd></div>{% endif %}
+    {% if d.noise_dbm is not none and d.noise_dbm is defined %}<div><dt>{{ t.dt_noise }}</dt><dd>{{ dash.x("dbm", d.noise_dbm) }}</dd></div>{% endif %}
+    {% if d.snr_db is not none and d.snr_db is defined %}<div><dt>{{ t.dt_snr }}</dt><dd>{{ dash.x("db", d.snr_db) }}</dd></div>{% endif %}
+    {% if d.retry_ratio is not none and d.retry_ratio is defined %}<div><dt>{{ t.dt_retries }}</dt><dd>{{ dash.x("percent", d.retry_ratio) }}</dd></div>{% endif %}
+    {% if d.channel_util is not none and d.channel_util is defined %}<div><dt>{{ t.dt_channel_util }}</dt><dd>{{ dash.x("percent", d.channel_util) }}</dd></div>{% endif %}
+    {% if d.roams_1h is not none and d.roams_1h is defined %}<div><dt>{{ t.dt_roams }}</dt><dd>{{ dash.x("number", d.roams_1h) }}</dd></div>{% endif %}
+  </dl>
+  <details class="danger">
+    <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
+    <form method="post" action="{{ url_for('revoke', device_id=d.id) }}" class="confirm">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if from_admin %}<input type="hidden" name="back" value="/admin">{% endif %}
+      <p><strong>{{ t.revoke_title }}: {{ d.name }}</strong><br>{{ t.revoke_note }}</p>
+      <button class="button danger">{{ t.revoke }}</button>
+    </form>
+  </details>
+</section>
+
+{{ dash.page_data({"page": "device", "lang": lang, "device": d.id|string, "range": rng, "login": url_for('login'),
+                   "ssid": settings.ssid, "admin": from_admin, "history": "/api/devices/" ~ d.id ~ "/history"},
+                  {"generated_at": dashboard.generated_at if dashboard is defined and dashboard else none,
+                   "telemetry": dashboard.telemetry if dashboard is defined and dashboard else none,
+                   "stale": dashboard.stale if dashboard is defined and dashboard else false,
+                   "house": dashboard.house if dashboard is defined and dashboard else none,
+                   "devices": [d],
+                   "history": history if history is defined else none}) }}
+{% endblock %}

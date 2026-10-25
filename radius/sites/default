@@ -50,10 +50,11 @@ server default {
 			}
 			# The latest session of the device (no history): where netportal sends the
 			# Disconnect-Request when the device is revoked. Without NAS-IP-Address the packet's
-			# source is the access point.
+			# source is the access point. first_seen: the first login with this MAC (kept while
+			# the MAC stays, new when it changes): the dashboard's Wi-Fi data starts there.
 			if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
 				update control {
-					&Tmp-String-3 := "%{sql:INSERT INTO radius_session (device_id, nas_ip, calling_station, user_name, updated) VALUES ('%{control:Tmp-String-2}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Calling-Station-Id}', '%{User-Name}', now()) ON CONFLICT (device_id) DO UPDATE SET nas_ip = EXCLUDED.nas_ip, calling_station = EXCLUDED.calling_station, user_name = EXCLUDED.user_name, updated = now()}"
+					&Tmp-String-3 := "%{sql:INSERT INTO radius_session (device_id, nas_ip, calling_station, user_name, updated, first_seen) VALUES ('%{control:Tmp-String-2}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Calling-Station-Id}', '%{User-Name}', now(), now()) ON CONFLICT (device_id) DO UPDATE SET nas_ip = EXCLUDED.nas_ip, calling_station = EXCLUDED.calling_station, user_name = EXCLUDED.user_name, updated = now(), first_seen = CASE WHEN radius_session.calling_station IS DISTINCT FROM EXCLUDED.calling_station THEN now() ELSE radius_session.first_seen END}"
 				}
 			}
 		}

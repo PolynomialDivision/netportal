@@ -1,4 +1,7 @@
 {% extends "base.html" %}
+{% import "_dash.html" as dash with context %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='dashboard.js') }}"></script>{% endblock %}
+{% block body_attrs %} class="wide" data-page="devices"{% endblock %}
 {# One enrolment form per format: a POST with the CSRF token, as before. #}
 {% macro enrol_button(fmt, label, icon, primary=False) %}
 <form method="post" action="{{ url_for('enroll_device') }}" class="enrol">
@@ -13,12 +16,69 @@
 </ol>
 <p><a class="button{% if primary %} primary big{% endif %}" href="https://www.geteduroam.app/" rel="noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-app"/></svg>{{ t.get_app }}</a></p>
 {% endmacro %}
+{# A device card: the live parts (state, facts, findings) are dash macros that static/render.js
+   redraws on refresh; the name form and the actions stay as the server sent them. #}
+{% macro device_card(d, row) %}
+<article class="card dev" id="device-{{ d.id }}" data-device="{{ d.id }}">
+  <div class="dev-head">
+    {{ dash.device_icon(d) }}
+    <div class="dev-title">
+      {{ dash.name_block(d, "h2") }}
+      {{ dash.state_line(d) }}
+    </div>
+  </div>
+  {{ dash.live(d) }}
+  {{ dash.findings(d, limit=2) }}
+  <div class="dev-foot">
+    <a class="more" href="/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
+    {% set expires = d.expires if d.expires is defined and d.expires else (row.expires if row else none) %}
+    {% set soon = d.expires_soon if d.expires_soon is defined else (expires_soon(row.expires) if row and row.expires and expires_soon is defined else False) %}
+    <p class="meta">
+      <span>{{ t[platform_label.get(d.platform, 'for_app')] }}</span>
+      {% if d.created %}<span>{{ t.added }} {{ dash.x("date", d.created) }}</span>{% endif %}
+      {% if expires %}<span{% if soon %} class="warn"{% endif %}>{% if soon %}{{ dash.icon("warn") }}{{ t.expires_badge }}: {% else %}{{ t.expires }} {% endif %}{{ dash.x("date", expires) }}</span>{% endif %}
+    </p>
+    <div class="actions">
+      {% if soon %}
+      <form method="post" action="{{ url_for('renew', device_id=d.id) }}" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button primary">{{ t.renew_action }}</button>
+      </form>
+      {% endif %}
+      <details class="danger">
+        <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
+        <form method="post" action="{{ url_for('revoke', device_id=d.id) }}" class="confirm">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <p><strong>{{ t.revoke_title }}: {{ d.name }}</strong><br>{{ t.revoke_note }}</p>
+          <button class="button danger">{{ t.revoke }}</button>
+        </form>
+      </details>
+    </div>
+  </div>
+</article>
+{% endmacro %}
 {% set first = options[0] %}
 {% set detected = {"apple": t.for_apple, "apple-mac": t.for_mac, "android": t.for_android, "android-app": t.for_android,
                    "windows": t.for_windows, "linux": t.for_linux}[first] %}
+{# The registry rows (expiry, renewal) by id, and the cards: the dashboard's devices, or the
+   registry's alone while the dashboard data is missing. #}
+{% set rows = {} %}
+{% for r in (devices if devices is defined else []) %}{% set _ = rows.update({r.id|string: r}) %}{% endfor %}
+{% set live_on = dashboard is defined and dashboard %}
+{% if live_on %}
+  {% set cards = dashboard.devices %}
+{% else %}
+  {% set cards = [] %}
+  {% for r in (devices if devices is defined else []) %}
+    {% set _ = cards.append({"id": r.id|string, "name": r.name, "platform": r.platform, "created": r.created,
+                             "last_seen": r.last_seen, "state": "unknown" if r.last_seen else "never_connected",
+                             "diagnostics": []}) %}
+  {% endfor %}
+{% endif %}
 {% block body %}
-<section class="card connect">
-  <h1>{{ t.add_device }}</h1>
+{% macro connect_card(heading) %}
+<section class="card connect" id="add" aria-labelledby="add-h">
+  <{{ heading }} id="add-h">{{ t.add_device }}</{{ heading }}>
   {% if options|length < 3 %}
   <p class="detected"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>{{ t.detected.format(device=detected) }}
     <span class="muted">{{ t.detected_help }}</span></p>
@@ -35,7 +95,7 @@
     {% elif opt == "android" %}{{ enrol_button("android", t.connect_android if primary else t.for_android, "phone", primary) }}
     {% elif opt == "android-app" %}{{ enrol_button("eap-config", t.connect_android_app if primary else t.for_android_app, "app", primary) }}
     {% elif opt in ("windows", "linux") %}
-      {% if primary %}<h2 class="h-sub">{{ t.connect_desktop }} ({{ t.for_windows if opt == "windows" else t.for_linux }})</h2>{% endif %}
+      {% if primary %}<h3 class="h-sub">{{ t.connect_desktop }} ({{ t.for_windows if opt == "windows" else t.for_linux }})</h3>{% endif %}
       {{ app_steps(primary) }}
     {% endif %}
   {% endfor %}
@@ -49,53 +109,32 @@
       {% if settings.passpoint %}{{ enrol_button("android", t.for_android, "phone") }}{% endif %}
       {{ enrol_button("eap-config", t.for_android_app, "app") }}
     </div>
-    <h2 class="h-sub">{{ t.for_windows }} / {{ t.for_linux }}</h2>
+    <h3 class="h-sub">{{ t.for_windows }} / {{ t.for_linux }}</h3>
     {{ app_steps() }}
   </details>
   {% endif %}
 </section>
+{% endmacro %}
 
-<section class="card">
-  <h2>{{ t.your_devices }} <span class="count">{{ devices|length }}</span></h2>
-  {% if not devices %}
-  <p class="empty">{{ t.no_devices }} <span class="muted">{{ t.no_devices_hint }}</span></p>
+{% if not cards %}{{ connect_card("h1") }}{% endif %}
+
+<section class="dev-section" aria-labelledby="devices-h">
+  <div class="section-head">
+    <{{ "h1" if cards else "h2" }} id="devices-h">{{ t.your_devices }} <span class="count" data-part="count">{{ cards|length }}</span></{{ "h1" if cards else "h2" }}>
+    {% if cards %}<a class="pill add-link" href="#add">{{ dash.icon("plus") }}{{ t.add_short }}</a>{% endif %}
+  </div>
+  {% if live_on %}{{ dash.live_line(dashboard) }}{{ dash.banners(dashboard) }}{% endif %}
+  {% if live_on %}{{ dash.house_strip(dashboard.house, hidden=dashboard.telemetry != "ok") }}{% endif %}
+  {% if not cards %}
+  <p class="card empty">{{ t.no_devices }} <span class="muted">{{ t.no_devices_hint }}</span></p>
   {% endif %}
-  <ul class="devices">
-  {% for d in devices %}
-    {% set soon = expires_soon(d.expires) %}
-    <li class="device{% if soon %} soon{% endif %}">
-      <svg class="icon device-icon" aria-hidden="true"><use href="#i-{{ 'laptop' if d.platform in ('apple-mac', 'letswifi') else 'phone' }}"/></svg>
-      <div class="device-body">
-        <form method="post" action="{{ url_for('rename', device_id=d.id) }}" class="rename">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input name="name" value="{{ d.name }}" maxlength="60" aria-label="{{ t.device_name }}">
-          <button class="pill">{{ t.save }}</button>
-        </form>
-        <p class="meta">
-          <span>{{ t[platform_label.get(d.platform, 'for_app')] }}</span>
-          <span>{{ t.added }} {{ d.created.strftime(t.date_format) }}</span>
-          <span>{% if d.last_seen %}{{ t.last_seen }} {{ d.last_seen.strftime(t.date_format) }}{% else %}{{ t.never }}{% endif %}</span>
-          {% if d.expires %}<span{% if soon %} class="warn"{% endif %}>{% if soon %}<svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg>{{ t.expires_badge }}: {% else %}{{ t.expires }} {% endif %}{{ d.expires.strftime(t.date_format) }}</span>{% endif %}
-        </p>
-        <div class="actions">
-          {% if soon %}
-          <form method="post" action="{{ url_for('renew', device_id=d.id) }}" class="inline">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button class="button primary">{{ t.renew_action }}</button>
-          </form>
-          {% endif %}
-          <details class="danger">
-            <summary><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>{{ t.revoke }}</summary>
-            <form method="post" action="{{ url_for('revoke', device_id=d.id) }}" class="confirm">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <p><strong>{{ t.revoke_title }}: {{ d.name }}</strong><br>{{ t.revoke_note }}</p>
-              <button class="button danger">{{ t.revoke }}</button>
-            </form>
-          </details>
-        </div>
-      </div>
-    </li>
-  {% endfor %}
-  </ul>
+  <div class="dev-grid" data-part="devices">
+  {% for d in cards %}{{ device_card(d, rows.get(d.id|string)) }}{% endfor %}
+  </div>
 </section>
+
+{% if cards %}{{ connect_card("h2") }}{% endif %}
+
+{% if live_on %}{{ dash.page_data({"page": "devices", "lang": lang, "api": "/api/devices", "login": url_for('login'),
+                                    "ssid": settings.ssid}, dashboard) }}{% endif %}
 {% endblock %}

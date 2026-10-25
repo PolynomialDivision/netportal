@@ -18,6 +18,10 @@ DISCONNECTS_1H = Gauge("netportal_disconnects_last_hour", "Disconnect-Requests o
                        "(portal and offboarding)", ["result"], registry=REGISTRY)
 DEVICES = Gauge("netportal_devices", "Devices by state", ["state"], registry=REGISTRY)
 CERTS = Gauge("netportal_certificates", "Devices by certificate state", ["state"], registry=REGISTRY)
+TELEMETRY_QUERIES = Counter("netportal_telemetry_queries_total", "Prometheus queries of the device dashboard "
+                            "(not the cached answers), by result", ["result"], registry=REGISTRY)
+for _result in ("ok", "error"):
+    TELEMETRY_QUERIES.labels(_result)         # both series from the start (rate() sees the first error)
 UP = Gauge("netportal_registry_up", "Registry reachable", registry=REGISTRY)
 
 

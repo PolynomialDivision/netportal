@@ -1,0 +1,223 @@
+{#- The dashboard's building blocks (devices.html, device.html, admin.html), imported with
+    context. static/render.js draws the same markup when the page refreshes itself: change both.
+    Formatting goes through the template global `fmt` (i18n.Format, i18n.template_globals());
+    without it a plain fallback keeps the page readable. -#}
+{%- set now = dashboard.generated_at if dashboard is defined and dashboard else none -%}
+
+{%- macro x(kind, v) -%}
+{%- if v is none or v == "" -%}–
+{%- elif fmt is defined and kind in ("ago", "when", "elapsed") -%}{{ fmt[kind](v, lang, now) }}
+{%- elif fmt is defined -%}{{ fmt[kind](v, lang) }}
+{%- elif kind == "bytes" -%}{{ v|filesizeformat }}
+{%- elif kind == "bitrate" -%}{{ "%.1f"|format(v / 1000000) }} Mbit/s
+{%- elif kind == "percent" -%}{{ "%.0f"|format(v * 100) }} %
+{%- elif kind in ("dbm", "db", "ms") -%}{{ v|round|int }} {{ {"dbm": "dBm", "db": "dB", "ms": "ms"}[kind] }}
+{%- elif kind == "duration" -%}{{ (v // 3600)|int }} h {{ ((v % 3600) // 60)|int }} min
+{%- elif kind in ("ago", "when", "date") -%}{{ (v|string)[:16]|replace("T", " ") }}
+{%- elif kind == "room" -%}{{ v.name }}
+{%- elif kind == "band" -%}{{ v }} GHz
+{%- elif kind == "elapsed" -%}
+{%- else -%}{{ v }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro icon(name, cls="") -%}<svg class="icon{% if cls %} {{ cls }}{% endif %}" aria-hidden="true"><use href="#i-{{ name }}"/></svg>{%- endmacro -%}
+
+{%- macro time(iso, kind="when") -%}<time datetime="{{ fmt.iso(iso) if fmt is defined else iso }}">{{ x(kind, iso) }}</time>{%- endmacro -%}
+
+{%- set state_icon = {"online": "wifi", "offline": "wifi-off", "never_connected": "never", "unknown": "help"} -%}
+{%- set tone_icon = {"ok": "check", "warn": "warn", "bad": "bad", "info": "info", "unknown": "help"} -%}
+
+{%- macro signal_level(dbm) -%}
+{%- if fmt is defined -%}{{ fmt.signal(dbm)|join("|") }}
+{%- elif dbm >= -60 -%}4|sig_excellent|ok{%- elif dbm >= -67 -%}3|sig_good|ok{%- elif dbm >= -75 -%}2|sig_fair|warn
+{%- elif dbm >= -82 -%}1|sig_weak|warn{%- else -%}0|sig_very_weak|bad{%- endif -%}
+{%- endmacro -%}
+
+{%- macro health_level(score) -%}
+{%- if fmt is defined -%}{{ fmt.health(score)|join("|") }}
+{%- elif score >= 80 -%}q_good|ok{%- elif score >= 50 -%}q_fair|warn{%- else -%}q_poor|bad{%- endif -%}
+{%- endmacro -%}
+
+{#- four bars, the first `bars` filled; the tone colours them, the word says it -#}
+{%- macro bars(n, tone) -%}
+<svg class="bars tone-{{ tone }}" viewBox="0 0 20 16" aria-hidden="true">
+  {%- for i in range(4) %}<rect x="{{ i * 5 + 0.5 }}" y="{{ 12 - i * 4 }}" width="3.5" height="{{ 4 + i * 4 }}" rx="1"{% if i < n %} class="on"{% endif %}/>{% endfor -%}
+</svg>
+{%- endmacro -%}
+
+{%- macro meter(score, tone) -%}
+<svg class="meter tone-{{ tone }}" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"><rect class="track" width="100" height="8" rx="4"/><rect class="fill" width="{{ [[score, 0]|max, 100]|min }}" height="8" rx="4"/></svg>
+{%- endmacro -%}
+
+{%- macro dir_pair(down, up, kind) -%}
+<span class="dir"><span aria-hidden="true">↓</span><span class="sr">{{ t.dir_down }}</span> {{ x(kind, down) }}</span>
+<span class="dir"><span aria-hidden="true">↑</span><span class="sr">{{ t.dir_up }}</span> {{ x(kind, up) }}</span>
+{%- endmacro -%}
+
+{#- the state line under the name: icon, word, and since when -#}
+{%- macro state_line(d) -%}
+{%- set state = d.state or "unknown" -%}
+<p class="dev-state state-{{ state }}" data-part="state">{{ icon(state_icon.get(state, "help")) }}<strong>{{ t["state_" ~ state] }}</strong>
+{%- if state == "online" and d.since %} <span class="state-more">{{ (t.since_line|e).format(time=time(d.since), duration=x("elapsed", d.since)) }}</span>
+{%- elif state == "never_connected" %} <span class="state-more">{{ (t.never_line|e).format(ssid=settings.ssid) }}</span>
+{%- elif d.last_seen %} <span class="state-more">{{ (t.seen_line|e).format(when=time(d.last_seen, "ago")) }}</span>
+{%- elif state == "unknown" and not d.diagnostics %} <span class="state-more">{{ t.unknown_line }}</span>
+{%- endif -%}
+</p>
+{%- endmacro -%}
+
+{#- what the Wi-Fi knows about the device now; a fact only when its value is known -#}
+{%- macro live(d) -%}
+<dl class="facts" data-part="live">
+  {%- if d.ap %}
+  <div class="fact wide"><dt>{{ t.f_room }}</dt><dd>{{ x("room", d.ap) }}{% if d.band or d.channel or d.proto %}<span class="sub">{{ x("wifi", d) if fmt is defined else d.band ~ " GHz" }}</span>{% endif %}</dd></div>
+  {%- endif %}
+  {%- if d.signal_dbm is not none and d.signal_dbm is defined %}
+  {%- set lvl = signal_level(d.signal_dbm).split("|") %}
+  <div class="fact"><dt>{{ t.f_signal }}</dt><dd class="with-mark">{{ bars(lvl[0]|int, lvl[2]) }}<span>{{ x("dbm", d.signal_dbm) }}<span class="sub tone-text-{{ lvl[2] }}">{{ t[lvl[1]] }}</span></span></dd></div>
+  {%- endif %}
+  {%- if d.health is not none and d.health is defined %}
+  {%- set q = health_level(d.health).split("|") %}
+  <div class="fact"><dt>{{ t.f_quality }}</dt><dd class="with-mark">{{ meter(d.health, q[1]) }}<span>{{ (t.quality_fmt|e).format(n=d.health|round|int) }}<span class="sub tone-text-{{ q[1] }}">{{ t[q[0]] }}</span></span></dd></div>
+  {%- endif %}
+  {%- if d.rx_bps is not none and d.rx_bps is defined or d.tx_bps is not none and d.tx_bps is defined %}
+  <div class="fact"><dt>{{ t.f_now }}</dt><dd class="pair">{{ dir_pair(d.rx_bps, d.tx_bps, "bitrate") }}</dd></div>
+  {%- endif %}
+  {%- if d.rx_24h_bytes is not none and d.rx_24h_bytes is defined or d.tx_24h_bytes is not none and d.tx_24h_bytes is defined %}
+  <div class="fact"><dt>{{ t.f_24h }}</dt><dd class="pair">{{ dir_pair(d.rx_24h_bytes, d.tx_24h_bytes, "bytes") }}</dd></div>
+  {%- endif %}
+  {%- if d.link_rx_bps is not none and d.link_rx_bps is defined or d.link_tx_bps is not none and d.link_tx_bps is defined %}
+  <div class="fact"><dt><abbr title="{{ t.f_link_hint }}">{{ t.f_link }}</abbr></dt><dd class="pair">{{ dir_pair(d.link_rx_bps, d.link_tx_bps, "bitrate") }}<span class="sub">{{ t.f_link_note }}</span></dd></div>
+  {%- endif %}
+</dl>
+{%- endmacro -%}
+
+{#- the data a finding rests on, from its params or else the device's own value -#}
+{%- set evidence_of = {"weak_signal": ("signal_dbm", "dbm"), "low_snr": ("snr_db", "db"), "high_retries": ("retry_ratio", "percent"),
+                       "busy_channel": ("channel_util", "percent"), "unstable_roaming": ("roams_1h", "per_hour"),
+                       "frequent_disconnects": ("reconnects_24h", "times_24h"), "slow_link": ("link_rx_bps", "bitrate"),
+                       "stale_data": ("age_s", "duration")} -%}
+{%- macro evidence(f, d) -%}
+{%- set e = evidence_of.get(f.code) -%}
+{%- if e -%}
+{%- set params = f.params or {} -%}
+{%- set v = params[e[0]] if e[0] in params else d.get(e[0]) -%}
+{%- if v is not none -%}
+<span class="evidence">{% if e[1] == "per_hour" %}{{ (t.per_hour|e).format(n=x("number", v)) }}{% elif e[1] == "times_24h" %}{{ (t.times_24h|e).format(n=v) }}{% else %}{{ x(e[1], v) }}{% endif %}</span>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- findings, the worst first: the title (with its evidence) and what to do; `full` adds the
+    explanation, `limit` shows only the first ones (the rest: a link to the device page) -#}
+{%- macro findings(d, full=False, limit=none, admin=False) -%}
+{%- set all = d.diagnostics or [] -%}
+{%- set list = all[:limit] if limit else all -%}
+<div class="diag" data-part="diag">
+{%- if list %}
+  <ul class="findings">
+  {%- for f in list %}
+    {%- set sev = f.severity if f.severity in ("info", "warn", "bad") else "info" %}
+    {%- set key = "diag_" ~ f.code %}
+    <li class="finding sev-{{ sev }}">{{ icon(tone_icon[sev]) }}
+      <div>
+        <p class="finding-title"><span class="sr">{{ t["sev_" ~ sev] }}: </span>{{ t.get(key, f.code) }} {{ evidence(f, d) }}</p>
+        {#- an admin's own texts (with {n} from the params), when the finding has them -#}
+        {%- set n = (f.params or {}).get("owners") %}
+        {%- set why = t[key ~ "_admin_why"].format(n=n) if admin and n is not none and t.get(key ~ "_admin_why") else t.get(key ~ "_why") %}
+        {%- set todo = t[key ~ "_admin_do"] if admin and t.get(key ~ "_admin_do") else t.get(key ~ "_do") %}
+        {%- if (full or admin) and why %}<p class="finding-why">{{ why }}</p>{% endif %}
+        {%- if todo %}<p class="finding-do"><strong>{{ t.diag_do_label }}</strong> {{ todo }}</p>{% endif %}
+      </div>
+    </li>
+  {%- endfor %}
+  </ul>
+  {%- if all|length > list|length %}
+  <p class="diag-more"><a href="/devices/{{ d.id }}">{{ (t.diag_more|e).format(n=all|length - list|length) }}</a></p>
+  {%- endif %}
+{%- elif d.state == "online" and (not dashboard is defined or dashboard.telemetry == "ok") %}
+  <p class="all-good">{{ icon("check") }}{{ t.all_good }}</p>
+{%- endif %}
+</div>
+{%- endmacro -%}
+
+{%- macro device_icon(d) -%}
+<span class="dev-icon state-{{ d.state or 'unknown' }}" aria-hidden="true"><svg class="icon"><use href="#i-{{ 'laptop' if d.platform in ('apple-mac', 'letswifi') else 'phone' }}"/></svg></span>
+{%- endmacro -%}
+
+{#- the name as a heading with a small edit button; the button opens the rename form (a plain
+    POST with the CSRF token, so it works without the script; the script saves it in place) -#}
+{%- macro name_block(d, tag="h2") -%}
+<div class="dev-name" data-name-box>
+  <{{ tag }} class="dev-name-text" data-name>{{ d.name }}</{{ tag }}>
+  <details class="rename-box">
+    <summary class="edit-button" title="{{ t.rename }}">{{ icon("edit") }}<span class="sr" data-name-label>{{ t.rename }}: {{ d.name }}</span></summary>
+    <form method="post" action="/devices/{{ d.id }}/rename" class="rename" data-rename>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input id="name-{{ d.id }}" name="name" value="{{ d.name }}" maxlength="60" aria-label="{{ t.device_name }}" autocomplete="off" required>
+      <button class="button small primary">{{ t.save }}</button>
+      <button type="button" class="button small needs-js" data-cancel>{{ t.cancel }}</button>
+    </form>
+  </details>
+  <span class="rename-status" role="status" data-rename-status></span>
+</div>
+{%- endmacro -%}
+
+{#- the house's internet, DNS, router and the line's last speed test (hidden while the Wi-Fi
+    data is off or unavailable: four "unknown" tiles say nothing the banner does not) -#}
+{%- macro house_strip(house, hidden=False) -%}
+{%- set h = house or {} -%}
+{%- set tone = {"ok": "ok", "degraded": "warn", "down": "bad"} -%}
+<section class="card house" aria-labelledby="house-h" data-part="house"{% if hidden %} hidden{% endif %}>
+  <h2 id="house-h">{{ t.house_title }}</h2>
+  <ul class="house-grid">
+    {%- set s = h.internet or "unknown" %}
+    <li class="hs tone-{{ tone.get(s, 'unknown') }}">{{ icon("globe", "hs-icon") }}<span class="hs-label">{{ t.house_internet }}</span>
+      <strong class="hs-value">{{ icon(tone_icon[tone.get(s, 'unknown')]) }}{{ t["st_" ~ s] }}</strong>
+      {%- if h.internet_rtt_ms is not none and h.internet_rtt_ms is defined %}<span class="hs-sub">{{ (t.house_ping|e).format(ms=x("ms", h.internet_rtt_ms)) }}{% if h.internet_loss_ratio %} · {{ (t.house_loss|e).format(pct=x("percent", h.internet_loss_ratio)) }}{% endif %}</span>{% endif %}</li>
+    {%- set s = h.dns or "unknown" %}
+    <li class="hs tone-{{ tone.get(s, 'unknown') }}">{{ icon("signpost", "hs-icon") }}<span class="hs-label">{{ t.house_dns }}</span>
+      <strong class="hs-value">{{ icon(tone_icon[tone.get(s, 'unknown')]) }}{{ t["st_" ~ s] }}</strong></li>
+    {%- set s = h.router or "unknown" %}
+    <li class="hs tone-{{ tone.get(s, 'unknown') }}">{{ icon("router", "hs-icon") }}<span class="hs-label">{{ t.house_router }}</span>
+      <strong class="hs-value">{{ icon(tone_icon[tone.get(s, 'unknown')]) }}{{ t["st_" ~ s] }}</strong></li>
+    <li class="hs speed">{{ icon("speed", "hs-icon") }}<span class="hs-label">{{ t.house_speed }}</span>
+      {%- if h.speedtest %}
+      <strong class="hs-value">{{ (t.house_speed_value|e).format(down=x("bitrate", h.speedtest.download_bps), up=x("bitrate", h.speedtest.upload_bps)) }}</strong>
+      <span class="hs-sub">{{ (t.house_speed_at|e).format(when=time(h.speedtest.at)) }}{% if h.speedtest.ping_ms is not none %} · {{ (t.house_ping|e).format(ms=x("ms", h.speedtest.ping_ms)) }}{% endif %}</span>
+      {%- else %}
+      <strong class="hs-value">{{ t.house_speed_none }}</strong>
+      {%- endif %}</li>
+  </ul>
+  <p class="hs-note">{{ t.house_speed_note }}</p>
+</section>
+{%- endmacro -%}
+
+{#- what is wrong with the data itself: telemetry off or unavailable, stale -#}
+{%- macro banners(dash) -%}
+<div class="banners" data-part="banners">
+{%- if dash %}
+  {%- if dash.telemetry == "off" %}<p class="banner tone-info">{{ icon("info") }}<span>{{ t.telemetry_off }}</span></p>
+  {%- elif dash.telemetry == "unavailable" %}<p class="banner tone-warn">{{ icon("warn") }}<span>{{ t.telemetry_unavailable }}</span></p>
+  {%- endif %}
+  {%- if dash.stale %}<p class="banner tone-warn">{{ icon("warn") }}<span>{{ (t.live_stale|e).format(when=time(dash.generated_at)) }}</span></p>{% endif %}
+  {%- if dash.house and dash.house.wifi_data_age_s and dash.house.wifi_data_age_s > 300 %}<p class="banner tone-warn">{{ icon("warn") }}<span>{{ (t.house_wifi_age|e).format(age=x("duration", dash.house.wifi_data_age_s)) }}</span></p>{% endif %}
+{%- endif %}
+</div>
+{%- endmacro -%}
+
+{#- "as of 14:05": the script replaces it with its own updates -#}
+{%- macro live_line(dash) -%}
+<p class="live-line" data-part="live-line">{{ icon("refresh") }}<span data-live-text>{% if dash and dash.generated_at %}{{ (t.live_needs_js|e).format(when=time(dash.generated_at)) }}{% endif %}</span></p>
+<p class="sr" aria-live="polite" data-announce></p>
+{%- endmacro -%}
+
+{#- the texts and the first data for the scripts: JSON, never executed (CSP-safe) -#}
+{%- macro page_data(config, data=none) -%}
+<script type="application/json" id="np-texts">{{ t|tojson }}</script>
+<script type="application/json" id="np-config">{{ config|tojson }}</script>
+{%- if data is not none %}
+<script type="application/json" id="np-data">{{ data|tojson }}</script>
+{%- endif %}
+{%- endmacro -%}

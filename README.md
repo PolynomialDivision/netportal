@@ -14,6 +14,8 @@ decides every Wi-Fi login from the registry.
 | `netportal/pki.py`, `enroll.py`, `profiles.py` | certificates and the per-platform artefacts (Apple profile, Android Passpoint, eap-config) |
 | `netportal/disconnect.py` | RFC 5176 Disconnect-Request (immediate revocation) |
 | `netportal/offboarding.py` | reconciliation with Authentik's users API (devices, app grants, portal sessions) |
+| `netportal/telemetry.py` | the "My devices" data: Prometheus (unpoller, the house rules, blackbox, speed test), read on the server only, batched and cached; live status, history, connection timeline, house status |
+| `netportal/diagnostics.py` | the findings shown per device (weak signal, retries, roaming …), each from measured data with its threshold |
 | `netportal/__main__.py` | `init-db`, `offboard [--every N]`, `pki` (the ceremony) |
 | `radius/` | FreeRADIUS 3.2 configuration and image (EAP-TLS only, registry lookup, status server) |
 | `Dockerfile` | the portal image (also the offboarding sidecar) |

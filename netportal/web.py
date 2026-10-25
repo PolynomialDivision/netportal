@@ -1,8 +1,11 @@
 """The portal: Authentik login, the resident's devices, enrolment per platform, renewal,
-revocation (with an immediate Disconnect-Request), an admin view, and the Let's Wi-Fi API
-for the geteduroam apps (Windows, Linux, Android fallback).
+revocation (with an immediate Disconnect-Request), an admin view, the "My devices" dashboard
+(Wi-Fi state from Prometheus, netportal/telemetry.py) and the Let's Wi-Fi API for the geteduroam
+apps (Windows, Linux, Android fallback).
 
-No JavaScript; every change is a POST with a CSRF token; strict CSP.
+Every page works without JavaScript; the dashboard pages (/, /devices/<id>, /admin) add static
+scripts from 'self' that read the JSON API (/api/...) of the same login. Every change is a POST
+with a CSRF token; strict CSP.
 """
 
 import base64
@@ -17,7 +20,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.flask_client import OAuth
 from flask import Flask, abort, g, jsonify, redirect, render_template, request, session, url_for
 
-from . import config, disconnect, enroll, i18n, metrics, registry
+from . import config, disconnect, enroll, i18n, metrics, registry, telemetry
 
 log = logging.getLogger("netportal")
 
@@ -32,6 +35,10 @@ ACCESS_SECONDS, CODE_SECONDS, REFRESH_SECONDS = 3600, 300, 400 * 86400
 # latest, however busy (the login is automatic through the house account).
 SESSION_IDLE_SECONDS, SESSION_MAX_SECONDS = 8 * 3600, 12 * 3600
 FORMATS = ("apple", "apple-mac", "android", "eap-config")
+# The dashboard's history ranges (telemetry.RANGES).
+HISTORY_RANGES = tuple(telemetry.RANGES)
+# The device states the admin list filters by.
+DEVICE_STATES = ("online", "offline", "never_connected", "unknown")
 # The app's authorization request, as the consent form sends it back (templates/consent.html).
 CONSENT_ARGS = ("client_id", "redirect_uri", "response_type", "code_challenge", "code_challenge_method", "state",
                 "scope")
@@ -109,7 +116,12 @@ def create_app(settings=None):
         server_metadata_url=settings.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration",
         client_kwargs={"scope": "openid profile email", "code_challenge_method": "S256"},
     )
-    app.extensions["netportal"] = {"settings": settings, "issuer": issuer}
+    # One Prometheus client (one HTTP session, one cache) for the process; None: telemetry off.
+    prometheus = (telemetry.Prometheus(settings.prometheus_url, settings.prometheus_timeout, ssid=settings.ssid)
+                  if settings.prometheus_url else None)
+    app.extensions["netportal"] = {"settings": settings, "issuer": issuer, "telemetry": prometheus}
+    # the dashboard templates' language-aware formatting and the finding codes (i18n)
+    app.jinja_env.globals.update(i18n.template_globals())
 
     # --- request plumbing -------------------------------------------------------------------
 
@@ -126,6 +138,11 @@ def create_app(settings=None):
             end_login()                    # the CSRF token stays: a form sent now goes to the login
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(24)
+        if request.method == "POST" and not g.user and wants_json() and request.endpoint not in (
+                "oauth_token", "letswifi_eap_config"):
+            # a dashboard script's POST after the session ended: "log in again", not a CSRF error
+            # (nothing is changed either way)
+            abort(json_error("login_required", 401))
         if request.method == "POST" and request.endpoint not in ("oauth_token", "letswifi_eap_config"):
             sent = request.form.get("csrf", "")
             if not hmac.compare_digest(sent, session.get("csrf", "")):
@@ -142,9 +159,12 @@ def create_app(settings=None):
     @app.after_request
     def _headers(resp):
         form_action = getattr(g, "form_action", "'self'")
+        # the dashboard pages run the portal's own static scripts, which read its JSON API;
+        # every other page runs no script at all
+        scripts = "script-src 'self'; connect-src 'self'; " if getattr(g, "dashboard_page", False) else ""
         resp.headers.setdefault("Content-Security-Policy",
-                                "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; "
-                                "frame-ancestors 'none'; form-action %s" % form_action)
+                                "default-src 'none'; %sstyle-src 'self'; img-src 'self'; base-uri 'none'; "
+                                "frame-ancestors 'none'; form-action %s" % (scripts, form_action))
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
         resp.headers.setdefault("Cache-Control", "no-store")
@@ -197,6 +217,62 @@ def create_app(settings=None):
 
     def actor():
         return g.user["sub"] if g.user else "system"
+
+    def wants_json():
+        """The dashboard's API, or a dashboard script's form POST (Accept: application/json):
+        errors and expired sessions answer JSON, never a page or a redirect to the login."""
+        if request.path.startswith("/api/") and request.endpoint != "letswifi_eap_config":
+            return True
+        return request.method == "POST" and request.accept_mimetypes.best == "application/json"
+
+    def api_user(admin=False):
+        """need_user for JSON: 401 when the session has ended (the script reloads the page,
+        which goes through the login), 403 for a non-admin."""
+        if not load_user():
+            abort(json_error("login_required", 401))
+        if admin and not g.user["admin"]:
+            abort(json_error("forbidden", 403))
+        return g.user
+
+    def own_device(device_id, user):
+        """The device if this person may see it (theirs; any for an admin), else 404. Revoked
+        devices are not on the dashboard."""
+        dev = registry.device(g.db, device_id, owner=None if user["admin"] else user["sub"])
+        if not dev or dev["revoked"]:
+            abort(json_error("not_found", 404) if wants_json() else 404)
+        return dev
+
+    def mac_claims(rows):
+        """Who else's active devices claim the MACs of these devices (only asked with telemetry on:
+        without it nothing of a MAC's data is shown)."""
+        if app.extensions["netportal"]["telemetry"] is None:
+            return {}
+        return registry.mac_claims(g.db, [telemetry.normalise_mac(r.get("calling_station")) for r in rows])
+
+    def dashboard(rows, owners=None):
+        """The /api/devices payload (telemetry.dashboard) with the certificate's renewal hint. A
+        MAC that other people's devices claim too is withheld from residents (a device sends its
+        own MAC: it could send someone else's); admins see the data and the conflict."""
+        payload = telemetry.dashboard(app.extensions["netportal"]["telemetry"], rows, owners=owners,
+                                      claims=mac_claims(rows), admin=bool(g.user and g.user.get("admin")))
+        for device, row in zip(payload["devices"], rows):
+            device["expires_soon"] = enroll.expires_soon(row.get("expires"))
+        return payload
+
+    def admin_dashboard(q="", state=""):
+        """Every active device with its owner, filtered by a search (name, owner, MAC) and a state."""
+        people = registry.people(g.db)
+        payload = dashboard(registry.devices(g.db, include_revoked=False), owners=people)
+        q = q.strip().lower()
+        if q:
+            mac_q = q.replace("-", ":")
+            payload["devices"] = [d for d in payload["devices"] if q in d["name"].lower()
+                                  or q in (d["owner"]["username"] or "").lower()
+                                  or q in (d["owner"]["display"] or "").lower()
+                                  or (d["mac"] and mac_q in d["mac"])]
+        if state in DEVICE_STATES:
+            payload["devices"] = [d for d in payload["devices"] if d["state"] == state]
+        return payload
 
     # --- login --------------------------------------------------------------------------------
 
@@ -253,9 +329,35 @@ def create_app(settings=None):
             # the landing page stays at /welcome for the texts
             return redirect(url_for("login"))
         devices = registry.devices(g.db, owner=g.user["sub"])
-        return render_template("devices.html", devices=devices,
+        g.dashboard_page = True
+        return render_template("devices.html", devices=devices, dashboard=dashboard(devices),
                                options=enrol_options(request.user_agent.string, settings.passpoint),
                                expires_soon=enroll.expires_soon)
+
+    def device_payload(dev, user):
+        """telemetry.dashboard for one device (with its owner for an admin)."""
+        return dashboard([dev], owners=registry.people(g.db) if user["admin"] else None)
+
+    def device_history(dev, range_key):
+        """The /history payload; an unknown range is 24h here (the page's links send only known ones)."""
+        range_key = range_key if range_key in HISTORY_RANGES else "24h"
+        mac = telemetry.normalise_mac(dev.get("calling_station"))
+        conflict = telemetry.other_owners(mac_claims([dev]), mac, dev.get("owner"))
+        withheld = "mac_conflict" if conflict and not g.user["admin"] else None
+        return telemetry.history(app.extensions["netportal"]["telemetry"], mac, range_key,
+                                 since=telemetry.data_bound(dev), withheld=withheld)
+
+    @app.get("/devices/<uuid:device_id>")
+    def device_page(device_id):
+        """One device: its state, diagnostics, the connection list (also without the script) and,
+        with the script, the charts."""
+        user = need_user()
+        dev = own_device(device_id, user)
+        payload = device_payload(dev, user)
+        g.dashboard_page = True
+        return render_template("device.html", dashboard=payload, device=payload["devices"][0], row=dev,
+                               history=device_history(dev, request.args.get("range", "24h")),
+                               ranges=HISTORY_RANGES, expires_soon=enroll.expires_soon)
 
     @app.post("/enroll")
     def enroll_device():
@@ -303,13 +405,15 @@ def create_app(settings=None):
 
     @app.post("/devices/<uuid:device_id>/rename")
     def rename(device_id):
-        user = need_user()
-        dev = registry.device(g.db, device_id, owner=None if user["admin"] else user["sub"])
-        if not dev:
-            abort(404)
+        as_json = wants_json()
+        user = api_user() if as_json else need_user()
+        dev = own_device(device_id, user)
         name = (request.form.get("name") or "").strip()[:60]
         if name:
             registry.rename(g.db, device_id, name)
+        if as_json:
+            # the inline rename: the name as stored, or the old one for an empty name
+            return jsonify({"ok": bool(name), "name": name or dev["name"]}), (200 if name else 400)
         return redirect(url_for("index"))
 
     @app.post("/devices/<uuid:device_id>/revoke")
@@ -324,8 +428,45 @@ def create_app(settings=None):
     @app.get("/admin")
     def admin():
         need_user(admin=True)
+        g.dashboard_page = True
         return render_template("admin.html", devices=registry.devices(g.db, include_revoked=False),
-                               people=registry.people(g.db), expires_soon=enroll.expires_soon)
+                               people=registry.people(g.db), expires_soon=enroll.expires_soon,
+                               dashboard=admin_dashboard(), states=DEVICE_STATES)
+
+    # --- the dashboard's JSON API (same login as the pages) ------------------------------------
+
+    @app.get("/api/devices")
+    def api_devices():
+        user = api_user()
+        return jsonify(dashboard(registry.devices(g.db, owner=user["sub"])))
+
+    @app.get("/api/devices/<uuid:device_id>")
+    def api_device(device_id):
+        """One device as /api/devices shows it (the detail page's refresh, also an admin's view
+        of someone else's device)."""
+        user = api_user()
+        payload = device_payload(own_device(device_id, user), user)
+        payload["device"] = payload.pop("devices")[0]
+        return jsonify(payload)
+
+    @app.get("/api/devices/<uuid:device_id>/history")
+    def api_history(device_id):
+        user = api_user()
+        dev = own_device(device_id, user)
+        range_key = request.args.get("range", "24h")
+        if range_key not in HISTORY_RANGES:
+            return json_error("bad_range", 400)
+        return jsonify(device_history(dev, range_key))
+
+    @app.get("/api/house")
+    def api_house():
+        api_user()
+        return jsonify(telemetry.house(app.extensions["netportal"]["telemetry"]))
+
+    @app.get("/api/admin/devices")
+    def api_admin_devices():
+        api_user(admin=True)
+        return jsonify(admin_dashboard(request.args.get("q", ""), request.args.get("state", "")))
 
     # --- Let's Wi-Fi API (geteduroam apps) ----------------------------------------------------
 
@@ -434,10 +575,20 @@ def create_app(settings=None):
                 db.close()
         return app.response_class(body, mimetype="text/plain; version=0.0.4")
 
+    @app.errorhandler(405)
+    @app.errorhandler(500)
+    def _api_error(e):
+        """The API answers JSON for these too; pages keep Flask's own answer."""
+        if wants_json():
+            return json_error({405: "method_not_allowed", 500: "internal_error"}[e.code], e.code)
+        return e
+
     @app.errorhandler(400)
     @app.errorhandler(403)
     @app.errorhandler(404)
     def _error(e):
+        if wants_json():
+            return json_error({400: "bad_request", 403: "forbidden", 404: "not_found"}[e.code], e.code)
         return render_template("message.html", message=g.t["error"] if hasattr(g, "t") else "error"), e.code
 
     def default_name(fmt):
@@ -498,6 +649,12 @@ def _origin(uri):
 def _with_query(uri, **params):
     sep = "&" if "?" in uri else "?"
     return uri + sep + urllib.parse.urlencode({k: v for k, v in params.items() if v})
+
+
+def json_error(code, status):
+    resp = jsonify({"error": code})
+    resp.status_code = status
+    return resp
 
 
 def _oauth_error(code, status=400):

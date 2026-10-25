@@ -108,9 +108,13 @@ DEVICE_LIST = """
            (SELECT max(c.not_after) FROM credential c WHERE c.device_id = d.id
               AND (c.retired_after IS NULL OR c.retired_after > now())) AS expires,
            (SELECT count(*) FROM credential c WHERE c.device_id = d.id) AS certificates,
-           s.updated AS last_seen
+           s.updated AS last_seen, s.calling_station, s.first_seen
     FROM device d LEFT JOIN radius_session s ON s.device_id = d.id
 """
+# last_seen: the device's latest RADIUS login; calling_station: its MAC as the AP sent it (the
+# dashboard's key to the Wi-Fi telemetry, telemetry.normalise_mac); first_seen: its first login
+# with that MAC (the telemetry before it is not this device's). One row per device: the table
+# keeps only the latest session.
 
 
 def devices(db, owner=None, include_revoked=False):
@@ -128,6 +132,24 @@ def device(db, device_id, owner=None):
     sql = DEVICE_LIST + " WHERE d.id = %s" + (" AND d.owner = %s" if owner is not None else "")
     args = [device_id] + ([owner] if owner is not None else [])
     return db.execute(sql, args).fetchone()
+
+
+def mac_claims(db, macs):
+    """{mac: {owner sub}}: whose active devices last logged in with one of these MACs
+    (normalised aa:bb:cc:dd:ee:ff). The MAC is what the device sends: a device can claim another's.
+    Compared by hex digits, whatever separators the AP used."""
+    wanted = sorted({m.replace(":", "") for m in macs if m})
+    if not wanted:
+        return {}
+    claims = {}
+    for r in db.execute("""SELECT regexp_replace(lower(s.calling_station), '[^0-9a-f]', '', 'g') AS hex, d.owner
+                           FROM radius_session s JOIN device d ON d.id = s.device_id
+                           WHERE d.revoked IS NULL
+                             AND regexp_replace(lower(s.calling_station), '[^0-9a-f]', '', 'g') = ANY(%s)""",
+                        (wanted,)):
+        mac = ":".join(r["hex"][i:i + 2] for i in range(0, 12, 2))
+        claims.setdefault(mac, set()).add(r["owner"])
+    return claims
 
 
 def rename(db, device_id, name):

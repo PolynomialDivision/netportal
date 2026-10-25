@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT))
 from test_profiles import aosp_parse  # noqa: E402
-from netportal import disconnect, pki  # noqa: E402
+from netportal import disconnect, pki, registry  # noqa: E402
 
 PORTAL, IDP = "http://127.0.0.1:18080", "http://127.0.0.1:19000"
 DB = "postgresql://netportal:it-db-password@127.0.0.1:15432/netportal"
@@ -102,12 +102,14 @@ def write_client(name, key, cert, chain):
         f.chmod(0o644)
 
 
-def connect(name):
-    """eapol_test as the access point: (verdict, vlan)."""
+def connect(name, mac=None):
+    """eapol_test as the access point: (verdict, vlan). mac: the device's MAC (Calling-Station-Id;
+    eapol_test's default 02:00:00:00:00:01)."""
     out = subprocess.run(["docker", "run", "--rm", "--network", "netportal-it", "--ip", "10.199.0.20",
                           "-v", "%s:/client:ro" % (RUN / "client"), "-v", "%s:/pki:ro" % (RUN / "pki"),
                           "netportal-it-client", "eapol_test", "-c", "/client/%s.conf" % name,
-                          "-a", "10.199.0.10", "-s", "it-radius-secret", "-r0", "-t", "10"],
+                          "-a", "10.199.0.10", "-s", "it-radius-secret", "-r0", "-t", "10"]
+                         + (["-M" + mac] if mac else []),
                          capture_output=True, text=True).stdout
     global LAST_REPLY
     LAST_REPLY = out
@@ -185,6 +187,25 @@ def main():
     rows = sql("SELECT nas_ip, calling_station, user_name FROM radius_session WHERE device_id = %s", android_id)
     check("RADIUS records the latest session (for Disconnect)", len(rows) == 1 and rows[0][2] == "anonymous@scharni.org",
           rows)
+
+    # --- first_seen: the dashboard's data starts at the first login with the MAC ----------
+    session_of = lambda: sql("SELECT calling_station, first_seen, updated FROM radius_session "  # noqa: E731
+                             "WHERE device_id = %s", android_id)[0]
+    before = session_of()
+    check("a new session has first_seen", before[1] is not None and before[1] <= before[2], before)
+    time.sleep(1.1)
+    connect("alice-android")
+    same = session_of()
+    check("a login with the same MAC keeps first_seen and moves updated", same[1] == before[1] and same[2] > before[2],
+          (before, same))
+    time.sleep(1.1)
+    connect("alice-android", mac="02:00:00:00:00:99")
+    moved = session_of()
+    check("a login with another MAC starts first_seen again",
+          moved[0].lower().replace("-", ":") == "02:00:00:00:00:99" and moved[1] > same[1], (same, moved))
+    with registry.connect(DB) as db:
+        claims = registry.mac_claims(db, ["02:00:00:00:00:99", "02:00:00:00:00:98"])
+    check("the registry tells whose devices claim a MAC", claims == {"02:00:00:00:00:99": {"sub-alice"}}, claims)
 
     # --- ownership ------------------------------------------------------------------------
     c, _ = login(CAROL)
@@ -343,7 +364,7 @@ def main():
     verdict = connect("carol-tablet")
     check("... and a device she enrols now too", verdict == ("accept", "50"), verdict)
     page = a.get(PORTAL + "/admin")
-    check("the admin view shows each device's policy", "· guests ·" in page.text and "· residents ·" in page.text)
+    check("the admin view shows each device's policy", ">guests<" in page.text and ">residents<" in page.text)
     # Admin rights are checked against the registry on every request (2026-10-22): removed from
     # it-admins, the open session loses the admin view at the next offboarding round.
     users(("sub-admin", "admin", ["residents"], True), ("sub-carol", "carol", ["former-residents"], True), ALICE, FIA)

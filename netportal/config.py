@@ -83,6 +83,10 @@ class Settings:
     passpoint: bool = False       # offer the Passpoint download on Android (UniFi Hotspot 2.0 on)
     logout_url: str = ""         # where "log out" goes (the house's logout page); "" = the portal's own page
     home_url: str = ""            # the house's start page (the house bar's link home); "" = https://<realm>/
+    # the house's Prometheus (the dashboard's Wi-Fi data; internal network only, never shown to
+    # browsers); "" = the dashboard shows the registry's data only (telemetry "off")
+    prometheus_url: str = ""
+    prometheus_timeout: float = 4.0   # seconds per query
 
     @property
     def home(self):
@@ -146,4 +150,14 @@ def load():
         passpoint=os.environ.get("NETPORTAL_PASSPOINT", "false").lower() == "true",
         logout_url=os.environ.get("NETPORTAL_LOGOUT_URL", ""),
         home_url=os.environ.get("NETPORTAL_HOME_URL", ""),
+        prometheus_url=_prometheus_url(os.environ.get("NETPORTAL_PROMETHEUS_URL", "")),
+        prometheus_timeout=float(_env("NETPORTAL_PROMETHEUS_TIMEOUT", "4")),
     )
+
+
+def _prometheus_url(url):
+    """NETPORTAL_PROMETHEUS_URL: http(s)://host:port, or empty (no telemetry)."""
+    url = url.strip().rstrip("/")
+    if url and not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", url):
+        raise RuntimeError("NETPORTAL_PROMETHEUS_URL: %r is not an http(s) URL" % url)
+    return url

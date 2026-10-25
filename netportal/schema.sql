@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS radius_session (
     user_name        text NOT NULL,
     updated          timestamptz NOT NULL DEFAULT now()
 );
+-- The first login of the device with this MAC (FreeRADIUS sets it on insert and whenever the MAC
+-- changes): the dashboard shows no Wi-Fi data from before it (not this device's). Sessions from
+-- before the column start at their latest login.
+ALTER TABLE radius_session ADD COLUMN IF NOT EXISTS first_seen timestamptz;
+UPDATE radius_session SET first_seen = updated WHERE first_seen IS NULL;
+ALTER TABLE radius_session ALTER COLUMN first_seen SET DEFAULT now();
+ALTER TABLE radius_session ALTER COLUMN first_seen SET NOT NULL;
 
 -- One-time downloads: a device's profile is generated (key and certificate made) only when the
 -- link is opened, once, within minutes. No key is ever stored.
