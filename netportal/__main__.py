@@ -2,6 +2,10 @@
 
   init-db                       create/upgrade the schema (also done by the web app at start)
   offboard [--every SECONDS]    reconcile with Authentik once, or forever (the sidecar)
+  collect [--once] [--jobs a,b] the collector (container netportal-collect): Loki/Prometheus ->
+                                connection events, incidents, daily rollups, retention; forever,
+                                or every selected job once
+  job NAME                      one collector job once (unifi_events, incidents, rollup, prune)
   pki --out DIR [--name NAME] --server-name FQDN
                                 the PKI ceremony: root (offline), device CA, RADIUS server
                                 certificate as PEM files; run on an admin's machine, not the server
@@ -45,6 +49,24 @@ def cmd_offboard(args):
         time.sleep(args.every)
 
 
+def cmd_collect(args):
+    """The collector's scheduler (netportal.collect); its settings need no web secrets."""
+    from .collect import jobs, scheduler, settings as collect_settings
+    settings = collect_settings.load()
+    selected = jobs.select(args.jobs)
+    sched = scheduler.Scheduler(settings, selected)
+    scheduler.install_signal_handlers(sched.stop)
+    return sched.run_once() if args.once else sched.run_forever()
+
+
+def cmd_job(args):
+    from .collect import jobs, scheduler, settings as collect_settings
+    settings = collect_settings.load()
+    sched = scheduler.Scheduler(settings, jobs.select(args.name))
+    scheduler.install_signal_handlers(sched.stop)
+    return sched.run_once()
+
+
 def cmd_pki(args):
     from . import pki
     out = Path(args.out)
@@ -78,6 +100,13 @@ def main(argv=None):
     p = sub.add_parser("offboard")
     p.add_argument("--every", type=int, default=0)
     p.set_defaults(func=cmd_offboard)
+    p = sub.add_parser("collect")
+    p.add_argument("--once", action="store_true", help="run every selected job once, then exit")
+    p.add_argument("--jobs", default="", help="comma-separated job names (default: all)")
+    p.set_defaults(func=cmd_collect)
+    p = sub.add_parser("job")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_job)
     p = sub.add_parser("pki")
     p.add_argument("--out", required=True)
     p.add_argument("--name", default="Scharni")

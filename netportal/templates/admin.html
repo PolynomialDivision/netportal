@@ -1,10 +1,15 @@
 {% extends "base.html" %}
 {% import "_dash.html" as dash with context %}
+{% import "_admin.html" as adm with context %}
 {% block scripts %}<script type="module" src="{{ url_for('static', filename='dashboard.js') }}"></script>{% endblock %}
 {% block body_attrs %} class="wide" data-page="admin"{% endblock %}
-{# Every device in the house: search, filters and sorting as a plain GET form (q, state,
-   problem, sort), which static/dashboard.js applies at once while typing. The server renders
-   every row and hides the ones that do not match, so the script can show them again. #}
+{# The admin overview: open and recent incidents, the access points at a glance, rejected logins
+   of the last 24 hours, how fresh each data source is and how the collector's jobs run
+   (`overview`, the /api/admin/overview payload; without it only the device list), then every
+   device in the house: search, filters and sorting as a plain GET form (q, state, problem,
+   sort), which static/dashboard.js applies at once while typing. The server renders every row
+   and hides the ones that do not match, so the script can show them again. #}
+{% set ov = overview if overview is defined and overview else none %}
 {% set rows = {} %}
 {% for r in (devices if devices is defined else []) %}{% set _ = rows.update({r.id|string: r}) %}{% endfor %}
 {% set live_on = dashboard is defined and dashboard %}
@@ -83,7 +88,7 @@
         {% if d.mac %}<span class="mono">{{ d.mac }}</span>{% endif %}
       </p>
       <div class="actions">
-        <a class="more" href="/devices/{{ d.id }}?from=admin">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
+        <a class="more" href="/admin/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
         <details class="danger">
           <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
           <form method="post" action="{{ url_for('revoke', device_id=d.id) }}" class="confirm">
@@ -99,13 +104,68 @@
 </li>
 {% endmacro %}
 
+{% macro overview_incidents(ov) %}
+{% set inc = ov.incidents if ov.incidents is defined and ov.incidents else {} %}
+{% if inc is mapping %}{% set open, recent = inc.open or [], inc.recent or [] %}
+{% else %}{% set open, recent = inc|rejectattr("ended")|list, inc|selectattr("ended")|list %}{% endif %}
+{% set open = open|sort(attribute="started", reverse=True) %}
+<section class="card ov-inc" aria-labelledby="ov-inc-h" data-part="ov-incidents">
+  <h2 id="ov-inc-h">{{ dash.icon("bolt") }}{{ t.ov_incidents }}{% if open %} <span class="count tone-bad">{{ open|length }}</span>{% endif %}</h2>
+  {% if inc is mapping and inc.available is defined and not inc.available %}
+  <p class="muted">{{ dash.icon("warn") }} {{ t.ov_unavailable }}</p>
+  {% elif open %}
+  <h3 class="ov-sub">{{ t.ov_open }}</h3>
+  <ul class="inc-list">{% for i in open %}{{ adm.incident_item(i) }}{% endfor %}</ul>
+  {% else %}
+  <p class="all-good">{{ dash.icon("check") }}{{ t.inc_open_none }}</p>
+  {% endif %}
+  {% if recent %}
+  <h3 class="ov-sub">{{ t.ov_recent }}</h3>
+  <ul class="inc-list">{% for i in recent[:5] %}{{ adm.incident_item(i) }}{% endfor %}</ul>
+  {% endif %}
+  <a class="more" href="/admin/incidents">{{ dash.icon("bolt") }}<span>{{ t.ov_all_incidents }}</span>{{ dash.icon("next") }}</a>
+</section>
+{% endmacro %}
+{% macro overview_aps(ov) %}
+{% set aps = ov.aps if ov.aps is defined and ov.aps else [] %}
+<section class="card ov-aps" aria-labelledby="ov-aps-h" data-part="ov-aps">
+  <h2 id="ov-aps-h">{{ dash.icon("ap") }}{{ t.ov_aps }} {% if aps %}<span class="count">{{ aps|length }}</span>{% endif %}</h2>
+  {% if aps %}
+  <ul class="ap-grid">{% for a in aps %}{{ adm.ap_tile(a) }}{% endfor %}</ul>
+  {% else %}<p class="muted">{{ t.aps_empty }}</p>{% endif %}
+  <a class="more" href="/admin/aps">{{ dash.icon("chart") }}<span>{{ t.ov_all_aps }}</span>{{ dash.icon("next") }}</a>
+</section>
+{% endmacro %}
+
 {% block body %}
-<section class="adm" aria-labelledby="admin-h">
+{{ adm.tabs("overview") }}
+<section class="adm-overview" aria-labelledby="ov-h" data-overview>
   <div class="section-head">
-    <h1 id="admin-h">{{ t.admin }} <span class="count" data-part="count">{{ all|length }}</span></h1>
+    <h1 id="ov-h">{{ t.ov_title }}</h1>
+  </div>
+  {% if live_on %}{{ dash.live_line(dashboard) }}{{ dash.banners(dashboard) }}{% endif %}
+  {% if ov %}
+  <div class="ov-grid">
+    <div class="ov-col">
+      {{ overview_incidents(ov) }}
+      {{ adm.auth_failures(ov.auth if ov.auth is defined else none) }}
+    </div>
+    <div class="ov-col">
+      {{ overview_aps(ov) }}
+      {{ adm.freshness(ov.freshness if ov.freshness is defined else none, ov.jobs if ov.jobs is defined else none,
+                         ov.jobs_available if ov.jobs_available is defined else true) }}
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+{% if live_on %}{{ dash.house_strip(dashboard.house, hidden=dashboard.telemetry != "ok") }}{% endif %}
+
+<section class="adm" id="devices" aria-labelledby="admin-h">
+  <div class="section-head">
+    <h2 id="admin-h">{{ t.ov_devices }} <span class="count" data-part="count">{{ all|length }}</span></h2>
   </div>
   <p class="muted">{{ t.admin_intro }}</p>
-  {% if live_on %}{{ dash.live_line(dashboard) }}{{ dash.banners(dashboard) }}{% endif %}
 
   <form class="filters card" method="get" action="{{ url_for('admin') }}" role="search" data-filters>
     <label class="f-search"><span class="sr">{{ t.adm_search }}</span>{{ dash.icon("search") }}
@@ -141,9 +201,8 @@
   <p class="empty" data-none{% if ns.shown %} hidden{% endif %}>{{ t.adm_none }}</p>
 </section>
 
-{% if live_on %}{{ dash.house_strip(dashboard.house, hidden=dashboard.telemetry != "ok") }}{% endif %}
-
 <p class="backlink"><a href="{{ url_for('index') }}">{{ dash.icon("back") }}{{ t.back_devices }}</a></p>
-{% if live_on %}{{ dash.page_data({"page": "admin", "lang": lang, "api": "/api/admin/devices", "login": url_for('login'),
-                                    "ssid": settings.ssid}, dashboard) }}{% endif %}
+{% if live_on or ov %}{{ dash.page_data({"page": "admin", "lang": lang, "api": "/api/admin/devices", "login": url_for('login'),
+                                    "ssid": settings.ssid, "overview": "/api/admin/overview" if ov else none},
+                                    dict(dashboard if live_on else {}, overview=ov)) }}{% endif %}
 {% endblock %}

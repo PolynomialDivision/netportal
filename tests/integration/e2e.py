@@ -5,9 +5,13 @@ A resident logs in through (mock) Authentik, enrols devices per platform, the ac
 (eapol_test) connects with what the device would install, revocation cuts the session (a
 Disconnect-Request the fake access point accepts) and the next connection fails; renewal,
 the Let's Wi-Fi OAuth flow of the geteduroam apps, offboarding, admin rights, CSRF, metrics.
+Telemetry v2 (docs/TELEMETRY.md): every decision logged with its reason, the Class token in the
+Accept, accounting from the fake access point (radclient), the radius role's rights, and that
+no logging failure (functions revoked, the database stopped) changes a decision.
 """
 
 import base64
+import datetime
 import hashlib
 import plistlib
 import re
@@ -35,6 +39,9 @@ DB = "postgresql://netportal:it-db-password@127.0.0.1:15432/netportal"
 RUN = Path(sys.argv[1])
 failures = []
 LAST_REPLY = ""   # eapol_test output of the last connect()
+RADIUS_DB = "postgresql://radius:it-radius-db-password@127.0.0.1:15432/netportal"
+CALLED = "AA-BB-CC-00-00-01:Scharni"     # what hostapd sends: <BSSID>:<SSID>
+FAKE_NAS = "10.199.0.11"
 
 
 def check(name, ok, detail=""):
@@ -102,13 +109,14 @@ def write_client(name, key, cert, chain):
         f.chmod(0o644)
 
 
-def connect(name, mac=None):
+def connect(name, mac=None, timeout=10):
     """eapol_test as the access point: (verdict, vlan). mac: the device's MAC (Calling-Station-Id;
-    eapol_test's default 02:00:00:00:00:01)."""
+    eapol_test's default 02:00:00:00:00:01). Called-Station-Id as hostapd sends it."""
     out = subprocess.run(["docker", "run", "--rm", "--network", "netportal-it", "--ip", "10.199.0.20",
                           "-v", "%s:/client:ro" % (RUN / "client"), "-v", "%s:/pki:ro" % (RUN / "pki"),
                           "netportal-it-client", "eapol_test", "-c", "/client/%s.conf" % name,
-                          "-a", "10.199.0.10", "-s", "it-radius-secret", "-r0", "-t", "10"]
+                          "-a", "10.199.0.10", "-s", "it-radius-secret", "-r0", "-t", str(timeout),
+                          "-N30:s:" + CALLED]
                          + (["-M" + mac] if mac else []),
                          capture_output=True, text=True).stdout
     global LAST_REPLY
@@ -120,6 +128,80 @@ def connect(name, mac=None):
     if "code=2 (Access-Accept)" in out:
         return ("accept" if re.search(r"^SUCCESS", out, re.M) else "accept-without-eap"), vlan
     return ("reject" if "code=3 (Access-Reject)" in out else "none"), vlan
+
+
+def reply_class():
+    """The Class of the last connect()'s Access-Accept (text) or None."""
+    m = re.search(r"Attribute 25 \(Class\) length=\d+\s+Value: ([0-9a-f]+)", LAST_REPLY)
+    return bytes.fromhex(m.group(1)).decode() if m else None
+
+
+def last_reject():
+    """(reason, device id or None, serial) of the latest logged reject (a repeat adds to an
+    earlier row: its last_at is the latest)."""
+    rows = sql("SELECT reason, device_id::text, serial FROM radius_auth WHERE result = 'reject' "
+               "ORDER BY coalesce(last_at, at) DESC, id DESC LIMIT 1")
+    return tuple(rows[0]) if rows else None
+
+
+def connect_many(name, n, mac, timeout=20):
+    """n eapol_test runs at once from one access point (one container): how many ended with an
+    Accept and EAP success."""
+    run = ("eapol_test -c /client/%s.conf -a 10.199.0.10 -s it-radius-secret -r0 -t %d -N30:s:%s -M%s"
+           % (name, timeout, CALLED, mac))
+    script = ('for i in $(seq %d); do %s > /tmp/out.$i 2>&1 & done; wait; '
+              'for i in $(seq %d); do grep -q "^SUCCESS" /tmp/out.$i && echo OK; done' % (n, run, n))
+    out = subprocess.run(["docker", "run", "--rm", "--network", "netportal-it", "--ip", "10.199.0.20",
+                          "-v", "%s:/client:ro" % (RUN / "client"), "-v", "%s:/pki:ro" % (RUN / "pki"),
+                          "netportal-it-client", "sh", "-c", script], capture_output=True, text=True).stdout
+    return out.split().count("OK")
+
+
+def radius_pools():
+    """{instance: [last query]} of FreeRADIUS's database connections (application_name
+    "FreeRADIUS <version> - <name> (<instance>)")."""
+    pools = {}
+    for app, query in sql("SELECT application_name, query FROM pg_stat_activity WHERE application_name LIKE 'FreeRADIUS%%'"):
+        m = re.search(r"\((\w+)\)$", app)
+        if m:
+            pools.setdefault(m.group(1), []).append(query or "")
+    return pools
+
+
+def accounting(attrs):
+    """An Accounting-Request from the fake access point (radclient): True if answered."""
+    body = "".join("%s = %s\n" % kv for kv in [("NAS-IP-Address", FAKE_NAS)] + list(attrs.items()))
+    out = subprocess.run(["docker", "exec", "-i", "netportal-it-nas", "radclient", "-t", "4", "-r", "2",
+                          "10.199.0.10:1813", "acct", "it-radius-secret"], input=body, capture_output=True, text=True)
+    return "Received Accounting-Response" in out.stdout
+
+
+def acct_row(session_id):
+    rows = sql("SELECT link, device_id::text, mac::text, bssid::text, ssid, host(framed_ip), started, stopped, "
+               "session_time_s, input_octets, output_octets, terminate_cause FROM radius_acct "
+               "WHERE nas_ip = %s AND acct_session_id = %s", FAKE_NAS, session_id)
+    return rows[0] if rows else None
+
+
+def radius_role_can(query):
+    """Whether FreeRADIUS's role may run this query (False: permission denied)."""
+    try:
+        with psycopg.connect(RADIUS_DB) as db:
+            db.execute(query)
+            return True
+    except psycopg.errors.InsufficientPrivilege:
+        return False
+
+
+def db_ready():
+    for _ in range(60):
+        try:
+            with psycopg.connect(DB, connect_timeout=2) as db:
+                db.execute("SELECT 1")
+                return True
+        except psycopg.OperationalError:
+            time.sleep(1)
+    return False
 
 
 def from_eap_config(body):
@@ -162,6 +244,7 @@ def main():
 
     # --- enrolment per platform -----------------------------------------------------------
     fmts = {"android": from_passpoint, "apple": from_mobileconfig, "eap-config": from_eap_config}
+    android_class = None
     for fmt, extract in fmts.items():
         link = enrol(s, fmt, "alice " + fmt)
         dl = s.get(PORTAL + link)
@@ -180,9 +263,21 @@ def main():
             m = re.search(r"Attribute 27 \(Session-Timeout\) length=6\s+Value: ([0-9]+)", LAST_REPLY)
             check("the Accept carries the Session-Timeout backstop", m and int(m.group(1)) == 43200,
                   m and m.group(1))
+            m = re.search(r"Attribute 85 \(Acct-Interim-Interval\) length=6\s+Value: ([0-9]+)", LAST_REPLY)
+            check("the Accept asks for accounting updates every 5 minutes", m and int(m.group(1)) == 300,
+                  m and m.group(1))
+            android_class = reply_class()
         again = s.get(PORTAL + link)
         check("%s: the download link works only once" % fmt, again.status_code == 404, again.status_code)
     android_id, apple_id, eap_id = device_ids("sub-alice")
+
+    # --- telemetry: every login logged with the Class token the Accept carries --------------
+    logged = sql("SELECT device_id::text, result, reason, mac::text, bssid::text, ssid FROM radius_auth "
+                 "WHERE class_token = %s", android_class or "")
+    check("the Accept carries a Class token, logged with the login (device, MAC, BSSID, SSID)",
+          bool(re.fullmatch(r"np1:[-_0-9A-Za-z]{22}", android_class or ""))
+          and logged == [(android_id, "accept", "ok", "02:00:00:00:00:01", "aa:bb:cc:00:00:01", "Scharni")],
+          (android_class, logged))
 
     rows = sql("SELECT nas_ip, calling_station, user_name FROM radius_session WHERE device_id = %s", android_id)
     check("RADIUS records the latest session (for Disconnect)", len(rows) == 1 and rows[0][2] == "anonymous@scharni.org",
@@ -205,7 +300,11 @@ def main():
           moved[0].lower().replace("-", ":") == "02:00:00:00:00:99" and moved[1] > same[1], (same, moved))
     with registry.connect(DB) as db:
         claims = registry.mac_claims(db, ["02:00:00:00:00:99", "02:00:00:00:00:98"])
+        windows = registry.device_windows(db, [android_id])[android_id]
     check("the registry tells whose devices claim a MAC", claims == {"02:00:00:00:00:99": {"sub-alice"}}, claims)
+    check("both MACs of the device are kept as identities with their logins (device_mac)",
+          [(w["mac"], w["auth_count"], w["randomized"]) for w in windows]
+          == [("02:00:00:00:00:01", 2, True), ("02:00:00:00:00:99", 1, True)], windows)
 
     # --- ownership ------------------------------------------------------------------------
     c, _ = login(CAROL)
@@ -226,6 +325,8 @@ def main():
                                     "user_name": "anonymous@scharni.org"}, "not-the-secret", timeout=1, retries=0)
     check("the access point drops a Disconnect-Request with a wrong secret", forged == "timeout", forged)
     check("a revoked device cannot connect", connect("alice-android")[0] == "reject")
+    check("... and the reject is logged with its reason (revoked, the device)",
+          last_reject()[:2] == ("revoked", android_id), last_reject())
     check("other devices of the same person still connect", connect("alice-apple") == ("accept", "30"))
 
     # --- renewal --------------------------------------------------------------------------
@@ -237,11 +338,15 @@ def main():
     check("renewal: the old certificate still works during the overlap", connect("alice-apple")[0] == "accept")
     sql("UPDATE credential SET retired_after = now() - interval '1 minute' WHERE retired_after IS NOT NULL "
         "AND device_id = %s", apple_id)
+    old_cert = connect("alice-apple")[0]
+    retired = last_reject()
     check("renewal: after the overlap only the new certificate works",
-          connect("alice-apple")[0] == "reject" and connect("alice-apple-renewed")[0] == "accept")
+          old_cert == "reject" and connect("alice-apple-renewed")[0] == "accept")
+    check("... the old certificate's reject is logged as retired", retired[:2] == ("retired", apple_id), retired)
     check("renewal keeps one device", len(device_ids("sub-alice")) == 3)
     sql("UPDATE credential SET not_after = now() - interval '1 minute' WHERE device_id = %s", eap_id)
     check("an expired certificate cannot connect", connect("alice-eap-config")[0] == "reject")
+    check("... logged as expired", last_reject()[:2] == ("expired", eap_id), last_reject())
 
     # --- the FreeRADIUS traps: certificates that must fail although the chain looks fine ----
     device_ca = pki.load(RUN / "pki" / "device-ca.pem", (RUN / "pki" / "device-ca.key").read_bytes())
@@ -250,6 +355,22 @@ def main():
     write_client("unregistered", unregistered.key, unregistered.cert, [device_ca.cert])
     check("a device-CA certificate that is not in the registry cannot connect",
           connect("unregistered")[0] == "reject")
+    check("... logged as unknown_cert with its serial, no device",
+          last_reject() == ("unknown_cert", None, unregistered.serial_hex.lower()), last_reject())
+    connect("unregistered")
+    rows = sql("SELECT count, last_at > at FROM radius_auth WHERE serial = %s", unregistered.serial_hex.lower())
+    check("a repeated reject (same MAC, reason, serial, AP within 60 s) adds to its row: one row, count 2",
+          [tuple(r) for r in rows] == [(2, True)], rows)
+    nocert = (RUN / "client" / "alice-android.conf").read_text().replace(' client_cert="/client/alice-android.crt"\n', "")
+    (RUN / "client" / "no-cert.conf").write_text(nocert.replace(' private_key="/client/alice-android.key"\n', ""))
+    (RUN / "client" / "no-cert.conf").chmod(0o644)
+    check("EAP-TLS without a client certificate cannot connect, logged as no_cert",
+          connect("no-cert")[0] == "reject" and last_reject() == ("no_cert", None, None), last_reject())
+    out = subprocess.run(["docker", "exec", "-i", "netportal-it-nas", "radclient", "-t", "4", "10.199.0.10:1812", "auth",
+                          "it-radius-secret"], capture_output=True, text=True,
+                         input='User-Name = "bob", User-Password = "x", Message-Authenticator = 0x00\n').stdout
+    check("a request without EAP (password) is rejected, logged as not_eap",
+          "Access-Reject" in out and last_reject() == ("not_eap", None, None), (out[-200:], last_reject()))
     # Registered serials, so only the issuer checks stand in the way.
     other_root = pki.make_ca("Test Network Root", days=30, path_length=1)
     other_ca = pki.make_ca("Test Device CA", issuer=other_root, days=30, path_length=0)  # same names
@@ -262,9 +383,12 @@ def main():
             "(%s, '00000000-0000-4000-8000-000000000001', now() + interval '1 day')", issued.serial_hex)
     write_client("foreign", foreign.key, foreign.cert, [other_ca.cert, other_root.cert])
     check("a certificate of a foreign CA with the same names cannot connect", connect("foreign")[0] == "reject")
+    check("... logged as bad_chain (its chain did not verify)", last_reject()[:2] == ("bad_chain", None), last_reject())
     write_client("root-signed", root_signed.key, root_signed.cert, [root.cert])
     check("a certificate the root signed directly (not the device CA) cannot connect",
           connect("root-signed")[0] == "reject")
+    check("... logged as bad_chain, not attributed to the registered device (not proven ours)",
+          last_reject() == ("bad_chain", None, root_signed.serial_hex.lower()), last_reject())
     sql("DELETE FROM device WHERE id = '00000000-0000-4000-8000-000000000001'")
 
     # --- Let's Wi-Fi (geteduroam apps) ----------------------------------------------------
@@ -365,6 +489,7 @@ def main():
     check("... and a device she enrols now too", verdict == ("accept", "50"), verdict)
     page = a.get(PORTAL + "/admin")
     check("the admin view shows each device's policy", ">guests<" in page.text and ">residents<" in page.text)
+    telemetry_checks(sql("SELECT id::text FROM device WHERE owner = 'sub-carol' AND name = 'carol tablet'")[0][0])
     # Admin rights are checked against the registry on every request (2026-10-22): removed from
     # it-admins, the open session loses the admin view at the next offboarding round.
     users(("sub-admin", "admin", ["residents"], True), ("sub-carol", "carol", ["former-residents"], True), ALICE, FIA)
@@ -410,6 +535,119 @@ def main():
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0
+
+
+def telemetry_checks(tablet):
+    """Accounting from the fake access point, the radius role's rights, and fail-open logging.
+    tablet: an active device whose credential is RUN/client/carol-tablet.*"""
+    mac = "a4:83:e7:00:00:05"
+    connect("carol-tablet", mac=mac)
+    token = reply_class()
+    now = int(time.time())
+    base = {"Calling-Station-Id": '"A4-83-E7-00-00-05"', "Called-Station-Id": '"AA-BB-CC-00-00-02:Scharni"'}
+    answered = [accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"IT-1"',
+                            "Class": "0x" + (token or "").encode().hex(), "Framed-IP-Address": "10.50.0.7",
+                            "Event-Timestamp": str(now - 120)}),
+                accounting({**base, "Acct-Status-Type": "Interim-Update", "Acct-Session-Id": '"IT-1"',
+                            "Class": "0x" + (token or "").encode().hex(), "Acct-Session-Time": "60",
+                            "Acct-Input-Octets": "1000", "Acct-Input-Gigawords": "1", "Acct-Output-Octets": "500",
+                            "Event-Timestamp": str(now - 60)})]
+    row = acct_row("IT-1")
+    check("accounting Start and Interim with the Accept's Class: the session belongs to the device (link class)",
+          all(answered) and row and row[:6] == ("class", tablet, mac, "aa:bb:cc:00:00:02", "Scharni", "10.50.0.7")
+          and row[9] == 2 ** 32 + 1000 and row[10] == 500 and row[7] is None, (answered, row))
+    answered = accounting({**base, "Acct-Status-Type": "Stop", "Acct-Session-Id": '"IT-1"', "Acct-Session-Time": "120",
+                           "Acct-Input-Octets": "2000", "Acct-Input-Gigawords": "1", "Acct-Output-Octets": "900",
+                           "Acct-Terminate-Cause": "User-Request", "Event-Timestamp": str(now)})
+    row = acct_row("IT-1")
+    check("accounting Stop ends the session with its cause, time and octets",
+          answered and row and row[7] is not None and row[8:] == (120, 2 ** 32 + 2000, 900, "User-Request"), row)
+    answered = accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"IT-2"'})
+    row = acct_row("IT-2")
+    check("accounting without Class: linked by the MAC's window (mac_window)",
+          answered and row and row[:2] == ("mac_window", tablet), row)
+    answered = accounting({"Calling-Station-Id": '"A4-83-E7-00-00-77"', "Acct-Status-Type": "Start",
+                           "Acct-Session-Id": '"IT-3"'})
+    row = acct_row("IT-3")
+    check("accounting of a MAC no device logged in with: kept, linked to nobody", answered and row
+          and row[:2] == ("none", None), row)
+    answered = accounting({"Acct-Status-Type": "Accounting-On"})
+    rows = {sid: acct_row(sid) for sid in ("IT-1", "IT-2", "IT-3")}
+    check("Accounting-On (the access point restarted) closes its open sessions",
+          answered and all(r[7] is not None for r in rows.values())
+          and [rows[s][11] for s in ("IT-1", "IT-2", "IT-3")] == ["User-Request", "NAS-Reboot", "NAS-Reboot"], rows)
+    with registry.connect(DB) as db:
+        sessions = registry.acct_sessions(db, tablet, registry.now() - datetime.timedelta(hours=1), registry.now())
+    check("the registry lists the device's sessions", [s["acct_session_id"] for s in sessions] == ["IT-1", "IT-2"],
+          sessions)
+
+    # --- the radius role: the decision view and the logging functions, no table ---------
+    check("the radius role reads the decision view", radius_role_can("SELECT * FROM radius_cert"))
+    check("the radius role cannot read people, devices or sessions",
+          not any(radius_role_can("SELECT 1 FROM %s" % t) for t in ("person", "device", "credential",
+                                                                     "radius_session", "radius_auth", "radius_acct")))
+    check("the radius role cannot write the session table directly (only through radius_login)",
+          not radius_role_can("UPDATE radius_session SET nas_ip = '1.2.3.4'"))
+    check("the radius role may call the logging functions",
+          radius_role_can("SELECT radius_reject('', '', '', '', 'other')"))
+
+    # --- logging has its own connection pool (radius/mods/sql_log) ----------------------------
+    connect("carol-tablet", mac=mac)
+    pools = radius_pools()
+    logging_calls = re.compile(r"radius_(login|reject|accounting)\(")
+    check("the logging calls run on their own pool (sql_log), the decision's pool (sql) only reads radius_cert",
+          any(logging_calls.search(q) for q in pools.get("sql_log", []))
+          and not any(logging_calls.search(q) for q in pools.get("sql", []))
+          and any("radius_cert" in q for q in pools.get("sql", [])), pools)
+    # Logging blocked (the tables it writes locked, as a long transaction might): logins still
+    # get in, also more at once than either pool has connections, and are answered in time.
+    blocker = psycopg.connect(DB)
+    try:
+        blocker.execute("LOCK TABLE radius_auth, device_mac, radius_session IN ACCESS EXCLUSIVE MODE")
+        began = time.monotonic()
+        verdict = connect("carol-tablet", mac=mac)
+        took = time.monotonic() - began
+        check("with logging blocked, a valid device still connects (without Class), in time",
+              verdict == ("accept", "50") and reply_class() is None and took < 8, (verdict, round(took, 1)))
+        check("... and an unregistered one is still rejected", connect("unregistered")[0] == "reject")
+        accepted = connect_many("carol-tablet", 10, mac)
+        check("... and ten logins at once all get in (more than the 8 decision and 4 logging connections)",
+              accepted == 10, accepted)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    # --- fail open for logging, fail closed for access --------------------------------------
+    sql("REVOKE EXECUTE ON FUNCTION radius_login(text, text, text, text, text, text, text), "
+        "radius_reject(text, text, text, text, text), radius_accounting(" + ", ".join(["text"] * 14) + ") FROM radius")
+    before = sql("SELECT count(*) FROM radius_auth")[0][0]
+    verdict = connect("carol-tablet", mac=mac)
+    check("with the logging functions failing, a valid device still connects (without Class)",
+          verdict == ("accept", "50") and reply_class() is None, verdict)
+    check("... and an unregistered one is still rejected", connect("unregistered")[0] == "reject")
+    check("... and accounting is still answered", accounting({**base, "Acct-Status-Type": "Start",
+                                                             "Acct-Session-Id": '"IT-4"'}))
+    check("... (nothing was logged)", sql("SELECT count(*) FROM radius_auth")[0][0] == before and acct_row("IT-4") is None)
+    with registry.connect(DB) as db:
+        registry.migrate(db)                   # grants.sql: the declared rights again
+    verdict = connect("carol-tablet", mac=mac)
+    check("migrate restores the radius role's rights (declarative grants): logged with Class again",
+          verdict == ("accept", "50") and reply_class() is not None, verdict)
+    subprocess.run(["docker", "stop", "-t", "5", "netportal-it-pg"], capture_output=True)
+    try:
+        verdict = connect("carol-tablet", mac=mac, timeout=30)
+        check("with the database down nobody gets in (fail closed)", verdict[0] != "accept", verdict)
+        check("... and accounting is still answered", accounting({**base, "Acct-Status-Type": "Interim-Update",
+                                                                 "Acct-Session-Id": '"IT-5"'}))
+    finally:
+        subprocess.run(["docker", "start", "netportal-it-pg"], capture_output=True)
+    ready = db_ready()
+    for _ in range(5):                         # FreeRADIUS reconnects its pool
+        verdict = connect("carol-tablet", mac=mac)
+        if verdict[0] == "accept":
+            break
+        time.sleep(2)
+    check("... and once it is back, the device connects again", ready and verdict == ("accept", "50"), verdict)
 
 
 if __name__ == "__main__":

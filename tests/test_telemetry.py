@@ -221,6 +221,11 @@ def live(macs_present):
     ]
 
 
+def brief(findings):
+    """(code, severity, params) of each finding (basis and evidence are tested on their own)."""
+    return [(f["code"], f["severity"], f["params"]) for f in findings]
+
+
 def row(device_id, mac_raw, **extra):
     return dict({"id": device_id, "owner": "sub-resident", "name": "Phone " + device_id, "platform": "android",
                  "policy": "residents", "created": None, "revoked": None, "expires": None, "last_seen": None,
@@ -236,8 +241,9 @@ class DashboardTests(unittest.TestCase):
         prom, session = client(live({MAC_A}))
         telemetry.dashboard(prom, self.rows(), now=NOW)
         sel = 'mac=~"%s|%s"' % (MAC_A, MAC_B)
-        for metric in ("unpoller_client_radio_signal_db", "wifi_client_health_score", "wifi_client_retry_ratio",
-                       "rate(unpoller_client_transmit_bytes_total", "max by (mac, radio)"):
+        for metric in ("max by (mac) (unpoller_client_radio_signal_db", "wifi_client_health_score",
+                       "wifi_client_retry_ratio", "rate(unpoller_client_transmit_bytes_total", "max by (mac, radio)",
+                       "avg by (mac, ap_name) (avg_over_time(unpoller_client_radio_signal_db"):
             queries = session.queries(metric)
             self.assertEqual(len(queries), 1, metric)
             self.assertIn(sel, queries[0])
@@ -310,7 +316,9 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(payload["stale"])
         a = payload["devices"][0]
         self.assertEqual(a["state"], "unknown")                     # frozen presence is no proof
-        self.assertEqual(a["diagnostics"], [{"code": "stale_data", "severity": "warn", "params": {"age_s": 4000}}])
+        self.assertEqual(brief(a["diagnostics"]), [("stale_data", "warn", {"age_s": 4000})])
+        self.assertEqual(a["diagnostics"][0]["basis"], "measured")
+        self.assertEqual(a["diagnostics"][0]["evidence"], {"age_s": 4000, "threshold_s": 600})
 
     def test_no_unpoller_data_is_stale_too(self):
         handlers = [h for h in live({MAC_A}) if "time() - timestamp" not in h[0]]
@@ -435,9 +443,10 @@ class HistoryTests(unittest.TestCase):
         chart = [(t, -60) for t in range(start, end + 1, 300) if t >= end - 7200]
         return [
             ("max(unpoller_prometheus_cache_age_seconds{job=\"unifi\"})[", matrix(({}, ages),)),
-            ("max by (ap_name, radio)", matrix(({"ap_name": "ap-scharni-2-corner", "radio": "na"}, assoc_a),
-                                               ({"ap_name": "ap-scharni-2-corner", "radio": "ng"}, assoc_b))),
-            ("unpoller_client_radio_signal_db", matrix(({}, chart),)),
+            ("max by (mac, ap_name, radio) (timestamp(", matrix(
+                ({"mac": MAC_A, "ap_name": "ap-scharni-2-corner", "radio": "na"}, assoc_a),
+                ({"mac": MAC_A, "ap_name": "ap-scharni-2-corner", "radio": "ng"}, assoc_b))),
+            ("unpoller_client_radio_signal_db", matrix(({"mac": MAC_A}, chart),)),
         ]
 
     def test_series_and_timeline(self):
@@ -456,12 +465,14 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(h["timeline"][0]["at"], telemetry.iso(self.END - 7200))
         self.assertEqual(h["timeline"][1]["ap"]["name"], "ap-scharni-2-corner")
         self.assertEqual(set(h["series"]), {"signal_dbm", "health", "rx_bps", "tx_bps", "online", "link_tx_bps",
-                                            "link_rx_bps"})
+                                            "link_rx_bps", "snr_db", "retry_ratio"})
+        self.assertEqual((h["timeline"][0]["source"], h["timeline"][0]["basis"]), ("prometheus", "inferred"))
+        self.assertEqual(h["timeline"][0]["mac"], MAC_A)
         # one MAC, exactly matched; every chart one range query with the range's step
         for q in session.queries("unpoller_client_"):
             self.assertIn('mac="%s"' % MAC_A, q)
         ranges = [p for u, p in session.calls if u.endswith("query_range")]
-        self.assertEqual(len(ranges), 6)
+        self.assertEqual(len(ranges), 8)
         self.assertTrue(all(p["step"] == "300" for p in ranges))
 
     def test_stale_windows_are_null(self):
@@ -474,13 +485,13 @@ class HistoryTests(unittest.TestCase):
         self.assertNotIn("disconnected", [e["kind"] for e in h["timeline"]])
 
     def test_ranges(self):
-        for key, step in (("7d", 1800), ("30d", 7200)):
+        for key, step in (("7d", 1800), ("30d", 7200), ("90d", 21600)):
             h = telemetry.history(client()[0], MAC_A, key, now=NOW)
             self.assertEqual(h["step_s"], step)
             self.assertEqual(h["timeline"], [])
             self.assertTrue(all(v is None for _t, v in h["series"]["online"]))   # nothing known
         with self.assertRaises(ValueError):
-            telemetry.history(None, MAC_A, "1y")
+            telemetry.history(None, MAC_A, "2y")
 
     def test_unavailable_off_and_never_connected(self):
         prom, _ = client(fail=requests.ReadTimeout("slow"))
@@ -536,7 +547,7 @@ class ConflictTests(unittest.TestCase):
         claims = {MAC_A: {"sub-resident", "sub-other"}, MAC_B: {"sub-resident"}}
         a, b = telemetry.dashboard(prom, [row("a", MAC_A), row("b", MAC_B)], now=NOW, claims=claims)["devices"]
         self.assertEqual(a["state"], "unknown")
-        self.assertEqual(a["diagnostics"], [{"code": "mac_conflict", "severity": "warn", "params": {}}])
+        self.assertEqual(brief(a["diagnostics"]), [("mac_conflict", "warn", {})])
         self.assertTrue(all(a[f] is None for f in telemetry.LIVE_FIELDS))
         self.assertEqual(b["state"], "offline")
         self.assertTrue(all(MAC_A not in q for q in session.queries()))      # not even asked
@@ -546,7 +557,7 @@ class ConflictTests(unittest.TestCase):
         claims = {MAC_A: {"sub-resident", "sub-other", "sub-third"}}
         a = telemetry.dashboard(prom, [row("a", MAC_A)], now=NOW, claims=claims, admin=True)["devices"][0]
         self.assertEqual(a["state"], "online")
-        self.assertEqual(a["diagnostics"][0], {"code": "mac_conflict", "severity": "warn", "params": {"owners": 2}})
+        self.assertEqual(brief(a["diagnostics"])[0], ("mac_conflict", "warn", {"owners": 2}))
 
     def test_the_same_persons_devices_are_no_conflict(self):
         prom, _ = client(live({MAC_A}))

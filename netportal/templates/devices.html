@@ -27,7 +27,9 @@
       {{ dash.state_line(d) }}
     </div>
   </div>
+  {{ dash.auth_alert(d) }}
   {{ dash.live(d) }}
+  {{ dash.how_connects(d) }}
   {{ dash.findings(d, limit=2) }}
   <div class="dev-foot">
     <a class="more" href="/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>

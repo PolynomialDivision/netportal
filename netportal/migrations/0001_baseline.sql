@@ -1,7 +1,9 @@
--- The device registry (PostgreSQL). netportal owns it; FreeRADIUS (role radius) may only read
--- the radius_* views and write radius_session. Wi-Fi uses kind 'cert'; 'mac' and 'ppsk' are
--- reserved for wired MAC authentication and IoT keys (not implemented yet).
--- Idempotent: run at every portal start.
+-- Migration 0001: the registry as of 2026-10-25 (the former netportal/schema.sql, which every
+-- portal start ran). Idempotent on purpose: an existing database (created by schema.sql) and an
+-- empty one end in the same state, and both record version 1. Never edit this file: the
+-- migration runner refuses a changed applied migration (checksum); changes go into a new one.
+-- Wi-Fi uses kind 'cert'; 'mac' and 'ppsk' are reserved for wired MAC authentication and IoT
+-- keys (not implemented yet). The rights of FreeRADIUS's role are in grants.sql.
 
 CREATE TABLE IF NOT EXISTS person (
     sub         text PRIMARY KEY,            -- OIDC subject (Authentik hashed user id)
@@ -117,12 +119,3 @@ CREATE OR REPLACE VIEW radius_cert AS
       AND (c.retired_after IS NULL OR c.retired_after > now());
 
 -- The policies and their VLANs are set by registry.init (NETPORTAL_POLICIES).
-
--- FreeRADIUS's role (created by the stack): read the decision view, write the latest session.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'radius') THEN
-        GRANT SELECT ON radius_cert TO radius;
-        GRANT SELECT, INSERT, UPDATE ON radius_session TO radius;
-    END IF;
-END $$;

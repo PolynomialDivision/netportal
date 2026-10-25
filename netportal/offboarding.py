@@ -69,7 +69,8 @@ def run(settings):
                 web.revoke_now(db, dev["id"], "offboarding", settings)
                 revoked += 1
                 metrics.OFFBOARDED.inc()
-        registry.prune(db)
+        # the retention (registry.prune) is the collector's daily prune job since 2026-10-25:
+        # it runs also while Authentik cannot be read
         registry.mark_job(db, "offboarding")
         db.commit()
     if revoked or moved:

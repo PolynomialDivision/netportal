@@ -11,7 +11,8 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 here="$root/tests/integration"
 run="$root/tests/runs/integration"
 NET=netportal-it
-PG_IMAGE=docker.io/library/postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+# The PostgreSQL production runs (house-infra stacks/netaccess/stack.yml).
+PG_IMAGE=docker.io/library/postgres:18.6-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
 RADIUS_IMAGE=freeradius/freeradius-server:3.2.10@sha256:cc7fd136e7b03e7b332d94297530318e824a4ecfedbce54562cced723e71e812
 PG_PASS=it-db-password
 RADIUS_DB_PASS=it-radius-db-password
@@ -37,7 +38,7 @@ docker network create --subnet 10.199.0.0/24 "$NET" >/dev/null
 # --- registry
 docker run -d --name netportal-it-pg --network "$NET" --ip 10.199.0.5 -p 127.0.0.1:15432:5432 \
   -e POSTGRES_USER=netportal -e POSTGRES_PASSWORD="$PG_PASS" -e POSTGRES_DB=netportal "$PG_IMAGE" >/dev/null
-for _ in $(seq 60); do docker exec netportal-it-pg pg_isready -q -U netportal 2>/dev/null && break; sleep 1; done
+for _ in $(seq 60); do docker exec netportal-it-pg pg_isready -q -h 127.0.0.1 -U netportal 2>/dev/null && break; sleep 1; done
 sleep 1
 docker exec netportal-it-pg psql -q -U netportal -d netportal -c "CREATE ROLE radius LOGIN PASSWORD '$RADIUS_DB_PASS'" >/dev/null
 

@@ -157,6 +157,7 @@ export function timeTicks(startMs, endMs, maxTicks = 6, timeZone = "Europe/Berli
   const steps = [HOUR, 2 * HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 14 * DAY];
   const span = endMs - startMs;
   if (!(span > 0)) return [];
+  if (span / (14 * DAY) > maxTicks) return monthTicks(startMs, endMs, maxTicks, timeZone);
   const step = steps.find((s) => span / s <= maxTicks) || steps[steps.length - 1];
   let wall = Math.ceil((startMs + zoneOffsetMs(startMs, timeZone)) / Math.min(step, DAY)) * Math.min(step, DAY);
   if (step >= 7 * DAY) wall += ((8 - new Date(wall).getUTCDay()) % 7) * DAY;       // to a Monday
@@ -169,13 +170,37 @@ export function timeTicks(startMs, endMs, maxTicks = 6, timeZone = "Europe/Berli
   return ticks;
 }
 
+/** Ticks on the first of a month (every 1, 2, 3, 6 or 12 months: at most maxTicks), at the
+ *  house's midnight: the long ranges (1 year, all). */
+export function monthTicks(startMs, endMs, maxTicks = 6, timeZone = "Europe/Berlin") {
+  const first = new Date(startMs + zoneOffsetMs(startMs, timeZone));
+  const months = (new Date(endMs).getUTCFullYear() - first.getUTCFullYear()) * 12 + new Date(endMs).getUTCMonth() - first.getUTCMonth() + 1;
+  const every = [1, 2, 3, 6, 12].find((n) => months / n <= maxTicks) || 12;
+  const ticks = [];
+  for (let y = first.getUTCFullYear(), m = first.getUTCMonth(); ticks.length < 100; m += 1) {
+    const wall = Date.UTC(y, m, 1);
+    const t = fromWall(wall, timeZone);
+    if (t > endMs) break;
+    const month = new Date(wall).getUTCMonth();
+    if (t >= startMs && month % every === 0) ticks.push(t);
+  }
+  return ticks;
+}
+
 /** The connection timeline from the API's events, clipped to [startMs, endMs]:
- *  {spans: [{start, end, ap, band, ongoing}], marks: [{t, kind, ...event}]}.
- *  "connected" opens a span (its duration_s, when given, closes it); "roamed" and
- *  "band_changed" close the span and open the next one on the new access point or band;
- *  "disconnected" closes it. A span still open at the end is ongoing. A device that was
- *  already connected when the range began shows from the start (its first event is then a
- *  roam or a disconnect, not a connect). */
+ *  {spans: [{start, end, ap, band, ongoing, basis}], marks: [{t, kind, ...event}]}.
+ *  "connected" opens a span (its duration_s, when given, closes it); "reconnected", "roamed"
+ *  and "band_changed" close the span and open the next one on the (new) access point or band;
+ *  "disconnected" and "session_ended" close it. A span still open at the end is ongoing. A
+ *  device that was already connected when the range began shows from the start (its first
+ *  event is then a roam or a disconnect, not a connect). A span is as certain as the event that
+ *  opened it (basis: measured or inferred). Marks: every event but connections and logins
+ *  (authenticated: a login comes with every connection and roam, the list has them). */
+const OPENS = new Set(["connected", "reconnected"]);
+const MOVES = new Set(["roamed", "band_changed"]);
+const CLOSES = new Set(["disconnected", "session_ended"]);
+const MARKS = new Set(["roamed", "band_changed", "reconnected", "disconnected", "session_ended", "auth_rejected",
+  "mac_changed", "incident"]);
 export function timelineSegments(events, startMs, endMs) {
   const list = (events || []).map((e) => ({ ...e, t: toMs(e.at) })).filter((e) => e.t !== null)
     .sort((a, b) => a.t - b.t);
@@ -184,35 +209,82 @@ export function timelineSegments(events, startMs, endMs) {
   const close = (t) => {
     if (!open) return;
     const end = Math.min(t, open.until ?? Infinity);
-    if (end > open.start) spans.push({ start: open.start, end, ap: open.ap, band: open.band, ongoing: false });
+    if (end > open.start) spans.push({ start: open.start, end, ap: open.ap, band: open.band, ongoing: false, basis: open.basis });
     open = null;
   };
+  const basisOf = (e) => (e.basis === "inferred" ? "inferred" : "measured");
   for (const e of list) {
-    if (e.kind === "connected") {
+    if (e.kind === "connected" || (e.kind === "reconnected" && !open)) {
       close(e.t);
-      open = { start: e.t, ap: e.ap ?? null, band: e.band ?? null,
-        until: e.duration_s !== null && e.duration_s !== undefined ? e.t + e.duration_s * 1000 : null };
-    } else if (e.kind === "roamed" || e.kind === "band_changed") {
-      if (!open) open = { start: startMs, ap: e.from_ap ?? e.ap ?? null, band: e.from_band ?? e.band ?? null, until: null };
-      const until = open.until;
+      open = { start: e.t, ap: e.ap ?? null, band: e.band ?? null, basis: basisOf(e),
+        until: e.kind === "connected" && e.duration_s !== null && e.duration_s !== undefined ? e.t + e.duration_s * 1000 : null };
+    } else if (e.kind === "reconnected" || MOVES.has(e.kind)) {
+      // already connected when the range began (nothing before it): from the start
+      if (!open && !spans.length) open = { start: startMs, ap: e.from_ap ?? e.ap ?? null, band: e.from_band ?? e.band ?? null, until: null, basis: basisOf(e) };
+      const until = e.kind === "reconnected" || !open ? null : open.until;
       close(e.t);
-      open = { start: e.t, ap: e.ap ?? null, band: e.band ?? null, until };
-      marks.push(e);
-    } else if (e.kind === "disconnected") {
-      if (!open && !spans.length && e.t > startMs) open = { start: startMs, ap: e.ap ?? null, band: e.band ?? null, until: null };
+      open = { start: e.t, ap: e.ap ?? null, band: e.band ?? null, until, basis: basisOf(e) };
+    } else if (CLOSES.has(e.kind)) {
+      if (!open && !spans.length && e.t > startMs) {
+        open = { start: startMs, ap: e.ap ?? null, band: e.band ?? null, until: null, basis: basisOf(e) };
+      }
       close(e.t);
-      marks.push(e);
     }
+    if (MARKS.has(e.kind)) marks.push(e);
     if (open && open.until !== null && open.until !== undefined && open.until <= e.t) close(open.until);
   }
   if (open) {
     const end = Math.min(endMs, open.until ?? Infinity);
-    if (end > open.start) spans.push({ start: open.start, end, ap: open.ap, band: open.band, ongoing: end >= endMs });
+    if (end > open.start) spans.push({ start: open.start, end, ap: open.ap, band: open.band, ongoing: end >= endMs, basis: open.basis });
   }
   const clipped = spans
     .map((s) => ({ ...s, start: Math.max(s.start, startMs), end: Math.min(s.end, endMs) }))
     .filter((s) => s.end > s.start);
   return { spans: clipped, marks: marks.filter((m) => m.t >= startMs && m.t <= endMs) };
+}
+
+/** Day bars: [{t, v}] (one point per day, as the API sends day steps) -> [{t0, t1, v}], each
+ *  day ending where the next begins (23 or 25 hours across a clock change), the last one a
+ *  step long. */
+export function dayBars(points, stepMs = 86400e3) {
+  return points.map((p, i) => ({ t0: p.t, t1: points[i + 1] ? points[i + 1].t : p.t + stepMs, v: p.v }));
+}
+
+/** An average rate per day (bit/s) as the bytes of that day. */
+export function bytesPerDay(points, stepMs = 86400e3) {
+  return dayBars(points, stepMs).map((b) => ({ t: b.t0, v: b.v === null ? null : (b.v * (b.t1 - b.t0)) / 1000 / 8 }));
+}
+
+/** Where the bars of slot i go: slot width w over `count` slots in [x0, x1], `groups` bars per
+ *  slot side by side, with a gap of a fifth of the slot (at least 1 px, at most 6). */
+export function barGeometry(count, x0, x1, groups = 1) {
+  const slot = count > 0 ? (x1 - x0) / count : 0;
+  const gap = Math.min(6, Math.max(1, slot / 5));
+  const bar = Math.max(1, (slot - gap) / Math.max(1, groups));
+  return { slot, gap, bar, x: (i, g = 0) => x0 + i * slot + gap / 2 + g * bar };
+}
+
+/** Incidents as lanes (one per kind and subject) clipped to [startMs, endMs]:
+ *  {lanes: [{key, kind, subject, subject_name}], items: [{lane, start, end, open, inc}]}. An
+ *  open incident lasts to the end; one shorter than minMs shows minMs wide. */
+export function incidentLanes(incidents, startMs, endMs, minMs = 0) {
+  const lanes = [], index = new Map(), items = [];
+  const sorted = [...(incidents || [])].sort((a, b) => String(a.kind).localeCompare(String(b.kind))
+    || String(a.subject_name || a.subject || "").localeCompare(String(b.subject_name || b.subject || "")));
+  for (const inc of sorted) {
+    const s = toMs(inc.started);
+    if (s === null) continue;
+    const e = inc.ended ? toMs(inc.ended) : endMs;
+    if (e < startMs || s > endMs) continue;
+    const key = `${inc.kind}|${inc.subject || ""}`;
+    if (!index.has(key)) {
+      index.set(key, lanes.length);
+      lanes.push({ key, kind: inc.kind, subject: inc.subject || "", subject_name: inc.subject_name || null, ap: inc.ap || null });
+    }
+    const start = Math.max(s, startMs);
+    items.push({ lane: index.get(key), start, end: Math.min(endMs, Math.max(e, start + minMs)), open: !inc.ended, inc });
+  }
+  return { lanes, items };
 }
 
 /** A colour slot per access point, by name (stable whatever the range shows); beyond the
@@ -439,7 +511,7 @@ export function timelineChart(host, spec) {
       // a 2px surface gap between touching spans (a roam), and at least 2px of colour
       const w = Math.max(2, x1 - x0 - 2);
       const rect = el("rect", { x: fixed(x0 + 1), y: bar.top, width: fixed(w), height: bar.height, rx: Math.min(4, w / 2),
-        class: `timeline-span ap-${slot === undefined ? "other" : slot}${span.ongoing ? " ongoing" : ""}` }, svg);
+        class: `timeline-span ap-${slot === undefined ? "other" : slot}${span.ongoing ? " ongoing" : ""}${span.basis === "inferred" ? " inferred" : ""}` }, svg);
       const label = spec.spanLabel(span);
       const title = el("title", {}, rect);
       title.textContent = label;
@@ -454,9 +526,17 @@ export function timelineChart(host, spec) {
     }
     for (const mark of spec.marks) {
       const cx = fixed(x(mark.t));
-      const g = el("g", { class: `timeline-mark mark-${mark.kind}` }, svg);
-      if (mark.kind === "disconnected") {
+      const g = el("g", { class: `timeline-mark mark-${mark.kind}${mark.basis === "inferred" ? " inferred" : ""}` }, svg);
+      if (mark.kind === "incident") {
+        // the incident's time as a band over the bar (an open one to the end), its start as a line
+        const end = mark.detail && mark.detail.open ? spec.end : mark.t + (mark.duration_s || 0) * 1000;
+        el("rect", { x: cx, y: bar.top - 3, width: fixed(Math.max(2, x(Math.min(end, spec.end)) - x(mark.t))),
+          height: bar.height + 6, class: "mark-band" }, g);
+        el("line", { x1: cx, x2: cx, y1: bar.top - 4, y2: bar.top + bar.height + 4, class: "mark-line" }, g);
+      } else if (mark.kind === "disconnected" || mark.kind === "session_ended") {
         el("line", { x1: cx, x2: cx, y1: bar.top - 3, y2: bar.top + bar.height + 3, class: "mark-line" }, g);
+      } else if (mark.kind === "auth_rejected" || mark.kind === "mac_changed") {
+        el("circle", { cx, cy: bar.top + bar.height + 6, r: 3.2, class: "mark-dot" }, g);
       } else {
         el("path", { d: `M${cx},${bar.top + bar.height + 2}l4,6h-8z`, class: "mark-tri" }, g);
       }
@@ -468,6 +548,211 @@ export function timelineChart(host, spec) {
       const label = el("text", { x: fixed(x(t)), y: height - 4, "text-anchor": "middle" }, axis);
       label.textContent = spec.axisTime(t);
       el("line", { x1: fixed(x(t)), x2: fixed(x(t)), y1: bar.top + bar.height + 8, y2: bar.top + bar.height + 12, class: "chart-tick" }, axis);
+    }
+  }
+  draw();
+  const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
+    if (Math.floor(host.clientWidth) !== width) requestAnimationFrame(draw);
+  }) : null;
+  if (observer) observer.observe(host);
+  return { destroy() { if (observer) observer.disconnect(); host.replaceChildren(); } };
+}
+
+/** Day bars: one bar per day (grouped when there are two series), an optional mark per day
+ *  (a thin line: the weakest tenth, the peak), a tooltip for mouse, touch and keyboard as the
+ *  line chart's. spec = { series: [{label, points, cls}], start, end (ms), stepMs, y: {min,
+ *  max, ticks?} or nothing (from the data, from zero), baseline: "min" (bars from the axis's
+ *  bottom, not from zero), marks: {label, points, cls} | null,
+ *  value(v, s) -> text, axisValue(v), axisTime(ms), tipTime(ms), label, height, axisWidth }. */
+export function barChart(host, spec) {
+  const height = spec.height || 180;
+  const pad = { top: 10, right: 12, bottom: 24, left: spec.axisWidth || 52 };
+  const series = spec.series.map((s) => ({ ...s, bars: dayBars(s.points, spec.stepMs) }));
+  const grid = series[0]?.bars || [];
+  const marks = spec.marks ? dayBars(spec.marks.points, spec.stepMs) : null;
+  let cursor = -1, svg = null, tip = null, width = 0, geo = null, y = null, x = null, hl = [];
+
+  function domainY() {
+    if (spec.y && spec.y.min !== undefined) {
+      const ticks = spec.y.ticks || niceTicks(spec.y.min, spec.y.max, 4).ticks.filter((v) => v >= spec.y.min && v <= spec.y.max);
+      return { min: spec.y.min, max: spec.y.max, ticks };
+    }
+    const all = series.flatMap((s) => s.points).concat(marks ? spec.marks.points : []);
+    const e = extent(all) || [0, 1];
+    return niceTicks(Math.min(0, e[0]), Math.max(e[1], spec.minSpan || 0), 4);
+  }
+
+  function draw() {
+    width = Math.max(240, Math.floor(host.clientWidth || 320));
+    host.replaceChildren();
+    const d = domainY();
+    const end = grid.length ? grid[grid.length - 1].t1 : spec.end;
+    x = scaleLinear([spec.start, end], [pad.left, width - pad.right]);
+    y = scaleLinear([d.min, d.max], [height - pad.bottom, pad.top]);
+    geo = barGeometry(grid.length, pad.left, width - pad.right, series.length);
+    svg = el("svg", { viewBox: `0 0 ${width} ${height}`, width, height, class: "chart-svg", role: "img",
+      "aria-label": spec.label || "", focusable: "false" });
+    host.appendChild(svg);
+    const axis = el("g", { class: "chart-axis", "aria-hidden": "true" }, svg);
+    for (const v of d.ticks) {
+      el("line", { x1: pad.left, x2: width - pad.right, y1: y(v), y2: y(v), class: "chart-grid" }, axis);
+      const label = el("text", { x: pad.left - 6, y: y(v) + 4, "text-anchor": "end" }, axis);
+      label.textContent = spec.axisValue ? spec.axisValue(v) : String(v);
+    }
+    for (const t of timeTicks(spec.start, end, Math.max(3, Math.floor((width - pad.left) / 64)), spec.timeZone)) {
+      el("line", { x1: x(t), x2: x(t), y1: height - pad.bottom, y2: height - pad.bottom + 4, class: "chart-tick" }, axis);
+      const label = el("text", { x: x(t), y: height - 6, "text-anchor": "middle" }, axis);
+      label.textContent = spec.axisTime ? spec.axisTime(t) : new Date(t).toISOString();
+    }
+    el("line", { x1: pad.left, x2: width - pad.right, y1: height - pad.bottom, y2: height - pad.bottom, class: "chart-base" }, axis);
+    // bars grow from zero, or from the bottom of the axis (spec.baseline "min": a signal in dBm)
+    const base = y(spec.baseline === "min" ? d.min : Math.max(d.min, Math.min(0, d.max)));
+    hl = [];
+    series.forEach((s, gi) => {
+      const g = el("g", { class: `chart-series ${s.cls || `series-${gi + 1}`}` }, svg);
+      s.bars.forEach((b, i) => {
+        if (b.v === null) return;
+        const top = y(Math.min(d.max, Math.max(d.min, b.v)));
+        const r = el("rect", { x: fixed(geo.x(i, gi)), y: fixed(Math.min(top, base)), width: fixed(geo.bar),
+          height: fixed(Math.max(1, Math.abs(base - top))), rx: Math.min(2, geo.bar / 3), class: "chart-bar" }, g);
+        (hl[i] ||= []).push(r);
+      });
+    });
+    if (marks) {
+      const g = el("g", { class: `chart-marks ${spec.marks.cls || ""}` }, svg);
+      marks.forEach((m, i) => {
+        if (m.v === null) return;
+        const my = fixed(y(Math.min(d.max, Math.max(d.min, m.v))));
+        el("line", { x1: fixed(geo.x(i) - 1), x2: fixed(geo.x(i, series.length) + 1), y1: my, y2: my, class: "chart-mark" }, g);
+      });
+    }
+    const hit = el("rect", { x: pad.left, y: 0, width: width - pad.left - pad.right, height, class: "chart-bar-hit" }, svg);
+    hit.addEventListener("pointermove", (e) => point(e));
+    hit.addEventListener("pointerdown", (e) => point(e));
+    hit.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hide(); });
+    tip = document.createElement("div");
+    tip.className = "chart-tip";
+    tip.hidden = true;
+    tip.setAttribute("aria-hidden", "true");
+    host.appendChild(tip);
+    if (cursor >= 0) show(cursor);
+  }
+
+  function point(e) {
+    const box = svg.getBoundingClientRect();
+    const px = ((e.clientX - box.left) / box.width) * width;
+    const i = Math.floor((px - pad.left) / (geo.slot || 1));
+    show(Math.max(0, Math.min(grid.length - 1, i)));
+  }
+  function hide() {
+    cursor = -1;
+    for (const list of hl) for (const r of list || []) r.classList.remove("active");
+    if (tip) tip.hidden = true;
+  }
+  function show(i) {
+    if (i < 0 || !grid[i]) return hide();
+    hide();
+    cursor = i;
+    for (const r of hl[i] || []) r.classList.add("active");
+    const head = document.createElement("strong");
+    head.textContent = spec.tipTime ? spec.tipTime(grid[i].t0) : new Date(grid[i].t0).toISOString();
+    const rows = series.map((s, gi) => {
+      const row = document.createElement("span");
+      row.className = "chart-tip-row";
+      if (series.length > 1) {
+        const key = document.createElement("i");
+        key.className = `chart-key ${s.cls || `series-${gi + 1}`}`;
+        row.appendChild(key);
+        row.appendChild(document.createTextNode(`${s.label}: `));
+      }
+      const value = document.createElement("b");
+      value.textContent = s.bars[i] && s.bars[i].v !== null ? spec.value(s.bars[i].v, s) : (spec.noValue || "–");
+      row.appendChild(value);
+      return row;
+    });
+    if (marks && marks[i] && marks[i].v !== null) {
+      const row = document.createElement("span");
+      row.className = "chart-tip-row";
+      row.appendChild(document.createTextNode(`${spec.marks.label}: `));
+      const value = document.createElement("b");
+      value.textContent = spec.value(marks[i].v, spec.marks);
+      row.appendChild(value);
+      rows.push(row);
+    }
+    tip.replaceChildren(head, ...rows);
+    tip.hidden = false;
+    const left = (geo.x(i) + geo.slot / 2) / width;
+    tip.style.left = `${(left * 100).toFixed(2)}%`;
+    tip.classList.toggle("flip", left > 0.5);
+  }
+  function key(e) {
+    if (!grid.length) return;
+    const step = e.shiftKey ? 7 : 1;
+    let next = cursor < 0 ? grid.length - 1 : cursor;
+    if (e.key === "ArrowLeft") next = Math.max(0, next - step);
+    else if (e.key === "ArrowRight") next = Math.min(grid.length - 1, next + step);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = grid.length - 1;
+    else if (e.key === "Escape") { hide(); return; }
+    else return;
+    e.preventDefault();
+    show(next);
+  }
+  host.tabIndex = 0;
+  host.addEventListener("keydown", key);
+  host.addEventListener("blur", hide);
+  draw();
+  let frame = 0;
+  const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
+    if (Math.floor(host.clientWidth) === width) return;
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(draw);
+  }) : null;
+  if (observer) observer.observe(host);
+  return { destroy() { if (observer) observer.disconnect(); host.removeEventListener("keydown", key); host.replaceChildren(); } };
+}
+
+/** Incidents over time: a lane per kind and subject (its label above it), a bar per incident
+ *  (an open one to the end; estimated ones dashed). Each bar is focusable with its own title;
+ *  a tap or focus hands the text to the page (onSelect). spec = { lanes, items, start, end,
+ *  laneLabel(lane), itemLabel(item), axisTime, timeZone, label, onSelect }. */
+export function laneChart(host, spec) {
+  const lane = { label: 14, bar: 12, gap: 8 };
+  const pad = { left: 4, right: 4, bottom: 18 };
+  let width = 0;
+  function draw() {
+    width = Math.max(240, Math.floor(host.clientWidth || 320));
+    host.replaceChildren();
+    const rowH = lane.label + lane.bar + lane.gap;
+    const height = spec.lanes.length * rowH + pad.bottom;
+    const x = scaleLinear([spec.start, spec.end], [pad.left, width - pad.right]);
+    const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, width, height, class: "timeline-svg", role: "img",
+      "aria-label": spec.label || "" });
+    host.appendChild(svg);
+    spec.lanes.forEach((l, i) => {
+      const top = i * rowH;
+      const text = el("text", { x: pad.left, y: top + 11, class: "lane-label" }, svg);
+      text.textContent = spec.laneLabel(l);
+      el("rect", { x: pad.left, y: top + lane.label, width: width - pad.left - pad.right, height: lane.bar, rx: 3, class: "lane-track" }, svg);
+    });
+    for (const item of spec.items) {
+      const top = item.lane * rowH + lane.label;
+      const x0 = x(item.start), w = Math.max(3, x(item.end) - x0);
+      const rect = el("rect", { x: fixed(x0), y: top, width: fixed(w), height: lane.bar, rx: Math.min(3, w / 2),
+        class: `lane-item${item.open ? " open" : ""}${item.inc.basis === "inferred" ? " inferred" : ""}`, tabindex: 0, role: "button" }, svg);
+      const label = spec.itemLabel(item);
+      rect.setAttribute("aria-label", label);
+      const title = el("title", {}, rect);
+      title.textContent = label;
+      if (spec.onSelect) {
+        rect.addEventListener("click", () => spec.onSelect(label, item));
+        rect.addEventListener("focus", () => spec.onSelect(label, item));
+      }
+    }
+    const axis = el("g", { class: "chart-axis", "aria-hidden": "true" }, svg);
+    for (const t of timeTicks(spec.start, spec.end, Math.max(3, Math.floor(width / 80)), spec.timeZone)) {
+      const label = el("text", { x: fixed(x(t)), y: height - 4, "text-anchor": "middle" }, axis);
+      label.textContent = spec.axisTime(t);
     }
   }
   draw();

@@ -1,5 +1,8 @@
-"""Prometheus metrics (counts only; no names, no devices). What the offboarding sidecar does
-happens in another process: it comes from the registry (job, audit), not from counters here."""
+"""Prometheus metrics (counts only; no names, no devices). What the offboarding sidecar and the
+collector (netportal-collect) do happens in other processes: it comes from the registry (job,
+audit), not from counters here."""
+
+import logging
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 
@@ -23,6 +26,16 @@ TELEMETRY_QUERIES = Counter("netportal_telemetry_queries_total", "Prometheus que
 for _result in ("ok", "error"):
     TELEMETRY_QUERIES.labels(_result)         # both series from the start (rate() sees the first error)
 UP = Gauge("netportal_registry_up", "Registry reachable", registry=REGISTRY)
+# The background jobs (the collector's and the offboarding), from the job table.
+JOB_LAST_SUCCESS = Gauge("netportal_job_last_success_timestamp_seconds", "When the job last succeeded",
+                         ["job"], registry=REGISTRY)
+JOB_LAST_ATTEMPT = Gauge("netportal_job_last_attempt_timestamp_seconds", "When the job last started",
+                         ["job"], registry=REGISTRY)
+JOB_UP = Gauge("netportal_job_up", "Whether the job's last run succeeded", ["job"], registry=REGISTRY)
+JOB_DURATION = Gauge("netportal_job_duration_seconds", "How long the job's last run took", ["job"],
+                     registry=REGISTRY)
+
+log = logging.getLogger("netportal.metrics")
 
 
 def render(db):
@@ -43,4 +56,39 @@ def render(db):
         UP.set(1)
     except Exception:  # noqa: BLE001 (the scrape must still answer)
         UP.set(0)
+    else:
+        render_jobs(db)
     return generate_latest(REGISTRY)
+
+
+def _epoch(value):
+    return value.timestamp() if hasattr(value, "timestamp") else float(value)
+
+
+def render_jobs(db):
+    """The job gauges from registry.job_status. A job that never recorded an attempt (the
+    offboarding marks successes only) gets no _up and no _last_attempt series. A failing
+    job_status (an older schema) leaves the job gauges out, not the rest."""
+    for gauge in (JOB_LAST_SUCCESS, JOB_LAST_ATTEMPT, JOB_UP, JOB_DURATION):
+        gauge.clear()
+    try:
+        rows = registry.job_status(db)
+    except Exception as e:  # noqa: BLE001
+        log.warning("job status unreadable: %s", type(e).__name__)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    for row in rows:
+        name = row.get("name")
+        if not name:
+            continue
+        if row.get("last_success") is not None:
+            JOB_LAST_SUCCESS.labels(name).set(_epoch(row["last_success"]))
+        if row.get("last_attempt") is not None:
+            JOB_LAST_ATTEMPT.labels(name).set(_epoch(row["last_attempt"]))
+            JOB_UP.labels(name).set(1 if row.get("last_error") is None and row.get("last_success") is not None
+                                    else 0)
+        if row.get("duration_s") is not None:
+            JOB_DURATION.labels(name).set(float(row["duration_s"]))

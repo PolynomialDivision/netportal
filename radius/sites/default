@@ -5,6 +5,19 @@
 #
 # Fail closed, written positively (see check-eap-tls): access only inside an "if" whose test
 # is true; every error or missing value ends in an else that rejects.
+#
+# Fail open for logging (netportal docs/TELEMETRY.md): logins, rejects and accounting are
+# written through the registry's functions radius_login, radius_reject and radius_accounting,
+# each as a %{sql_log:...} expansion in the TEST of an "if". sql_log (mods/sql_log) is a second
+# rlm_sql instance with its own small pool and a 1 s query timeout: a slow or blocked write waits
+# there, never for a connection of the decision's pool (mods/sql, used by check-eap-tls only). A failed expansion (database down,
+# function missing, no right) is logged by rlm_sql and makes that test false without changing
+# the section's result (a failed post-auth would turn an Accept into a Reject). 3.2.10 also
+# lets a failed expansion inside "update" through as an empty value (tested 2026-10-25), but
+# this does not depend on it. So no write can change a decision; the integration test revokes
+# the functions and stops the database to show it.
+# Values are escaped by rlm_sql (its default: characters outside safe_characters become =XX),
+# inside '...' literals; the functions validate every argument.
 server default {
 	listen {
 		type = auth
@@ -33,7 +46,13 @@ server default {
 	}
 
 	accounting {
-		# UniFi sends accounting when enabled; nothing is stored (no history).
+		# UniFi sends Start, Interim-Update (Acct-Interim-Interval), Stop and Accounting-On/Off;
+		# radius_accounting keeps one row per NAS session (radius_acct). Class echoes the token
+		# of the login (radius_login); Event-Timestamp as epoch seconds. Always answered: a
+		# write that fails is logged and the access point does not retransmit.
+		if ("%{sql_log:SELECT radius_accounting('%{Acct-Status-Type}', '%{Acct-Session-Id}', '%{Class}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Framed-IP-Address}', '%{Acct-Session-Time}', '%{Acct-Input-Octets}', '%{Acct-Output-Octets}', '%{Acct-Input-Gigawords}', '%{Acct-Output-Gigawords}', '%{Acct-Terminate-Cause}', '%{integer:Event-Timestamp}')}") {
+			noop
+		}
 		ok
 	}
 
@@ -47,14 +66,21 @@ server default {
 				# Backstop for sessions a Disconnect-Request does not reach (netaccess.session_timeout).
 				&Session-Timeout := $ENV{RADIUS_SESSION_TIMEOUT}
 				&Termination-Action := RADIUS-Request
+				# Accounting Interim-Update every 5 minutes (hostapd takes it from the Accept):
+				# traffic and presence per session even when the controller's own interval differs.
+				&Acct-Interim-Interval := 300
 			}
-			# The latest session of the device (no history): where netportal sends the
-			# Disconnect-Request when the device is revoked. Without NAS-IP-Address the packet's
-			# source is the access point. first_seen: the first login with this MAC (kept while
-			# the MAC stays, new when it changes): the dashboard's Wi-Fi data starts there.
+			# The login (radius_auth), the device's MAC identity (device_mac) and its latest
+			# session (radius_session: where netportal sends the Disconnect-Request when the
+			# device is revoked; without NAS-IP-Address the packet's source is the access point;
+			# first_seen kept while the MAC stays). The returned token goes into Class, which
+			# the access point echoes in accounting (radius_acct link "class"). Only after the
+			# decision, and only into the test of an "if" (see the top).
 			if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
-				update control {
-					&Tmp-String-3 := "%{sql:INSERT INTO radius_session (device_id, nas_ip, calling_station, user_name, updated, first_seen) VALUES ('%{control:Tmp-String-2}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Calling-Station-Id}', '%{User-Name}', now(), now()) ON CONFLICT (device_id) DO UPDATE SET nas_ip = EXCLUDED.nas_ip, calling_station = EXCLUDED.calling_station, user_name = EXCLUDED.user_name, updated = now(), first_seen = CASE WHEN radius_session.calling_station IS DISTINCT FROM EXCLUDED.calling_station THEN now() ELSE radius_session.first_seen END}"
+				if ("%{sql_log:SELECT radius_login('%{control:Tmp-String-2}', '%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
+					update reply {
+						&Class := "%{1}"
+					}
 				}
 			}
 		}
@@ -64,6 +90,29 @@ server default {
 		Post-Auth-Type REJECT {
 			update reply {
 				&Reply-Message := "device not registered"
+			}
+			# Every reject with its reason (radius_auth): with a client certificate whose chain
+			# verified, the registry says why (unknown_cert, revoked, retired, expired; bad_chain
+			# when it would accept the serial: check_cert_issuer refused it), else the hint:
+			# bad_chain (a chain was presented but did not verify: only its CA certificates were
+			# read, TLS-Cert-*), no_cert (EAP without a client certificate), not_eap.
+			if (&TLS-Cert-Serial) {
+				update control {
+					&Tmp-String-4 := "bad_chain"
+				}
+			}
+			elsif (&EAP-Message) {
+				update control {
+					&Tmp-String-4 := "no_cert"
+				}
+			}
+			else {
+				update control {
+					&Tmp-String-4 := "not_eap"
+				}
+			}
+			if ("%{sql_log:SELECT radius_reject('%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{control:Tmp-String-4}')}") {
+				noop
 			}
 		}
 	}

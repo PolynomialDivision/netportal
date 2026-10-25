@@ -10,21 +10,22 @@ decides every Wi-Fi login from the registry.
 | Path | What |
 |---|---|
 | `netportal/web.py` | Flask app: OIDC login, devices, enrolment, renewal, revocation, admin view, Let's Wi-Fi API (geteduroam apps), `/metrics`, `/healthz` |
-| `netportal/registry.py`, `schema.sql` | PostgreSQL registry; the `radius_cert` view FreeRADIUS reads |
+| `netportal/registry.py`, `migrations/` | PostgreSQL registry: versioned migrations (`0001_baseline.sql`, `0002_telemetry.sql`, …) and `grants.sql` applied at start; the `radius_cert` view and the functions FreeRADIUS calls |
 | `netportal/pki.py`, `enroll.py`, `profiles.py` | certificates and the per-platform artefacts (Apple profile, Android Passpoint, eap-config) |
 | `netportal/disconnect.py` | RFC 5176 Disconnect-Request (immediate revocation) |
 | `netportal/offboarding.py` | reconciliation with Authentik's users API (devices, app grants, portal sessions) |
 | `netportal/telemetry.py` | the "My devices" data: Prometheus (unpoller, the house rules, blackbox, speed test), read on the server only, batched and cached; live status, history, connection timeline, house status |
 | `netportal/diagnostics.py` | the findings shown per device (weak signal, retries, roaming …), each from measured data with its threshold |
-| `netportal/__main__.py` | `init-db`, `offboard [--every N]`, `pki` (the ceremony) |
-| `radius/` | FreeRADIUS 3.2 configuration and image (EAP-TLS only, registry lookup, status server) |
+| `netportal/__main__.py` | `init-db`, `offboard [--every N]`, `collect [--once] [--jobs a,b]`, `job <name>`, `pki` (the ceremony) |
+| `netportal/collect/` | the collector (container netportal-collect): UniFi events from Loki, incidents and nightly rollups from Prometheus, prune; design in `docs/TELEMETRY.md` |
+| `radius/` | FreeRADIUS 3.2 configuration and image (EAP-TLS only, registry lookup, logging through its own pool `sql_log`, status server) |
 | `Dockerfile` | the portal image (also the offboarding sidecar) |
 
 ## Tests
 
 ```sh
 python3 -m unittest discover -s tests       # unit and profile-format tests
-tests/integration/run.sh                     # whole Wi-Fi path on local Docker (59 checks)
+tests/integration/run.sh                     # whole Wi-Fi path on local Docker (106 checks: logins, rejects with reasons, accounting, logging blocked, DB outage)
 IMAGES=1 tests/integration/run.sh            # the same against the built images
 ```
 

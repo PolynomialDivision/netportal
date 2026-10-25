@@ -3,15 +3,21 @@ revocation (with an immediate Disconnect-Request), an admin view, the "My device
 (Wi-Fi state from Prometheus, netportal/telemetry.py) and the Let's Wi-Fi API for the geteduroam
 apps (Windows, Linux, Android fallback).
 
-Every page works without JavaScript; the dashboard pages (/, /devices/<id>, /admin) add static
-scripts from 'self' that read the JSON API (/api/...) of the same login. Every change is a POST
-with a CSRF token; strict CSP.
+Every page works without JavaScript; the dashboard pages (/, /devices/<id>, /admin, /admin/aps,
+/admin/incidents, /admin/devices/<id>) add static scripts from 'self' that read the JSON API
+(/api/...) of the same login. Every change is a POST with a CSRF token; strict CSP.
+
+Telemetry (netportal/telemetry/): every page view gets one Prometheus budget (telemetry.Budget,
+5 s) that all of its queries share, the device page's live state and history together. The
+registry's schema is made by registry.init at the start (wsgi.py), never here.
 """
 
 import base64
+import datetime
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 import time
 import urllib.parse
@@ -35,8 +41,17 @@ ACCESS_SECONDS, CODE_SECONDS, REFRESH_SECONDS = 3600, 300, 400 * 86400
 # latest, however busy (the login is automatic through the house account).
 SESSION_IDLE_SECONDS, SESSION_MAX_SECONDS = 8 * 3600, 12 * 3600
 FORMATS = ("apple", "apple-mac", "android", "eap-config")
-# The dashboard's history ranges (telemetry.RANGES).
-HISTORY_RANGES = tuple(telemetry.RANGES)
+# The dashboard's history ranges: 24h..90d from Prometheus, 1y and all from the rollups.
+HISTORY_RANGES = telemetry.HISTORY_RANGES
+# The admin API's time ranges: default and longest span (seconds), per endpoint.
+ADMIN_SPANS = {"incidents": (7 * 86400, 400 * 86400), "auth": (86400, 31 * 86400), "raw": (86400, 31 * 86400)}
+INCIDENT_KIND_RE = re.compile(r"[a-z][a-z_]{0,39}")
+# ?limit=: ASCII digits only (str.isdigit also takes "²", which int() refuses: a 500)
+LIMIT_RE = re.compile(r"[0-9]{1,4}")
+# The incidents page's spans (?range=, instead of ?from=) and the kinds its filter offers (TELEMETRY.md).
+INCIDENT_RANGES = {"7d": 7 * 86400, "30d": 30 * 86400, "90d": 90 * 86400, "1y": 365 * 86400}
+INCIDENT_KINDS = ("internet_down", "internet_degraded", "router_down", "dns_down", "ap_down", "ap_restarted",
+                  "switch_down", "switch_port_down", "unifi_data_stale", "radius_down")
 # The device states the admin list filters by.
 DEVICE_STATES = ("online", "offline", "never_connected", "unknown")
 # The app's authorization request, as the consent form sends it back (templates/consent.html).
@@ -120,6 +135,7 @@ def create_app(settings=None):
     prometheus = (telemetry.Prometheus(settings.prometheus_url, settings.prometheus_timeout, ssid=settings.ssid)
                   if settings.prometheus_url else None)
     app.extensions["netportal"] = {"settings": settings, "issuer": issuer, "telemetry": prometheus}
+    house_zone = telemetry.zone(settings.timezone)
     # the dashboard templates' language-aware formatting and the finding codes (i18n)
     app.jinja_env.globals.update(i18n.template_globals())
 
@@ -242,19 +258,25 @@ def create_app(settings=None):
             abort(json_error("not_found", 404) if wants_json() else 404)
         return dev
 
-    def mac_claims(rows):
-        """Who else's active devices claim the MACs of these devices (only asked with telemetry on:
-        without it nothing of a MAC's data is shown)."""
-        if app.extensions["netportal"]["telemetry"] is None:
-            return {}
-        return registry.mac_claims(g.db, [telemetry.normalise_mac(r.get("calling_station")) for r in rows])
+    def budget():
+        """This page view's Prometheus budget (one for all its queries), None with telemetry off."""
+        client = app.extensions["netportal"]["telemetry"]
+        if client is None:
+            return None
+        if "telemetry_budget" not in g:
+            g.telemetry_budget = client.within()
+        return g.telemetry_budget
 
-    def dashboard(rows, owners=None):
-        """The /api/devices payload (telemetry.dashboard) with the certificate's renewal hint. A
-        MAC that other people's devices claim too is withheld from residents (a device sends its
-        own MAC: it could send someone else's); admins see the data and the conflict."""
-        payload = telemetry.dashboard(app.extensions["netportal"]["telemetry"], rows, owners=owners,
-                                      claims=mac_claims(rows), admin=bool(g.user and g.user.get("admin")))
+    def is_admin():
+        return bool(g.user and g.user.get("admin"))
+
+    def dashboard(rows, owners=None, detail=False):
+        """The /api/devices payload (telemetry.dashboard) with the certificate's renewal hint. The
+        devices' MAC windows come from the registry; a MAC in someone else's window too is
+        withheld from residents for that time (a device sends its own MAC: it could send someone
+        else's); admins see the data and the conflict. detail: one device's page (its 24 h of
+        accounting and UniFi events for the findings)."""
+        payload = telemetry.dashboard(budget(), rows, owners=owners, admin=is_admin(), db=g.db, detail=detail)
         for device, row in zip(payload["devices"], rows):
             device["expires_soon"] = enroll.expires_soon(row.get("expires"))
         return payload
@@ -336,28 +358,32 @@ def create_app(settings=None):
 
     def device_payload(dev, user):
         """telemetry.dashboard for one device (with its owner for an admin)."""
-        return dashboard([dev], owners=registry.people(g.db) if user["admin"] else None)
+        return dashboard([dev], owners=registry.people(g.db) if user["admin"] else None, detail=True)
 
     def device_history(dev, range_key):
-        """The /history payload; an unknown range is 24h here (the page's links send only known ones)."""
+        """The /history payload (telemetry.history: windows, conflicts and the registry's events
+        from the registry); an unknown range is 24h here (the page's links send only known ones)."""
         range_key = range_key if range_key in HISTORY_RANGES else "24h"
-        mac = telemetry.normalise_mac(dev.get("calling_station"))
-        conflict = telemetry.other_owners(mac_claims([dev]), mac, dev.get("owner"))
-        withheld = "mac_conflict" if conflict and not g.user["admin"] else None
-        return telemetry.history(app.extensions["netportal"]["telemetry"], mac, range_key,
-                                 since=telemetry.data_bound(dev), withheld=withheld)
+        return telemetry.history(budget(), telemetry.normalise_mac(dev.get("calling_station")), range_key,
+                                 db=g.db, row=dev, admin=is_admin(), tz=house_zone)
+
+    def device_context(dev, user):
+        """device.html's context: DASHBOARD (one device), DEVICE, the registry row, HISTORY of the
+        range asked for, the ranges, expires_soon."""
+        payload = device_payload(dev, user)
+        return {"dashboard": payload, "device": payload["devices"][0], "row": dev,
+                "history": device_history(dev, request.args.get("range", "24h")), "ranges": HISTORY_RANGES,
+                "expires_soon": enroll.expires_soon}
 
     @app.get("/devices/<uuid:device_id>")
     def device_page(device_id):
         """One device: its state, diagnostics, the connection list (also without the script) and,
-        with the script, the charts."""
+        with the script, the charts. Live state and history share the page's budget."""
         user = need_user()
         dev = own_device(device_id, user)
-        payload = device_payload(dev, user)
+        context = device_context(dev, user)
         g.dashboard_page = True
-        return render_template("device.html", dashboard=payload, device=payload["devices"][0], row=dev,
-                               history=device_history(dev, request.args.get("range", "24h")),
-                               ranges=HISTORY_RANGES, expires_soon=enroll.expires_soon)
+        return render_template("device.html", **context)
 
     @app.post("/enroll")
     def enroll_device():
@@ -427,11 +453,78 @@ def create_app(settings=None):
 
     @app.get("/admin")
     def admin():
+        """The admins' start page: the house's overview (OVERVIEW, telemetry/admin.py) and every
+        device. Context: devices (registry rows), people, expires_soon, dashboard (the admin
+        DASHBOARD), states, overview (OVERVIEW)."""
         need_user(admin=True)
         g.dashboard_page = True
         return render_template("admin.html", devices=registry.devices(g.db, include_revoked=False),
                                people=registry.people(g.db), expires_soon=enroll.expires_soon,
-                               dashboard=admin_dashboard(), states=DEVICE_STATES)
+                               dashboard=admin_dashboard(), states=DEVICE_STATES,
+                               overview=telemetry.admin_overview(budget(), g.db))
+
+    @app.get("/admin/aps")
+    def admin_aps_page():
+        """The APs. Context: aps (APS, telemetry/admin.py)."""
+        need_user(admin=True)
+        g.dashboard_page = True
+        return render_template("admin_aps.html", aps=telemetry.admin_aps(budget(), g.db))
+
+    @app.get("/admin/incidents")
+    def admin_incidents_page():
+        """The incidents of a time range (?range=7d|30d|90d|1y or ?from=&to=, and ?kind=, as the
+        API; anything invalid: the last 7 days, all kinds). Context: incidents (INCIDENTS), range
+        {"from", "to", "kind"} as sent back to the form (ISO, "" for none), incident_kinds (the
+        kinds the filter offers)."""
+        need_user(admin=True)
+        try:
+            since, until = admin_span("incidents")
+            kind = incident_kind()
+        except ValueError:
+            since, until, kind = time.time() - ADMIN_SPANS["incidents"][0], time.time(), None
+        g.dashboard_page = True
+        payload = telemetry.admin_incidents(g.db, since, until, kind, client=budget())
+        return render_template("admin_incidents.html", incidents=payload,
+                               range={"from": payload["from"], "to": payload["to"], "kind": kind or ""},
+                               incident_kinds=INCIDENT_KINDS)
+
+    @app.get("/admin/devices/<uuid:device_id>")
+    def admin_device_page(device_id):
+        """The admins' deep view of a device: device.html's context plus admin_view True and raw
+        (RAW of the last 24 h, telemetry/admin.py)."""
+        user = need_user(admin=True)
+        dev = own_device(device_id, user)
+        context = device_context(dev, user)
+        context.update(admin_view=True, raw=device_raw(dev, *admin_default("raw")))
+        g.dashboard_page = True
+        return render_template("device.html", **context)
+
+    def device_raw(dev, since, until):
+        identity = telemetry.from_registry(g.db, [dev], time.time(), admin=True)[str(dev["id"])]
+        return telemetry.admin_raw(g.db, dev, identity, since, until, people=registry.people(g.db))
+
+    def admin_default(kind):
+        now = time.time()
+        return now - ADMIN_SPANS[kind][0], now
+
+    def admin_span(kind):
+        """(since, until) Unix from ?from=&to= (ISO 8601 or Unix seconds; default: the last
+        ADMIN_SPANS[kind][0] seconds up to now). ValueError: unreadable, reversed, too long."""
+        default, longest = ADMIN_SPANS[kind]
+        now = time.time()
+        until = parse_time(request.args.get("to"), now)
+        if kind == "incidents" and request.args.get("range") in INCIDENT_RANGES and not request.args.get("from"):
+            default = INCIDENT_RANGES[request.args["range"]]
+        since = parse_time(request.args.get("from"), until - default)
+        if since > until or until - since > longest:
+            raise ValueError("range")
+        return since, until
+
+    def incident_kind():
+        kind = request.args.get("kind") or None
+        if kind is not None and not INCIDENT_KIND_RE.fullmatch(kind):
+            raise ValueError("kind")
+        return kind
 
     # --- the dashboard's JSON API (same login as the pages) ------------------------------------
 
@@ -467,6 +560,62 @@ def create_app(settings=None):
     def api_admin_devices():
         api_user(admin=True)
         return jsonify(admin_dashboard(request.args.get("q", ""), request.args.get("state", "")))
+
+    @app.get("/api/admin/overview")
+    def api_admin_overview():
+        """OVERVIEW: incidents open and recent, the APs' load, rejects of 24 h, data freshness,
+        the collector's jobs."""
+        api_user(admin=True)
+        return jsonify(telemetry.admin_overview(budget(), g.db))
+
+    @app.get("/api/admin/aps")
+    def api_admin_aps():
+        """APS: every AP now with its open incidents and 7 days of rollups."""
+        api_user(admin=True)
+        return jsonify(telemetry.admin_aps(budget(), g.db))
+
+    @app.get("/api/admin/incidents")
+    def api_admin_incidents():
+        """INCIDENTS of ?from=&to= or ?range=7d|30d|90d|1y (default the last 7 days, at most 400)
+        and ?kind=."""
+        api_user(admin=True)
+        try:
+            since, until = admin_span("incidents")
+            kind = incident_kind()
+        except ValueError as e:
+            return json_error("bad_kind" if str(e) == "kind" else "bad_range", 400)
+        return jsonify(telemetry.admin_incidents(g.db, since, until, kind, client=budget()))
+
+    @app.get("/api/admin/auth")
+    def api_admin_auth():
+        """AUTH: RADIUS rejects of ?from=&to= (default 24 h, at most 31 days); ?result=reject is
+        the only result kept house-wide; ?limit= 1-500."""
+        api_user(admin=True)
+        if request.args.get("result", "reject") != "reject":
+            return json_error("bad_result", 400)
+        try:
+            since, until = admin_span("auth")
+        except ValueError:
+            return json_error("bad_range", 400)
+        limit = request.args.get("limit", "")
+        if limit and not (LIMIT_RE.fullmatch(limit) and 1 <= int(limit) <= telemetry.admin.AUTH_LIMIT):
+            return json_error("bad_limit", 400)
+        return jsonify(telemetry.admin_auth(g.db, since, until, int(limit) if limit else telemetry.admin.AUTH_LIMIT,
+                                            client=budget()))
+
+    @app.get("/api/admin/devices/<uuid:device_id>/raw")
+    def api_admin_device_raw(device_id):
+        """RAW: every source row of one device (also a revoked one) in ?from=&to= (default 24 h,
+        at most 31 days)."""
+        api_user(admin=True)
+        dev = registry.device(g.db, device_id)
+        if not dev:
+            return json_error("not_found", 404)
+        try:
+            since, until = admin_span("raw")
+        except ValueError:
+            return json_error("bad_range", 400)
+        return jsonify(device_raw(dev, since, until))
 
     # --- Let's Wi-Fi API (geteduroam apps) ----------------------------------------------------
 
@@ -649,6 +798,22 @@ def _origin(uri):
 def _with_query(uri, **params):
     sep = "&" if "?" in uri else "?"
     return uri + sep + urllib.parse.urlencode({k: v for k, v in params.items() if v})
+
+
+def parse_time(text, default):
+    """Unix seconds from ISO 8601 (a date, or a time with or without an offset: UTC then) or
+    Unix seconds; the default when empty. ValueError for anything else."""
+    if text is None or text.strip() == "":
+        return default
+    text = text.strip()
+    if re.fullmatch(r"\d{1,12}(\.\d+)?", text):
+        return float(text)
+    if len(text) > 40:
+        raise ValueError("time")
+    value = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value.timestamp()
 
 
 def json_error(code, status):

@@ -87,6 +87,7 @@ class Settings:
     # browsers); "" = the dashboard shows the registry's data only (telemetry "off")
     prometheus_url: str = ""
     prometheus_timeout: float = 4.0   # seconds per query
+    timezone: str = "Europe/Berlin"   # the house's days (the history's 1y/all points, the rollups' days)
 
     @property
     def home(self):
@@ -152,7 +153,16 @@ def load():
         home_url=os.environ.get("NETPORTAL_HOME_URL", ""),
         prometheus_url=_prometheus_url(os.environ.get("NETPORTAL_PROMETHEUS_URL", "")),
         prometheus_timeout=float(_env("NETPORTAL_PROMETHEUS_TIMEOUT", "4")),
+        timezone=_timezone(os.environ.get("NETPORTAL_TIMEZONE", "") or "Europe/Berlin"),
     )
+
+
+def _timezone(name):
+    """NETPORTAL_TIMEZONE: an IANA zone name (Europe/Berlin). Whether the image has its data is
+    not checked here: without it the days are UTC days (telemetry.history.zone)."""
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}", name):
+        raise RuntimeError("NETPORTAL_TIMEZONE: %r is not a time zone name" % name)
+    return name
 
 
 def _prometheus_url(url):

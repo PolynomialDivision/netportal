@@ -166,6 +166,33 @@ export function evidence(finding, d, f) {
   return h("span", { class: "evidence" }, text);
 }
 
+/** "estimated": a value or event worked out from other data, with its meaning. */
+export function basisTag(basis, f) {
+  if (basis !== "inferred") return null;
+  return h("span", { class: "basis-tag", title: f.t("basis_inferred_hint") }, f.t("basis_inferred"),
+    h("span", { class: "sr" }, `: ${f.t("basis_inferred_hint")}`));
+}
+
+/** A v2 finding's whole "based on" line (detail page, admins). */
+export function evidenceLine(finding, f, admin = false) {
+  const t = f.t;
+  const { items, window } = f.evidenceItems(finding, admin);
+  if (!items.length && !window && finding.basis !== "inferred") return null;
+  const parts = [];
+  items.forEach(([label, value], i) => parts.push(i ? " · " : " ", `${label} `, h("b", {}, value)));
+  if (window) parts.push(` ${window}`);
+  if (finding.basis === "inferred") parts.push(" ", h("span", { class: "basis-note" }, `(${t("basis_inferred")}: ${t("basis_inferred_hint")})`));
+  else if (finding.basis === "measured" && admin) parts.push(" ", h("span", { class: "basis-note" }, `(${t("basis_measured")})`));
+  return h("p", { class: "finding-basis" }, icon("info"), h("span", {}, h("strong", {}, t("ev_based_on")), parts));
+}
+
+/** The number an admin text's {n} stands for (owners, count, macs_30d). */
+function adminN(finding) {
+  const p = finding.params || {};
+  for (const key of ["owners", "count", "macs_30d", "n"]) if (known(p[key])) return p[key];
+  return null;
+}
+
 export function findings(d, f, { full = false, telemetry = "ok", limit = 0, admin = false } = {}) {
   const t = f.t, texts = (key) => (f.t(key) === key ? null : f.t(key));
   const all = d.diagnostics || [];
@@ -176,13 +203,24 @@ export function findings(d, f, { full = false, telemetry = "ok", limit = 0, admi
       const sev = ["info", "warn", "bad"].includes(finding.severity) ? finding.severity : "info";
       const key = `diag_${finding.code}`;
       // an admin's own texts (with {n} from the params), when the finding has them
-      const n = finding.params?.owners;
-      const adminWhy = admin && n !== undefined && n !== null ? texts(`${key}_admin_why`) : null;
+      const n = adminN(finding);
+      const adminWhy = admin && n !== null ? texts(`${key}_admin_why`) : null;
       const why = full || admin ? (adminWhy ? f.fill(adminWhy, { n }) : texts(`${key}_why`)) : null;
       const todo = (admin && texts(`${key}_admin_do`)) || texts(`${key}_do`);
-      return h("li", { class: `finding sev-${sev}` }, icon(TONE_ICON[sev]), h("div", {},
-        h("p", { class: "finding-title" }, h("span", { class: "sr" }, `${t(`sev_${sev}`)}: `), texts(key) || finding.code, " ", evidence(finding, d, f)),
+      let inline = null;
+      if (finding.evidence) {
+        if (!(full || admin)) {
+          const short = f.evidenceShort(finding);
+          inline = short ? h("span", { class: "evidence" }, short) : null;
+        }
+      } else {
+        inline = evidence(finding, d, f);
+      }
+      return h("li", { class: `finding sev-${sev}${finding.basis === "inferred" ? " inferred" : ""}` }, icon(TONE_ICON[sev]), h("div", {},
+        h("p", { class: "finding-title" }, h("span", { class: "sr" }, `${t(`sev_${sev}`)}: `), texts(key) || finding.code, " ", inline,
+          basisTag(finding.basis, f)),
         why ? h("p", { class: "finding-why" }, why) : null,
+        (full || admin) && finding.evidence ? evidenceLine(finding, f, admin) : null,
         todo ? h("p", { class: "finding-do" }, h("strong", {}, t("diag_do_label")), " ", todo) : null));
     })));
     if (all.length > list.length) {
@@ -191,6 +229,59 @@ export function findings(d, f, { full = false, telemetry = "ok", limit = 0, admi
     }
   } else if (d.state === "online" && telemetry === "ok") {
     box.appendChild(h("p", { class: "all-good" }, icon("check"), t("all_good")));
+  }
+  return box;
+}
+
+// --- how the device connects (telemetry v2) ------------------------------------------------
+
+const MM_ICON = { hardware: "fingerprint", random_fixed: "check", rotating: "refresh" };
+export const EVENT_ICON = { authenticated: "login", auth_rejected: "reject", connected: "wifi", disconnected: "wifi-off",
+  reconnected: "refresh", roamed: "roam", band_changed: "band", mac_changed: "tag", session_ended: "stop", incident: "bolt" };
+
+/** The latest login was rejected: what it means and what to do. */
+export function authAlert(d, f, ctx, admin = false) {
+  const t = f.t, la = d.last_auth;
+  const box = h("div", { class: "auth-alert", "data-part": "auth-alert" });
+  if (!la || la.result !== "reject") return box;
+  const rk = f.reasonKey(la.reason);
+  const todo = t(`rr_${rk}_do`);
+  box.appendChild(h("div", { class: "alert tone-bad" }, icon("reject"), h("div", {},
+    h("p", { class: "alert-title" }, t("la_rejected_title")),
+    h("p", {}, h("strong", {}, t("la_reason")), " ", t(`rr_${rk}`),
+      admin ? [" ", h("span", { class: "mono muted" }, `${la.reason} · ${t(`rr_${rk}_admin`)}`)] : null),
+    todo && todo !== `rr_${rk}_do` ? h("p", {}, h("strong", {}, t("la_do")), " ", f.fill(todo, { ssid: ctx.ssid || "" })) : null,
+    h("p", { class: "alert-when" }, fillNodes(t("la_rejected_when"), { when: timeEl(f, la.at, "when", ctx.now) })))));
+  return box;
+}
+
+/** The Wi-Fi address it uses and the last login; for a changing address how to choose "fixed". */
+export function howConnects(d, f, ctx, { full = false, admin = false } = {}) {
+  const t = f.t;
+  const mode = MM_ICON[d.mac_mode] ? d.mac_mode : null;
+  const la = d.last_auth || null;
+  const box = h("div", { class: "conn", "data-part": "conn" });
+  if (!mode && !la) return box;
+  const lines = [];
+  if (mode) {
+    lines.push(h("div", { class: `conn-line mm-${mode}` }, h("dt", {}, t("mm_label")), h("dd", {}, icon(MM_ICON[mode]), h("span", {},
+      h("strong", {}, t(`mm_${mode}`)),
+      full || mode === "rotating" ? h("span", { class: "sub" }, t(`mm_${mode}_sub`)) : null,
+      admin ? h("span", { class: "sub mono" }, t(`mm_admin_${mode}`),
+        d.macs && d.macs.length ? ` · ${f.fill(t("mm_addresses"), { n: d.macs.length })}` : "") : null))));
+  }
+  if (la) {
+    const rejected = la.result === "reject";
+    lines.push(h("div", { class: `conn-line la-${rejected ? "reject" : "accept"}` }, h("dt", {}, t("la_label")),
+      h("dd", {}, icon(rejected ? "reject" : "login"),
+        h("span", {}, fillNodes(t(rejected ? "la_reject" : "la_accept"), { when: timeEl(f, la.at, "ago", ctx.now) })))));
+  }
+  box.appendChild(h("dl", { class: "conn-lines" }, lines));
+  if (mode === "rotating") {
+    const how = t(`mm_how_${ctx.platform || d.platform}`);
+    const text = how === `mm_how_${ctx.platform || d.platform}` ? t("mm_how_other") : how;
+    box.appendChild(h("div", { class: "advice" }, h("p", {}, h("strong", {}, t("mm_rotating_do")), " ", f.fill(text, { ssid: ctx.ssid || "" })),
+      full ? h("p", { class: "advice-why" }, t("mm_why")) : null));
   }
   return box;
 }
@@ -265,25 +356,74 @@ export function summaryParts(d, f) {
 
 // --- the connection list -------------------------------------------------------------------
 
-export function eventText(e, f) {
+const apOf = (ap) => (ap && typeof ap === "object" ? ap : ap ? { name: ap } : null);
+
+export function eventText(e, f, admin = false) {
   const t = f.t;
-  const where = (ap) => f.room(ap && typeof ap === "object" ? ap : ap ? { name: ap } : null);
+  const where = (ap, band) => (ap ? f.room(apOf(ap)) : "–") + (band ? ` (${f.bandName(band)})` : "");
   const band = (b) => (b ? f.bandName(b) : "–");
-  if (e.kind === "connected") {
-    return [f.fill(t("tl_connected"), { where: where(e.ap) + (e.band ? ` (${band(e.band)})` : "") }),
-      e.duration_s ? h("span", { class: "muted" }, " ", f.fill(t("tl_for"), { duration: f.duration(e.duration_s) })) : null];
+  const dt = e.detail && typeof e.detail === "object" ? e.detail : {};
+  const lasted = (s) => (s ? h("span", { class: "muted" }, " ", f.fill(t("tl_for"), { duration: f.duration(s) })) : null);
+  switch (e.kind) {
+    case "connected": return [f.fill(t("tl_connected"), { where: where(e.ap, e.band) }), lasted(e.duration_s)];
+    case "disconnected": return [t("tl_disconnected"), lasted(e.duration_s)];
+    case "roamed": return [f.fill(t("tl_roamed"), { old: where(e.from_ap), new: where(e.ap) })];
+    case "band_changed": return [f.fill(t("tl_band"), { old: band(e.from_band), new: band(e.band) })];
+    case "authenticated": return [e.ap ? f.fill(t("tl_authenticated"), { where: where(e.ap, e.band) }) : t("tl_authenticated_plain")];
+    case "auth_rejected": {
+      const reason = dt.reason ?? e.reason;
+      const rk = f.reasonKey(reason);
+      return [f.fill(t("tl_auth_rejected"), { reason: t(admin ? `rr_${rk}_admin` : `rr_${rk}`) })];
+    }
+    case "reconnected": return [f.fill(t("tl_reconnected"), { where: where(e.ap, e.band) })];
+    case "mac_changed": return [t("tl_mac_changed"), admin && e.mac ? [" ", h("span", { class: "mono muted" }, f.fill(t("tl_mac_changed_admin"), { mac: e.mac }))] : null];
+    case "session_ended": {
+      const cause = dt.cause ?? dt.terminate_cause ?? e.cause;
+      const st = dt.session_time_s || e.duration_s;
+      return [cause ? f.fill(t("tl_session_ended"), { cause: t(`cause_${f.causeKey(cause)}`) }) : t("tl_session_ended_plain"),
+        cause && admin ? [" ", h("span", { class: "mono muted" }, String(cause))] : null, lasted(st)];
+    }
+    case "incident": {
+      const inc = { kind: dt.incident ?? dt.kind, subject: dt.subject, subject_name: dt.subject_name, ap: apOf(e.ap) };
+      return [f.fill(t("tl_incident"), { what: f.incidentText(inc) }),
+        dt.open ? [" ", h("span", { class: "badge sev-bad" }, t("inc_open"))]
+          : e.duration_s ? h("span", { class: "muted" }, " ", f.fill(t("inc_lasted"), { duration: f.duration(e.duration_s) })) : null];
+    }
+    default: return [t(`tl_kind_${e.kind}`)];
   }
-  if (e.kind === "disconnected") {
-    return [t("tl_disconnected"), e.duration_s ? h("span", { class: "muted" }, " ", f.fill(t("tl_for"), { duration: f.duration(e.duration_s) })) : null];
-  }
-  if (e.kind === "roamed") return [f.fill(t("tl_roamed"), { old: where(e.from_ap), new: where(e.ap) })];
-  if (e.kind === "band_changed") return [f.fill(t("tl_band"), { old: band(e.from_band), new: band(e.band) })];
-  return [e.kind];
 }
 
-export function eventList(events, f, now = Date.now(), limit = 50) {
+/** The plain text of an event (tooltips, the timeline's labels). */
+export function eventPlain(e, f, admin = false) {
+  return eventText(e, f, admin).flat(Infinity).map((n) => (typeof n === "string" ? n : n ? n.textContent : "")).join("");
+}
+
+// which kinds each filter of the event list shows
+export const EVENT_FILTERS = {
+  all: null,
+  wifi: ["connected", "disconnected", "reconnected", "roamed", "band_changed", "session_ended"],
+  logins: ["authenticated", "auth_rejected", "mac_changed"],
+  problems: ["auth_rejected", "disconnected", "session_ended", "incident", "reconnected"],
+};
+
+export function filterEvents(events, filter) {
+  const kinds = EVENT_FILTERS[filter];
+  return kinds ? (events || []).filter((e) => kinds.includes(e.kind)) : (events || []);
+}
+
+export function eventItem(e, f, now = Date.now(), admin = false) {
+  const t = f.t;
+  const srcs = e.sources && e.sources.length ? e.sources : e.source ? [e.source] : [];
+  const src = (s) => { const key = `${admin ? "src_admin_" : "src_"}${s}`; const v = t(key); return v === key ? s : v; };
+  return h("li", { class: `ev ev-${e.kind}${e.basis === "inferred" ? " ev-inferred" : ""}` },
+    h("span", { class: "ev-icon" }, icon(EVENT_ICON[e.kind] || "info")),
+    h("span", { class: "ev-time" }, timeEl(f, e.at, "when", now)),
+    h("span", { class: "ev-text" }, eventText(e, f, admin), " ", basisTag(e.basis, f),
+      srcs.length ? h("span", { class: "ev-src" }, `${t("ev_sources")} ${srcs.map(src).join(", ")}`) : null));
+}
+
+export function eventList(events, f, now = Date.now(), limit = 50, admin = false) {
   const sorted = [...(events || [])].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, limit);
   if (!sorted.length) return [h("li", { class: "ev ev-none" }, f.t("tl_none"))];
-  return sorted.map((e) => h("li", { class: `ev ev-${e.kind}` },
-    h("span", { class: "ev-time" }, timeEl(f, e.at, "when", now)), h("span", { class: "ev-text" }, eventText(e, f))));
+  return sorted.map((e) => eventItem(e, f, now, admin));
 }

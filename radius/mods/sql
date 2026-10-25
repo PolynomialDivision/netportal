@@ -1,5 +1,11 @@
-# The device registry (PostgreSQL). Role "radius": SELECT on radius_cert, write radius_session.
-# Only the %{sql:...} expansion is used (no RADIUS user or accounting tables).
+# The device registry (PostgreSQL) for the ACCESS DECISION: only the %{sql:...} expansions of
+# sites/check-eap-tls (SELECT on the view radius_cert; no RADIUS user or accounting tables). The
+# logging calls (radius_login, radius_reject, radius_accounting) go through their own instance
+# and pool, mods/sql_log, so no log write can take a connection the decision needs. Role
+# "radius": SELECT on radius_cert and EXECUTE on the logging functions (netportal
+# migrations/grants.sql), no table rights. Values from requests are escaped with rlm_sql's default (auto_escape
+# off: every character outside safe_characters becomes =XX), so no quote reaches the SQL text.
+# The role has statement_timeout 2s (grants.sql): a slow registry cannot hold up an answer.
 sql {
 	dialect = "postgresql"
 	driver = "rlm_sql_${dialect}"
@@ -10,6 +16,11 @@ sql {
 	radius_db = "$ENV{RADIUS_DB_NAME}"
 	read_clients = no
 	delete_stale_sessions = no
+	# rlm_sql_postgresql passes this to libpq as connect_timeout (without it a database that is
+	# unreachable, not refusing, holds every request in a TCP connect for minutes: the access
+	# points then get no answer at all, also for accounting; found by the integration test's
+	# outage case).
+	query_timeout = 3
 	postgresql {
 		send_application_name = yes
 	}

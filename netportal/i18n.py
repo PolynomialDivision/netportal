@@ -99,7 +99,7 @@ TEXT = {
         "owner": "Owner",
         "no_access": "Your account has no access to the house Wi-Fi.",
         "error": "Something went wrong. Please try again.",
-        "privacy": "Stored: the device's name, when it was added and last connected. Shown from the house's network monitoring (kept 90 days): where and when your devices were connected, their signal and how much data they moved. Never: what you do online. You see only your devices; the house admins see everyone's, to help with Wi-Fi problems.",
+        "privacy": "Stored: the device's name, when it was added, its Wi-Fi logins and connections with the Wi-Fi addresses it used (kept 400 days), and a short daily summary (signal, time online, data amount). From the house's network monitoring: where and when your devices were connected, their signal and how much data they moved. Never: what you do online. You see only your devices; the house admins see everyone's, to help with Wi-Fi problems.",
         "house_nav": "House",
     },
     "de": {
@@ -196,7 +196,7 @@ TEXT = {
         "owner": "Besitzer",
         "no_access": "Dein Konto hat keinen Zugang zum Haus-WLAN.",
         "error": "Etwas ist schiefgegangen. Bitte versuche es noch einmal.",
-        "privacy": "Gespeichert: Name des Geräts, wann es hinzugefügt und zuletzt verbunden wurde. Aus der Netzüberwachung des Hauses angezeigt (90 Tage aufbewahrt): wo und wann deine Geräte verbunden waren, ihr Empfang und wie viele Daten sie übertragen haben. Nie: was du im Netz machst. Du siehst nur deine Geräte; die Haus-Admins sehen alle, um bei WLAN-Problemen zu helfen.",
+        "privacy": "Gespeichert: Name des Geräts, wann es hinzugefügt wurde, seine WLAN-Anmeldungen und Verbindungen mit den benutzten WLAN-Adressen (400 Tage aufbewahrt) und eine kurze Tageszusammenfassung (Empfang, Online-Zeit, Datenmenge). Aus der Netzüberwachung des Hauses: wo und wann deine Geräte verbunden waren, ihr Empfang und wie viele Daten sie übertragen haben. Nie: was du im Netz machst. Du siehst nur deine Geräte; die Haus-Admins sehen alle, um bei WLAN-Problemen zu helfen.",
         "house_nav": "Haus",
     },
     "uk": {
@@ -293,7 +293,7 @@ TEXT = {
         "owner": "Власник",
         "no_access": "Ваш акаунт не має доступу до домашнього Wi-Fi.",
         "error": "Щось пішло не так. Спробуйте ще раз.",
-        "privacy": "Зберігається: назва пристрою, коли його додано і востаннє підключено. З моніторингу мережі будинку (зберігається 90 днів) показано: де і коли ваші пристрої були підключені, їхній сигнал і скільки даних вони передали. Ніколи: що ви робите в мережі. Ви бачите лише свої пристрої; адміністратори будинку бачать усі, щоб допомагати з проблемами Wi‑Fi.",
+        "privacy": "Зберігається: назва пристрою, коли його додано, його входи й підключення до Wi‑Fi з використаними адресами Wi‑Fi (400 днів) і короткий денний підсумок (сигнал, час у мережі, обсяг даних). З моніторингу мережі будинку: де і коли ваші пристрої були підключені, їхній сигнал і скільки даних вони передали. Ніколи: що ви робите в мережі. Ви бачите лише свої пристрої; адміністратори будинку бачать усі, щоб допомагати з проблемами Wi‑Fi.",
         "house_nav": "Будинок",
     },
 }
@@ -976,11 +976,1341 @@ DASHBOARD_TEXT = {
 for _lang, _texts in DASHBOARD_TEXT.items():
     TEXT[_lang].update(_texts)
 
+# Telemetry v2 (docs/TELEMETRY.md): how a device connects (its Wi-Fi address), its logins,
+# the merged timeline with its sources and basis, house incidents, the day bars, and the admin
+# pages (overview, access points, incidents, raw data). Codes from the backend have one text
+# per code here (see the tuples below; tests/test_dashboard_pages.py checks every one).
+TELEMETRY_TEXT = {
+    "en": {
+        # how the device connects: its Wi-Fi address (mac_mode)
+        "mm_label": "Wi-Fi address",
+        "mm_hardware": "The device's own address",
+        "mm_hardware_sub": "The same in every network. Works fine here.",
+        "mm_random_fixed": "Private address that stays the same",
+        "mm_random_fixed_sub": "Good: private towards other networks, and the house recognises the device.",
+        "mm_rotating": "Private address that keeps changing",
+        "mm_rotating_sub": "Each time the house sees a “new” device: the history breaks into pieces and problems are hard to find.",
+        "mm_rotating_do": "Choose “Fixed” for this Wi-Fi:",
+        "mm_how_apple": "Settings → Wi-Fi → ⓘ next to {ssid} → Private Wi-Fi Address → Fixed.",
+        "mm_how_apple-mac": "System Settings → Wi-Fi → Details… next to {ssid} → Private Wi-Fi address → Fixed.",
+        "mm_how_android": "Settings → Wi-Fi → {ssid} → Privacy → “Use randomised MAC”. If developer options are on, switch off “non-persistent MAC randomisation” there.",
+        "mm_how_other": "In the Wi-Fi settings for {ssid}, choose a private address that stays the same (often called “Fixed”), not one that changes. On Windows: Random hardware addresses → On, not “Change daily”.",
+        "mm_why": "A fixed private address still keeps you private elsewhere: it is fixed for this Wi-Fi only.",
+        "mm_admin_hardware": "hardware MAC (universally administered)",
+        "mm_admin_random_fixed": "randomised MAC, stable per network",
+        "mm_admin_rotating": "randomised MAC, rotating",
+        "mm_addresses": "{n} addresses seen",
+        # the last login (RADIUS)
+        "la_label": "Last login",
+        "la_accept": "Accepted {when}",
+        "la_reject": "Rejected {when}",
+        "la_rejected_title": "The house Wi-Fi is turning this device away",
+        "la_rejected_when": "Last attempt {when}.",
+        "la_reason": "Reason:",
+        "la_do": "What you can do:",
+        # why a login was rejected (radius_auth.reason): plain words, what to do, and the admins' text
+        "rr_ok": "accepted",
+        "rr_ok_do": "",
+        "rr_ok_admin": "Access-Accept",
+        "rr_unknown_cert": "the device uses a key the house does not know",
+        "rr_unknown_cert_do": "This is usually an old Wi-Fi profile. Remove the house Wi-Fi profile from the device, then add the device here again.",
+        "rr_unknown_cert_admin": "unknown certificate serial (not in the registry)",
+        "rr_revoked": "the device was removed here, so its key no longer works",
+        "rr_revoked_do": "If you want to use it again, remove the old Wi-Fi profile from the device and add the device here anew.",
+        "rr_revoked_admin": "certificate revoked (device removed)",
+        "rr_expired": "the device's key has expired",
+        "rr_expired_do": "Renew the key here and install the new profile on the device.",
+        "rr_expired_admin": "certificate expired",
+        "rr_retired": "the device still uses its old key, which was replaced by a newer one",
+        "rr_retired_do": "Install the newest profile on the device (open this page on it and renew), then remove the old one.",
+        "rr_retired_admin": "superseded certificate (retired_after passed)",
+        "rr_no_cert": "the device did not send a key",
+        "rr_no_cert_do": "The Wi-Fi profile on the device is incomplete. Remove it and install it again from this page.",
+        "rr_no_cert_admin": "no client certificate in the EAP-TLS handshake",
+        "rr_bad_chain": "the device sent a key that is not from the house",
+        "rr_bad_chain_do": "Remove the house Wi-Fi from the device and install the profile from this page again.",
+        "rr_bad_chain_admin": "certificate chain not issued by the house CA",
+        "rr_not_eap": "the device tried to log in with a password instead of its key",
+        "rr_not_eap_do": "Choose the installed profile for {ssid}, not a network you set up by hand. If in doubt, forget the network and install the profile again.",
+        "rr_not_eap_admin": "not EAP-TLS (other EAP method or none)",
+        "rr_db_error": "the portal could not check the key (a fault on the house's side)",
+        "rr_db_error_do": "Nothing to change on the device. If it keeps happening, tell the house admins.",
+        "rr_db_error_admin": "registry lookup failed (database error)",
+        "rr_other": "an unexpected error during the login",
+        "rr_other_do": "Switch the device's Wi-Fi off and on. If it keeps happening, tell the house admins.",
+        "rr_other_admin": "other reject (see the RADIUS log)",
+        # measured vs estimated, the sources, the evidence of a finding
+        "basis_measured": "measured",
+        "basis_inferred": "estimated",
+        "basis_measured_hint": "Reported directly by the access points or the login server.",
+        "basis_inferred_hint": "Worked out from other data, for example a gap in the measurements. It is likely, not certain.",
+        "ev_based_on": "Based on:",
+        "ev_over": "over the last {duration}",
+        "ev_sources": "Source:",
+        "src_radius_auth": "login server",
+        "src_radius_acct": "session records",
+        "src_unifi_syslog": "access point log",
+        "src_prometheus": "Wi-Fi measurements",
+        "src_device_day": "daily summary",
+        "src_ap_day": "daily summary",
+        "src_derived": "worked out",
+        "src_incident": "house monitoring",
+        "src_registry": "device registry",
+        "src_device_mac": "address history",
+        "src_admin_device_mac": "device_mac",
+        "src_admin_radius_auth": "RADIUS auth",
+        "src_admin_radius_acct": "RADIUS accounting",
+        "src_admin_unifi_syslog": "UniFi system log",
+        "src_admin_prometheus": "Prometheus (unpoller)",
+        "src_admin_device_day": "device_day rollup",
+        "src_admin_ap_day": "ap_day rollup",
+        "src_admin_derived": "derived",
+        "src_admin_incident": "incident",
+        "src_admin_registry": "registry",
+        "evk_signal_dbm": "signal",
+        "evk_snr_db": "signal above noise",
+        "evk_noise_dbm": "background noise",
+        "evk_retry_ratio": "sent again",
+        "evk_tx_attempts_per_s": "send attempts",
+        "evk_channel_util": "channel busy",
+        "evk_channel": "channel",
+        "evk_link_rx_bps": "radio link rate",
+        "evk_throughput_bps": "data flowing",
+        "evk_roams_1h": "access point changes",
+        "evk_roams_1h_measured": "reported by the access points",
+        "evk_reconnects_24h": "new connections",
+        "evk_disconnects_24h_measured": "drop-outs reported by the access points",
+        "evk_causes": "causes",
+        "evk_bands_7d": "bands used",
+        "evk_associated_s": "connected for",
+        "evk_count_24h": "rejected logins",
+        "evk_reasons": "reasons",
+        "evk_last_at": "last attempt",
+        "evk_last_accept": "last accepted login",
+        "evk_expires": "valid until",
+        "evk_days_left": "remaining",
+        "evk_macs_30d": "addresses",
+        "evk_ap": "access point",
+        "evk_clients": "devices on it",
+        "evk_band": "band",
+        "evk_aps": "average signal",
+        "evk_incident": "house problem",
+        "evk_disconnects": "drop-out at",
+        "evk_age_s": "data age",
+        "evk_last_seen": "last seen",
+        "evk_owners": "other owners",
+        "evk_limit": "limit",
+        "ev_last_1h": "in the last hour",
+        "ev_last_24h": "in the last 24 hours",
+        "ev_last_7d": "in the last 7 days",
+        "ev_last_30d": "in the last 30 days",
+        "days_n": "{n} days",
+        "times_n": "{n} times",
+        # the merged timeline
+        "tl_authenticated": "Logged in at {where}",
+        "tl_authenticated_plain": "Logged in",
+        "tl_auth_rejected": "Login rejected: {reason}",
+        "tl_reconnected": "Connected again: {where}",
+        "tl_mac_changed": "Started using another Wi-Fi address",
+        "tl_mac_changed_admin": "New MAC {mac}",
+        "tl_session_ended": "Session ended: {cause}",
+        "tl_session_ended_plain": "Session ended",
+        "tl_incident": "House problem: {what}",
+        "tl_incident_ended": "House problem over: {what}",
+        "tl_kind_authenticated": "Login",
+        "tl_kind_auth_rejected": "Login rejected",
+        "tl_kind_connected": "Connected",
+        "tl_kind_disconnected": "Disconnected",
+        "tl_kind_reconnected": "Reconnected",
+        "tl_kind_roamed": "Changed access point",
+        "tl_kind_band_changed": "Changed band",
+        "tl_kind_mac_changed": "New Wi-Fi address",
+        "tl_kind_session_ended": "Session ended",
+        "tl_kind_incident": "House problem",
+        "tl_inferred_legend": "estimated (worked out from gaps in the data)",
+        "tl_measured_legend": "measured",
+        "tl_filter": "Show",
+        "tl_filter_all": "everything",
+        "tl_filter_wifi": "connections only",
+        "tl_filter_logins": "logins only",
+        "tl_filter_problems": "problems only",
+        "tl_window_note": "The list of connections covers the last {days} days; the charts show the whole span from the daily summaries.",
+        # why a session ended (RADIUS Acct-Terminate-Cause, RFC 2866 / 3580): plain words
+        "cause_user_request": "the device left the Wi-Fi (Wi-Fi off, moved away or asleep)",
+        "cause_lost_carrier": "the connection was lost (signal gone)",
+        "cause_lost_service": "the access point lost its connection",
+        "cause_idle_timeout": "no data for a long time",
+        "cause_session_timeout": "the regular re-login was due",
+        "cause_admin_reset": "disconnected by the house admins",
+        "cause_admin_reboot": "the access point was restarted by the house admins",
+        "cause_port_error": "a fault at the access point",
+        "cause_nas_error": "a fault at the access point",
+        "cause_nas_request": "ended by the access point",
+        "cause_nas_reboot": "the access point restarted",
+        "cause_port_unneeded": "the connection was no longer needed",
+        "cause_port_preempted": "the access point made room for another device",
+        "cause_port_suspended": "the connection was paused",
+        "cause_service_unavailable": "the service was not available",
+        "cause_callback": "callback",
+        "cause_user_error": "a login error on the device",
+        "cause_host_request": "ended by the device",
+        "cause_supplicant_restart": "the device restarted its Wi-Fi login",
+        "cause_reauthentication_failure": "the regular re-login failed",
+        "cause_port_reinitialized": "the access point reset the connection",
+        "cause_port_administratively_disabled": "switched off by the house admins",
+        "cause_unknown": "unknown",
+        # house incidents
+        "inc_internet_down": "Internet down",
+        "inc_internet_degraded": "Internet slow or patchy",
+        "inc_router_down": "Router not reachable",
+        "inc_dns_down": "Website names (DNS) not working",
+        "inc_ap_down": "Access point offline",
+        "inc_ap_restarted": "Access point restarted",
+        "inc_switch_down": "Network switch offline",
+        "inc_switch_port_down": "Switch port down",
+        "inc_unifi_data_stale": "Wi-Fi data not updating",
+        "inc_radius_down": "Login server not answering",
+        "inc_other": "Network problem",
+        "inc_house_wide": "whole house",
+        "inc_open": "ongoing",
+        "inc_since": "since {when}",
+        "inc_span": "{start} – {end}",
+        "inc_lasted": "lasted {duration}",
+        "inc_affected": "Devices dropped out: {n}",
+        "inc_affected_list": "Dropped out:",
+        "inc_affected_none": "No device dropped out.",
+        "inc_none": "No incidents in this time span.",
+        "inc_open_none": "No open incidents.",
+        "inc_detail": "Details",
+        # findings added by telemetry v2
+        "diag_auth_failures": "Logins are being rejected",
+        "diag_auth_failures_why": "The house Wi-Fi turned this device away several times recently, so it cannot connect.",
+        "diag_auth_failures_do": "See the reason under “Last login”. Usually it helps to remove the house Wi-Fi profile from the device and add the device here again.",
+        "diag_auth_failures_admin_why": "RADIUS rejects for this device's certificate or MACs ({n} recently).",
+        "diag_auth_failures_admin_do": "Check the reason in the raw data. unknown_cert or retired usually means an old profile is still installed.",
+        "diag_cert_expiring": "The device's key expires soon",
+        "diag_cert_expiring_why": "Each device has its own Wi-Fi key with an end date. After that date the device cannot connect.",
+        "diag_cert_expiring_do": "Press “Renew now” and install the new profile on the device.",
+        "diag_cert_expired": "The device's key has expired",
+        "diag_cert_expired_why": "The Wi-Fi key of this device is past its end date, so the house Wi-Fi turns it away.",
+        "diag_cert_expired_do": "Renew the key here and install the new profile on the device.",
+        "diag_rotating_mac": "Its Wi-Fi address keeps changing",
+        "diag_rotating_mac_why": "The device uses a new private address again and again. The house then sees a “new” device each time, so its history breaks into pieces and problems are harder to find.",
+        "diag_rotating_mac_do": "Set the private address for this Wi-Fi to “Fixed” (see “Wi-Fi address”). It stays private towards all other networks.",
+        "diag_rotating_mac_admin_why": "Rotating randomised MACs ({n} addresses): history is only per address window.",
+        "diag_ap_overloaded": "The access point is very busy",
+        "diag_ap_overloaded_why": "Many devices share the access point this device uses, or its radio channel is almost always busy. Everyone on it gets slower.",
+        "diag_ap_overloaded_do": "Nothing to change on your device. Another access point nearby may be calmer. The house admins see this too.",
+        "diag_ap_overloaded_admin_do": "Check the AP's channel plan and client load on the access point page; consider another channel or an extra AP.",
+        "diag_poor_coverage": "Weak Wi-Fi where this device is",
+        "diag_poor_coverage_why": "The signal is weak at every access point this device uses. There is probably a gap in the coverage at its place.",
+        "diag_poor_coverage_do": "Try a spot closer to an access point. If this is where you usually are (your room, your desk), tell the house admins: an access point may be missing there.",
+        "diag_poor_coverage_admin_do": "Coverage gap: weak at every AP the device uses. Check AP placement or transmit power for that area.",
+        "diag_incident_correlated": "Dropped out during a house network problem",
+        "diag_incident_correlated_why": "The device lost the connection at the same time as a problem in the house network. The cause was most likely not the device.",
+        "diag_incident_correlated_do": "Nothing to do on the device. The house admins see the problem too.",
+        "diag_incident_correlated_admin_why": "A disconnect within 2 minutes of an incident of its AP, switch, router or the internet (inferred).",
+        # history ranges and day bars
+        "range_90d": "90 days",
+        "range_1y": "1 year",
+        "range_all": "All",
+        "ch_days_note": "One bar per day, from the daily summaries.",
+        "ch_signal_sub_day": "Average per day in dBm. Closer to 0 is better.",
+        "ch_quality_sub_day": "Average per day, 0 to 100.",
+        "ch_traffic_sub_day": "Received and sent per day.",
+        "ch_link_sub_day": "Average per day. Not the internet speed.",
+        "ch_online_sub_day": "Share of each day the device was connected.",
+        "ch_online_day_summary": "on average connected {pct} of each day",
+        "ch_traffic_day_summary": "{total} in total, most on {day} ({max})",
+        "ch_weakest": "weakest tenth",
+        "ch_average": "average",
+        "ch_retries": "Sent again",
+        "ch_retries_sub": "Share of data the device had to send twice. A few percent is normal.",
+        "ch_snr": "Signal above noise",
+        "ch_snr_sub": "In dB: 25 and more is good.",
+        "day_total": "{down} received · {up} sent",
+        # about this device (identity, sources)
+        "dt_macs": "Wi-Fi addresses",
+        "dt_mac_now": "in use",
+        "dt_mac_private": "private",
+        "dt_mac_hardware": "hardware",
+        "dt_mac_seen": "{first} – {last}",
+        "dt_sources": "Data from",
+        "dt_last_auth": "Last login",
+        "dt_mac_mode": "Address type",
+        # admin: tabs and the overview
+        "adm_tabs": "Admin sections",
+        "adm_tab_overview": "Overview",
+        "adm_tab_aps": "Access points",
+        "adm_tab_incidents": "Incidents",
+        "adm_tab_devices": "Devices",
+        "ov_title": "House Wi-Fi at a glance",
+        "ov_incidents": "Incidents",
+        "ov_open": "Open now",
+        "ov_recent": "Recently",
+        "ov_all_incidents": "All incidents",
+        "ov_aps": "Access points",
+        "ov_all_aps": "Details per access point",
+        "ov_auth": "Rejected logins (24 hours)",
+        "ov_auth_none": "No rejected logins in the last 24 hours.",
+        "ov_auth_total": "{n} rejected",
+        "ov_auth_unknown": "unknown device",
+        "ov_auth_repeats": "×{n}",
+        "ov_fresh": "Data and collectors",
+        "ov_fresh_intro": "How fresh each source is, and whether the collector's jobs run.",
+        "ov_devices": "All devices",
+        "fresh_age": "{age} old",
+        "fresh_none": "no data yet",
+        "fresh_ok": "fresh",
+        "fresh_stale": "stale",
+        "job_unifi_events": "UniFi events",
+        "job_incidents": "Incidents",
+        "job_rollup": "Daily rollups",
+        "job_prune": "Retention (prune)",
+        "job_offboarding": "Offboarding",
+        "job_ok": "OK",
+        "job_failed": "Failed",
+        "job_never": "Never run",
+        "job_running": "Running",
+        "job_late": "Overdue",
+        "th_job": "Job",
+        "th_state": "State",
+        "th_last_success": "Last success",
+        "th_last_attempt": "Last attempt",
+        "th_duration": "Duration",
+        "th_error": "Error",
+        "th_source": "Source",
+        "th_latest": "Latest data",
+        # admin: access points
+        "ap_state_up": "Online",
+        "ap_state_down": "Offline",
+        "ap_state_unknown": "Unknown",
+        "ap_clients": "{n} devices",
+        "ap_clients_label": "Devices",
+        "ap_load_label": "Channel busy",
+        "ap_weak_label": "Weak signal",
+        "ap_weak": "{pct} of devices weak",
+        "ap_restarts_label": "Restarts",
+        "ap_restarts": "{n} in 24 h",
+        "ap_uptime": "up {duration}",
+        "ap_radio": "{band} · ch {channel}",
+        "ap_warn_overloaded": "Overloaded",
+        "ap_warn_busy_channel": "Busy channel",
+        "ap_warn_poor_coverage": "Weak coverage",
+        "ap_warn_restarted": "Restarted",
+        "ap_warn_down": "Offline",
+        "ap_warn_uplink": "Slow uplink",
+        "aps_title": "Access points",
+        "aps_intro": "Every access point with its load now and per day. Weak signal = below −75 dBm.",
+        "aps_search_ph": "Name, room or MAC",
+        "aps_sort_name": "Name",
+        "aps_sort_clients": "Devices (most first)",
+        "aps_sort_load": "Channel busy (most first)",
+        "aps_sort_weak": "Weak signal (most first)",
+        "aps_none": "No access point matches.",
+        "aps_empty": "No access point data yet.",
+        "aps_days": "Per day",
+        "ch_ap_clients": "Devices",
+        "ch_ap_clients_sub": "Average per day; the line marks the peak.",
+        "ch_ap_util": "Channel busy",
+        "ch_ap_util_sub": "Average per day and radio.",
+        "ch_ap_weak": "Weak-signal share",
+        "ch_ap_weak_sub": "Share of device-minutes below −75 dBm.",
+        "ch_ap_restarts": "Restarts and downtime",
+        "ch_ap_restarts_sub": "Restarts per day.",
+        "ap_peak": "peak",
+        "ap_down_for": "down {duration}",
+        # admin: incidents
+        "inc_title": "Incidents",
+        "inc_intro": "Problems of the house network, from the monitoring. Affected devices are those that dropped out at the time.",
+        "inc_filter_kind": "Kind",
+        "inc_filter_state": "State",
+        "inc_state_open": "ongoing",
+        "inc_state_closed": "over",
+        "inc_filter_range": "Time span",
+        "inc_shown": "{shown} of {total} shown",
+        "inc_chart": "Incidents over time",
+        "th_kind": "Kind",
+        "th_scope": "Where",
+        "th_started": "Started",
+        "th_ended": "Ended",
+        "th_devices": "Devices",
+        "th_basis": "Basis",
+        # admin: raw data of one device
+        "raw_title": "Raw data",
+        "raw_intro": "Every record the sources hold for this device, newest first, in the house's time.",
+        "raw_tab_auth": "RADIUS logins",
+        "raw_tab_acct": "Accounting sessions",
+        "raw_tab_events": "UniFi events",
+        "raw_tab_macs": "MAC windows",
+        "raw_load": "Load raw data",
+        "raw_loading": "Loading the raw data…",
+        "raw_error": "The raw data could not be loaded.",
+        "raw_empty": "No records in this time span.",
+        "raw_span": "From {start} to {end}",
+        "raw_truncated": "Only the newest {n} records are shown.",
+        "raw_conflict": "also claimed by {n} other devices",
+        "th_at": "Time",
+        "th_result": "Result",
+        "th_reason": "Reason",
+        "th_device": "Device",
+        "th_mac": "MAC",
+        "th_bssid": "BSSID",
+        "th_ssid": "SSID",
+        "th_nas": "NAS",
+        "th_session": "Session",
+        "th_link": "Linked by",
+        "th_ip": "IP",
+        "th_stopped": "Stopped",
+        "th_session_time": "Session time",
+        "th_down": "Down",
+        "th_up": "Up",
+        "th_cause": "Terminate cause",
+        "th_ap": "AP",
+        "th_from_ap": "From AP",
+        "th_radio": "Radio",
+        "th_channel": "Channel",
+        "th_rssi": "RSSI",
+        "th_first_seen": "First seen",
+        "th_last_seen": "Last seen",
+        "th_logins": "Logins",
+        "th_randomized": "Randomised",
+        "th_rx": "rx",
+        "th_tx": "tx",
+        "th_conflict": "Conflict",
+        "radio_ng": "2.4 GHz",
+        "radio_na": "5 GHz",
+        "radio_6e": "6 GHz",
+        "res_accept": "accepted",
+        "res_reject": "rejected",
+        "yes": "yes",
+        "no": "no",
+        "ap_restarts_7d": "{n} in 7 days",
+        "ap_weak_count": "{n} devices below −75 dBm",
+        "ap_uplink": "{n} Mbit/s",
+        "ov_unavailable": "Not available right now.",
+        "ov_auth_spread": "{devices} devices · {macs} addresses",
+        "fresh_wifi": "Wi-Fi data (unpoller)",
+        "fresh_prometheus": "Prometheus",
+        "fresh_jobs": "Collector jobs",
+        "fresh_state_ok": "answering",
+        "fresh_state_unavailable": "not answering",
+        "fresh_state_off": "not configured",
+        "fresh_jobs_ok": "all OK",
+        "fresh_jobs_failed": "at least one failed",
+        "fresh_jobs_none": "none yet",
+        "fresh_oldest": "oldest success {age} ago",
+        "raw_tab_days": "Daily rollups",
+        "raw_tab_incidents": "Incidents",
+        "th_day": "Day",
+        "th_online": "Online",
+        "th_signal": "Signal",
+        "th_health": "Quality",
+        "th_roams": "Roams",
+        "th_reconnects": "Reconnects",
+        "th_disconnects": "Disconnects",
+        "th_macs": "MACs",
+        "th_auth_ok": "Logins",
+        "th_auth_failed": "Rejected",
+        "th_current": "In use",
+        "th_window": "Window",
+        "th_subject": "Subject",
+        "ap_uplink_label": "Uplink",
+        "ap_clients_house": "{n} on the house Wi-Fi",
+        "ap_signal_label": "Average signal",
+        "ap_open_incidents": "Open incidents",
+    },
+    "de": {
+        "mm_label": "WLAN-Adresse",
+        "mm_hardware": "Die eigene Adresse des Geräts",
+        "mm_hardware_sub": "In jedem Netz dieselbe. Funktioniert hier gut.",
+        "mm_random_fixed": "Private Adresse, die gleich bleibt",
+        "mm_random_fixed_sub": "Gut: privat gegenüber anderen Netzen, und das Haus erkennt das Gerät wieder.",
+        "mm_rotating": "Private Adresse, die sich ständig ändert",
+        "mm_rotating_sub": "Das Haus sieht jedes Mal ein „neues“ Gerät: Der Verlauf zerfällt in Stücke, Probleme sind schwer zu finden.",
+        "mm_rotating_do": "Wähle für dieses WLAN „Fest“:",
+        "mm_how_apple": "Einstellungen → WLAN → ⓘ neben {ssid} → Private WLAN-Adresse → Fest.",
+        "mm_how_apple-mac": "Systemeinstellungen → WLAN → Details … neben {ssid} → Private WLAN-Adresse → Fest.",
+        "mm_how_android": "Einstellungen → WLAN → {ssid} → Datenschutz → „Zufällige MAC-Adresse verwenden“. Sind die Entwickleroptionen an, dort „Nicht persistente MAC-Randomisierung“ ausschalten.",
+        "mm_how_other": "Wähle in den WLAN-Einstellungen für {ssid} eine private Adresse, die gleich bleibt (oft „Fest“ genannt), keine, die wechselt. Unter Windows: Zufällige Hardwareadressen → Ein, nicht „Täglich ändern“.",
+        "mm_why": "Eine feste private Adresse schützt dich in anderen Netzen genauso: Sie ist nur für dieses WLAN fest.",
+        "mm_admin_hardware": "Hardware-MAC (global verwaltet)",
+        "mm_admin_random_fixed": "zufällige MAC, pro Netz stabil",
+        "mm_admin_rotating": "zufällige MAC, wechselnd",
+        "mm_addresses": "{n} Adressen gesehen",
+        "la_label": "Letzte Anmeldung",
+        "la_accept": "Angenommen {when}",
+        "la_reject": "Abgelehnt {when}",
+        "la_rejected_title": "Das Haus-WLAN weist dieses Gerät ab",
+        "la_rejected_when": "Letzter Versuch {when}.",
+        "la_reason": "Grund:",
+        "la_do": "Was du tun kannst:",
+        "rr_ok": "angenommen",
+        "rr_ok_do": "",
+        "rr_ok_admin": "Access-Accept",
+        "rr_unknown_cert": "das Gerät benutzt einen Schlüssel, den das Haus nicht kennt",
+        "rr_unknown_cert_do": "Meist ist das ein altes WLAN-Profil. Entferne das Profil des Haus-WLANs vom Gerät und füge das Gerät hier neu hinzu.",
+        "rr_unknown_cert_admin": "unbekannte Zertifikats-Seriennummer (nicht im Register)",
+        "rr_revoked": "das Gerät wurde hier entfernt, sein Schlüssel gilt nicht mehr",
+        "rr_revoked_do": "Wenn du es wieder nutzen willst: altes WLAN-Profil vom Gerät entfernen und das Gerät hier neu hinzufügen.",
+        "rr_revoked_admin": "Zertifikat widerrufen (Gerät entfernt)",
+        "rr_expired": "der Schlüssel des Geräts ist abgelaufen",
+        "rr_expired_do": "Erneuere den Schlüssel hier und installiere das neue Profil auf dem Gerät.",
+        "rr_expired_admin": "Zertifikat abgelaufen",
+        "rr_retired": "das Gerät benutzt noch seinen alten Schlüssel, der durch einen neueren ersetzt wurde",
+        "rr_retired_do": "Installiere das neueste Profil auf dem Gerät (diese Seite darauf öffnen und erneuern) und entferne das alte.",
+        "rr_retired_admin": "abgelöstes Zertifikat (retired_after überschritten)",
+        "rr_no_cert": "das Gerät hat keinen Schlüssel geschickt",
+        "rr_no_cert_do": "Das WLAN-Profil auf dem Gerät ist unvollständig. Entferne es und installiere es von dieser Seite neu.",
+        "rr_no_cert_admin": "kein Client-Zertifikat im EAP-TLS-Handshake",
+        "rr_bad_chain": "das Gerät hat einen Schlüssel geschickt, der nicht vom Haus stammt",
+        "rr_bad_chain_do": "Entferne das Haus-WLAN vom Gerät und installiere das Profil von dieser Seite neu.",
+        "rr_bad_chain_admin": "Zertifikatskette nicht von der Haus-CA",
+        "rr_not_eap": "das Gerät wollte sich mit einem Passwort statt mit seinem Schlüssel anmelden",
+        "rr_not_eap_do": "Wähle das installierte Profil für {ssid}, kein von Hand eingerichtetes Netz. Im Zweifel das Netz vergessen und das Profil neu installieren.",
+        "rr_not_eap_admin": "kein EAP-TLS (andere EAP-Methode oder keine)",
+        "rr_db_error": "das Portal konnte den Schlüssel nicht prüfen (ein Fehler auf Seiten des Hauses)",
+        "rr_db_error_do": "Am Gerät ist nichts zu ändern. Wenn es öfter passiert, sag den Haus-Admins Bescheid.",
+        "rr_db_error_admin": "Registerabfrage fehlgeschlagen (Datenbankfehler)",
+        "rr_other": "ein unerwarteter Fehler bei der Anmeldung",
+        "rr_other_do": "Schalte das WLAN des Geräts aus und wieder ein. Wenn es öfter passiert, sag den Haus-Admins Bescheid.",
+        "rr_other_admin": "sonstige Ablehnung (siehe RADIUS-Log)",
+        "basis_measured": "gemessen",
+        "basis_inferred": "geschätzt",
+        "basis_measured_hint": "Direkt von den Access Points oder dem Anmeldeserver gemeldet.",
+        "basis_inferred_hint": "Aus anderen Daten abgeleitet, zum Beispiel aus einer Lücke in den Messwerten. Wahrscheinlich, aber nicht sicher.",
+        "ev_based_on": "Grundlage:",
+        "ev_over": "über {duration}",
+        "ev_sources": "Quelle:",
+        "src_radius_auth": "Anmeldeserver",
+        "src_radius_acct": "Sitzungsprotokoll",
+        "src_unifi_syslog": "Access-Point-Protokoll",
+        "src_prometheus": "WLAN-Messwerte",
+        "src_device_day": "Tageszusammenfassung",
+        "src_ap_day": "Tageszusammenfassung",
+        "src_derived": "abgeleitet",
+        "src_incident": "Haus-Überwachung",
+        "src_registry": "Geräteregister",
+        "src_device_mac": "Adressverlauf",
+        "src_admin_device_mac": "device_mac",
+        "src_admin_radius_auth": "RADIUS-Auth",
+        "src_admin_radius_acct": "RADIUS-Accounting",
+        "src_admin_unifi_syslog": "UniFi-Systemlog",
+        "src_admin_prometheus": "Prometheus (unpoller)",
+        "src_admin_device_day": "device_day-Rollup",
+        "src_admin_ap_day": "ap_day-Rollup",
+        "src_admin_derived": "abgeleitet",
+        "src_admin_incident": "Incident",
+        "src_admin_registry": "Register",
+        "evk_signal_dbm": "Signal",
+        "evk_snr_db": "Signal über Rauschen",
+        "evk_noise_dbm": "Grundrauschen",
+        "evk_retry_ratio": "erneut gesendet",
+        "evk_tx_attempts_per_s": "Sendeversuche",
+        "evk_channel_util": "Kanal belegt",
+        "evk_channel": "Kanal",
+        "evk_link_rx_bps": "Funk-Verbindungsrate",
+        "evk_throughput_bps": "Datenfluss",
+        "evk_roams_1h": "Access-Point-Wechsel",
+        "evk_roams_1h_measured": "von den Access Points gemeldet",
+        "evk_reconnects_24h": "neue Verbindungen",
+        "evk_disconnects_24h_measured": "von den Access Points gemeldete Abbrüche",
+        "evk_causes": "Ursachen",
+        "evk_bands_7d": "genutzte Bänder",
+        "evk_associated_s": "verbunden seit",
+        "evk_count_24h": "abgelehnte Anmeldungen",
+        "evk_reasons": "Gründe",
+        "evk_last_at": "letzter Versuch",
+        "evk_last_accept": "letzte angenommene Anmeldung",
+        "evk_expires": "gültig bis",
+        "evk_days_left": "noch",
+        "evk_macs_30d": "Adressen",
+        "evk_ap": "Access Point",
+        "evk_clients": "Geräte daran",
+        "evk_band": "Band",
+        "evk_aps": "mittleres Signal",
+        "evk_incident": "Problem im Haus",
+        "evk_disconnects": "Abbruch um",
+        "evk_age_s": "Alter der Daten",
+        "evk_last_seen": "zuletzt gesehen",
+        "evk_owners": "weitere Besitzer",
+        "evk_limit": "Grenze",
+        "ev_last_1h": "in der letzten Stunde",
+        "ev_last_24h": "in den letzten 24 Stunden",
+        "ev_last_7d": "in den letzten 7 Tagen",
+        "ev_last_30d": "in den letzten 30 Tagen",
+        "days_n": "{n} Tage",
+        "times_n": "{n}-mal",
+        "tl_authenticated": "Angemeldet bei {where}",
+        "tl_authenticated_plain": "Angemeldet",
+        "tl_auth_rejected": "Anmeldung abgelehnt: {reason}",
+        "tl_reconnected": "Neu verbunden: {where}",
+        "tl_mac_changed": "Benutzt eine andere WLAN-Adresse",
+        "tl_mac_changed_admin": "Neue MAC {mac}",
+        "tl_session_ended": "Sitzung beendet: {cause}",
+        "tl_session_ended_plain": "Sitzung beendet",
+        "tl_incident": "Problem im Haus: {what}",
+        "tl_incident_ended": "Problem im Haus vorbei: {what}",
+        "tl_kind_authenticated": "Anmeldung",
+        "tl_kind_auth_rejected": "Anmeldung abgelehnt",
+        "tl_kind_connected": "Verbunden",
+        "tl_kind_disconnected": "Getrennt",
+        "tl_kind_reconnected": "Neu verbunden",
+        "tl_kind_roamed": "Access Point gewechselt",
+        "tl_kind_band_changed": "Band gewechselt",
+        "tl_kind_mac_changed": "Neue WLAN-Adresse",
+        "tl_kind_session_ended": "Sitzung beendet",
+        "tl_kind_incident": "Problem im Haus",
+        "tl_inferred_legend": "geschätzt (aus Lücken in den Daten abgeleitet)",
+        "tl_measured_legend": "gemessen",
+        "tl_filter": "Zeigen",
+        "tl_filter_all": "alles",
+        "tl_filter_wifi": "nur Verbindungen",
+        "tl_filter_logins": "nur Anmeldungen",
+        "tl_filter_problems": "nur Probleme",
+        "tl_window_note": "Die Liste der Verbindungen reicht {days} Tage zurück; die Diagramme zeigen den ganzen Zeitraum aus den Tageszusammenfassungen.",
+        "cause_user_request": "das Gerät hat das WLAN verlassen (WLAN aus, weggegangen oder im Ruhezustand)",
+        "cause_lost_carrier": "die Verbindung ist abgerissen (Signal weg)",
+        "cause_lost_service": "der Access Point hat seine Verbindung verloren",
+        "cause_idle_timeout": "lange keine Daten",
+        "cause_session_timeout": "die regelmäßige Neuanmeldung war fällig",
+        "cause_admin_reset": "von den Haus-Admins getrennt",
+        "cause_admin_reboot": "der Access Point wurde von den Haus-Admins neu gestartet",
+        "cause_port_error": "ein Fehler am Access Point",
+        "cause_nas_error": "ein Fehler am Access Point",
+        "cause_nas_request": "vom Access Point beendet",
+        "cause_nas_reboot": "der Access Point hat neu gestartet",
+        "cause_port_unneeded": "die Verbindung wurde nicht mehr gebraucht",
+        "cause_port_preempted": "der Access Point hat Platz für ein anderes Gerät gemacht",
+        "cause_port_suspended": "die Verbindung wurde pausiert",
+        "cause_service_unavailable": "der Dienst war nicht verfügbar",
+        "cause_callback": "Rückruf",
+        "cause_user_error": "ein Anmeldefehler am Gerät",
+        "cause_host_request": "vom Gerät beendet",
+        "cause_supplicant_restart": "das Gerät hat seine WLAN-Anmeldung neu gestartet",
+        "cause_reauthentication_failure": "die regelmäßige Neuanmeldung ist fehlgeschlagen",
+        "cause_port_reinitialized": "der Access Point hat die Verbindung zurückgesetzt",
+        "cause_port_administratively_disabled": "von den Haus-Admins abgeschaltet",
+        "cause_unknown": "unbekannt",
+        "inc_internet_down": "Internet ausgefallen",
+        "inc_internet_degraded": "Internet langsam oder lückenhaft",
+        "inc_router_down": "Router nicht erreichbar",
+        "inc_dns_down": "Namensauflösung (DNS) gestört",
+        "inc_ap_down": "Access Point offline",
+        "inc_ap_restarted": "Access Point neu gestartet",
+        "inc_switch_down": "Netzwerk-Switch offline",
+        "inc_switch_port_down": "Switch-Port ausgefallen",
+        "inc_unifi_data_stale": "WLAN-Daten nicht aktuell",
+        "inc_radius_down": "Anmeldeserver antwortet nicht",
+        "inc_other": "Netzwerkproblem",
+        "inc_house_wide": "ganzes Haus",
+        "inc_open": "läuft noch",
+        "inc_since": "seit {when}",
+        "inc_span": "{start} – {end}",
+        "inc_lasted": "Dauer {duration}",
+        "inc_affected": "Getrennte Geräte: {n}",
+        "inc_affected_list": "Getrennt:",
+        "inc_affected_none": "Kein Gerät wurde getrennt.",
+        "inc_none": "Keine Störungen in diesem Zeitraum.",
+        "inc_open_none": "Keine offenen Störungen.",
+        "inc_detail": "Details",
+        "diag_auth_failures": "Anmeldungen werden abgelehnt",
+        "diag_auth_failures_why": "Das Haus-WLAN hat dieses Gerät zuletzt mehrmals abgewiesen, deshalb kommt es nicht ins Netz.",
+        "diag_auth_failures_do": "Den Grund findest du unter „Letzte Anmeldung“. Meist hilft es, das Profil des Haus-WLANs vom Gerät zu entfernen und das Gerät hier neu hinzuzufügen.",
+        "diag_auth_failures_admin_why": "RADIUS-Ablehnungen für das Zertifikat oder die MACs dieses Geräts ({n} zuletzt).",
+        "diag_auth_failures_admin_do": "Grund in den Rohdaten prüfen. unknown_cert oder retired heißt meist: altes Profil noch installiert.",
+        "diag_cert_expiring": "Der Schlüssel des Geräts läuft bald ab",
+        "diag_cert_expiring_why": "Jedes Gerät hat einen eigenen WLAN-Schlüssel mit Ablaufdatum. Danach kommt das Gerät nicht mehr ins Netz.",
+        "diag_cert_expiring_do": "Tippe auf „Jetzt erneuern“ und installiere das neue Profil auf dem Gerät.",
+        "diag_cert_expired": "Der Schlüssel des Geräts ist abgelaufen",
+        "diag_cert_expired_why": "Der WLAN-Schlüssel dieses Geräts ist abgelaufen, deshalb weist das Haus-WLAN es ab.",
+        "diag_cert_expired_do": "Erneuere den Schlüssel hier und installiere das neue Profil auf dem Gerät.",
+        "diag_rotating_mac": "Die WLAN-Adresse ändert sich ständig",
+        "diag_rotating_mac_why": "Das Gerät nimmt immer wieder eine neue private Adresse. Das Haus sieht dann jedes Mal ein „neues“ Gerät: Der Verlauf zerfällt in Stücke, und Probleme sind schwerer zu finden.",
+        "diag_rotating_mac_do": "Stell die private Adresse für dieses WLAN auf „Fest“ (siehe „WLAN-Adresse“). Gegenüber allen anderen Netzen bleibt sie privat.",
+        "diag_rotating_mac_admin_why": "Wechselnde zufällige MACs ({n} Adressen): Verlauf nur je Adressfenster.",
+        "diag_ap_overloaded": "Der Access Point ist stark ausgelastet",
+        "diag_ap_overloaded_why": "Viele Geräte teilen sich den Access Point, den dieses Gerät nutzt, oder sein Funkkanal ist fast immer belegt. Für alle daran wird es langsamer.",
+        "diag_ap_overloaded_do": "Am Gerät ist nichts zu ändern. Ein anderer Access Point in der Nähe ist vielleicht ruhiger. Die Haus-Admins sehen das auch.",
+        "diag_ap_overloaded_admin_do": "Kanalplan und Last des AP auf der Access-Point-Seite prüfen; anderer Kanal oder zusätzlicher AP.",
+        "diag_poor_coverage": "Schwaches WLAN dort, wo das Gerät ist",
+        "diag_poor_coverage_why": "Das Signal ist an jedem Access Point schwach, den dieses Gerät nutzt. Wahrscheinlich gibt es an seinem Platz eine Lücke in der Abdeckung.",
+        "diag_poor_coverage_do": "Probier einen Platz näher an einem Access Point. Wenn du meist hier bist (dein Zimmer, dein Schreibtisch), sag den Haus-Admins Bescheid: Vielleicht fehlt dort ein Access Point.",
+        "diag_poor_coverage_admin_do": "Abdeckungslücke: schwach an jedem AP, den das Gerät nutzt. AP-Standort oder Sendeleistung für den Bereich prüfen.",
+        "diag_incident_correlated": "Getrennt während eines Problems im Hausnetz",
+        "diag_incident_correlated_why": "Das Gerät hat die Verbindung zur selben Zeit verloren, als es im Hausnetz ein Problem gab. Die Ursache lag sehr wahrscheinlich nicht am Gerät.",
+        "diag_incident_correlated_do": "Am Gerät ist nichts zu tun. Die Haus-Admins sehen das Problem auch.",
+        "diag_incident_correlated_admin_why": "Trennung innerhalb von 2 Minuten nach einem Incident seines AP, Switches, Routers oder des Internets (abgeleitet).",
+        "range_90d": "90 Tage",
+        "range_1y": "1 Jahr",
+        "range_all": "Alles",
+        "ch_days_note": "Ein Balken pro Tag, aus den Tageszusammenfassungen.",
+        "ch_signal_sub_day": "Mittelwert pro Tag in dBm. Näher an 0 ist besser.",
+        "ch_quality_sub_day": "Mittelwert pro Tag, 0 bis 100.",
+        "ch_traffic_sub_day": "Empfangen und gesendet pro Tag.",
+        "ch_link_sub_day": "Mittelwert pro Tag. Nicht die Internetgeschwindigkeit.",
+        "ch_online_sub_day": "Anteil jedes Tages, an dem das Gerät verbunden war.",
+        "ch_online_day_summary": "im Schnitt {pct} jedes Tages verbunden",
+        "ch_traffic_day_summary": "insgesamt {total}, am meisten am {day} ({max})",
+        "ch_weakest": "schwächstes Zehntel",
+        "ch_average": "Mittelwert",
+        "ch_retries": "Erneut gesendet",
+        "ch_retries_sub": "Anteil der Daten, die das Gerät doppelt senden musste. Ein paar Prozent sind normal.",
+        "ch_snr": "Signal über Rauschen",
+        "ch_snr_sub": "In dB: ab 25 ist gut.",
+        "day_total": "{down} empfangen · {up} gesendet",
+        "dt_macs": "WLAN-Adressen",
+        "dt_mac_now": "in Benutzung",
+        "dt_mac_private": "privat",
+        "dt_mac_hardware": "Hardware",
+        "dt_mac_seen": "{first} – {last}",
+        "dt_sources": "Daten aus",
+        "dt_last_auth": "Letzte Anmeldung",
+        "dt_mac_mode": "Adressart",
+        "adm_tabs": "Admin-Bereiche",
+        "adm_tab_overview": "Überblick",
+        "adm_tab_aps": "Access Points",
+        "adm_tab_incidents": "Störungen",
+        "adm_tab_devices": "Geräte",
+        "ov_title": "Haus-WLAN auf einen Blick",
+        "ov_incidents": "Störungen",
+        "ov_open": "Jetzt offen",
+        "ov_recent": "Kürzlich",
+        "ov_all_incidents": "Alle Störungen",
+        "ov_aps": "Access Points",
+        "ov_all_aps": "Details je Access Point",
+        "ov_auth": "Abgelehnte Anmeldungen (24 Stunden)",
+        "ov_auth_none": "Keine abgelehnten Anmeldungen in den letzten 24 Stunden.",
+        "ov_auth_total": "{n} abgelehnt",
+        "ov_auth_unknown": "unbekanntes Gerät",
+        "ov_auth_repeats": "×{n}",
+        "ov_fresh": "Daten und Sammler",
+        "ov_fresh_intro": "Wie frisch jede Quelle ist und ob die Jobs des Sammlers laufen.",
+        "ov_devices": "Alle Geräte",
+        "fresh_age": "{age} alt",
+        "fresh_none": "noch keine Daten",
+        "fresh_ok": "frisch",
+        "fresh_stale": "veraltet",
+        "job_unifi_events": "UniFi-Ereignisse",
+        "job_incidents": "Störungen",
+        "job_rollup": "Tages-Rollups",
+        "job_prune": "Aufbewahrung (prune)",
+        "job_offboarding": "Offboarding",
+        "job_ok": "OK",
+        "job_failed": "Fehlgeschlagen",
+        "job_never": "Nie gelaufen",
+        "job_running": "Läuft",
+        "job_late": "Überfällig",
+        "th_job": "Job",
+        "th_state": "Zustand",
+        "th_last_success": "Zuletzt erfolgreich",
+        "th_last_attempt": "Letzter Versuch",
+        "th_duration": "Dauer",
+        "th_error": "Fehler",
+        "th_source": "Quelle",
+        "th_latest": "Neueste Daten",
+        "ap_state_up": "Online",
+        "ap_state_down": "Offline",
+        "ap_state_unknown": "Unbekannt",
+        "ap_clients": "{n} Geräte",
+        "ap_clients_label": "Geräte",
+        "ap_load_label": "Kanal belegt",
+        "ap_weak_label": "Schwaches Signal",
+        "ap_weak": "{pct} der Geräte schwach",
+        "ap_restarts_label": "Neustarts",
+        "ap_restarts": "{n} in 24 h",
+        "ap_uptime": "läuft seit {duration}",
+        "ap_radio": "{band} · Kanal {channel}",
+        "ap_warn_overloaded": "Überlastet",
+        "ap_warn_busy_channel": "Kanal voll",
+        "ap_warn_poor_coverage": "Schwache Abdeckung",
+        "ap_warn_restarted": "Neu gestartet",
+        "ap_warn_down": "Offline",
+        "ap_warn_uplink": "Langsamer Uplink",
+        "aps_title": "Access Points",
+        "aps_intro": "Jeder Access Point mit seiner Last jetzt und pro Tag. Schwaches Signal = unter −75 dBm.",
+        "aps_search_ph": "Name, Raum oder MAC",
+        "aps_sort_name": "Name",
+        "aps_sort_clients": "Geräte (meiste zuerst)",
+        "aps_sort_load": "Kanal belegt (meiste zuerst)",
+        "aps_sort_weak": "Schwaches Signal (meiste zuerst)",
+        "aps_none": "Kein Access Point passt.",
+        "aps_empty": "Noch keine Access-Point-Daten.",
+        "aps_days": "Pro Tag",
+        "ch_ap_clients": "Geräte",
+        "ch_ap_clients_sub": "Mittelwert pro Tag; der Strich zeigt die Spitze.",
+        "ch_ap_util": "Kanal belegt",
+        "ch_ap_util_sub": "Mittelwert pro Tag und Funkmodul.",
+        "ch_ap_weak": "Anteil schwaches Signal",
+        "ch_ap_weak_sub": "Anteil der Geräte-Minuten unter −75 dBm.",
+        "ch_ap_restarts": "Neustarts und Ausfälle",
+        "ch_ap_restarts_sub": "Neustarts pro Tag.",
+        "ap_peak": "Spitze",
+        "ap_down_for": "{duration} offline",
+        "inc_title": "Störungen",
+        "inc_intro": "Probleme des Hausnetzes aus der Überwachung. Betroffene Geräte sind die, die zu der Zeit getrennt wurden.",
+        "inc_filter_kind": "Art",
+        "inc_filter_state": "Zustand",
+        "inc_state_open": "läuft noch",
+        "inc_state_closed": "vorbei",
+        "inc_filter_range": "Zeitraum",
+        "inc_shown": "{shown} von {total} angezeigt",
+        "inc_chart": "Störungen im Zeitverlauf",
+        "th_kind": "Art",
+        "th_scope": "Wo",
+        "th_started": "Beginn",
+        "th_ended": "Ende",
+        "th_devices": "Geräte",
+        "th_basis": "Grundlage",
+        "raw_title": "Rohdaten",
+        "raw_intro": "Alle Einträge der Quellen zu diesem Gerät, neueste zuerst, in Hauszeit.",
+        "raw_tab_auth": "RADIUS-Anmeldungen",
+        "raw_tab_acct": "Accounting-Sitzungen",
+        "raw_tab_events": "UniFi-Ereignisse",
+        "raw_tab_macs": "MAC-Fenster",
+        "raw_load": "Rohdaten laden",
+        "raw_loading": "Rohdaten werden geladen …",
+        "raw_error": "Die Rohdaten konnten nicht geladen werden.",
+        "raw_empty": "Keine Einträge in diesem Zeitraum.",
+        "raw_span": "Von {start} bis {end}",
+        "raw_truncated": "Nur die neuesten {n} Einträge werden gezeigt.",
+        "raw_conflict": "auch von {n} anderen Geräten beansprucht",
+        "th_at": "Zeit",
+        "th_result": "Ergebnis",
+        "th_reason": "Grund",
+        "th_device": "Gerät",
+        "th_mac": "MAC",
+        "th_bssid": "BSSID",
+        "th_ssid": "SSID",
+        "th_nas": "NAS",
+        "th_session": "Sitzung",
+        "th_link": "Verknüpft über",
+        "th_ip": "IP",
+        "th_stopped": "Beendet",
+        "th_session_time": "Sitzungsdauer",
+        "th_down": "Down",
+        "th_up": "Up",
+        "th_cause": "Terminate-Cause",
+        "th_ap": "AP",
+        "th_from_ap": "Von AP",
+        "th_radio": "Funk",
+        "th_channel": "Kanal",
+        "th_rssi": "RSSI",
+        "th_first_seen": "Zuerst gesehen",
+        "th_last_seen": "Zuletzt gesehen",
+        "th_logins": "Anmeldungen",
+        "th_randomized": "Zufällig",
+        "th_rx": "rx",
+        "th_tx": "tx",
+        "th_conflict": "Konflikt",
+        "radio_ng": "2,4 GHz",
+        "radio_na": "5 GHz",
+        "radio_6e": "6 GHz",
+        "res_accept": "angenommen",
+        "res_reject": "abgelehnt",
+        "yes": "ja",
+        "no": "nein",
+        "ap_restarts_7d": "{n} in 7 Tagen",
+        "ap_weak_count": "{n} Geräte unter −75 dBm",
+        "ap_uplink": "{n} Mbit/s",
+        "ov_unavailable": "Gerade nicht verfügbar.",
+        "ov_auth_spread": "{devices} Geräte · {macs} Adressen",
+        "fresh_wifi": "WLAN-Daten (unpoller)",
+        "fresh_prometheus": "Prometheus",
+        "fresh_jobs": "Jobs des Sammlers",
+        "fresh_state_ok": "antwortet",
+        "fresh_state_unavailable": "antwortet nicht",
+        "fresh_state_off": "nicht eingerichtet",
+        "fresh_jobs_ok": "alle OK",
+        "fresh_jobs_failed": "mindestens einer fehlgeschlagen",
+        "fresh_jobs_none": "noch keine",
+        "fresh_oldest": "ältester Erfolg vor {age}",
+        "raw_tab_days": "Tages-Rollups",
+        "raw_tab_incidents": "Störungen",
+        "th_day": "Tag",
+        "th_online": "Online",
+        "th_signal": "Signal",
+        "th_health": "Qualität",
+        "th_roams": "Wechsel",
+        "th_reconnects": "Neuverbindungen",
+        "th_disconnects": "Abbrüche",
+        "th_macs": "MACs",
+        "th_auth_ok": "Anmeldungen",
+        "th_auth_failed": "Abgelehnt",
+        "th_current": "In Benutzung",
+        "th_window": "Fenster",
+        "th_subject": "Betroffen",
+        "ap_uplink_label": "Uplink",
+        "ap_clients_house": "{n} im Haus-WLAN",
+        "ap_signal_label": "Mittleres Signal",
+        "ap_open_incidents": "Offene Störungen",
+    },
+    "uk": {
+        "mm_label": "Адреса Wi-Fi",
+        "mm_hardware": "Власна адреса пристрою",
+        "mm_hardware_sub": "Однакова в усіх мережах. Тут працює добре.",
+        "mm_random_fixed": "Приватна адреса, що не змінюється",
+        "mm_random_fixed_sub": "Добре: приватна для інших мереж, і будинок упізнає пристрій.",
+        "mm_rotating": "Приватна адреса, що постійно змінюється",
+        "mm_rotating_sub": "Щоразу будинок бачить «новий» пристрій: історія розпадається на шматки, а проблеми важко знайти.",
+        "mm_rotating_do": "Оберіть для цієї мережі «Фіксована»:",
+        "mm_how_apple": "Параметри → Wi-Fi → ⓘ біля {ssid} → Приватна адреса Wi-Fi → Фіксована.",
+        "mm_how_apple-mac": "Системні параметри → Wi-Fi → Подробиці… біля {ssid} → Приватна адреса Wi-Fi → Фіксована.",
+        "mm_how_android": "Налаштування → Wi-Fi → {ssid} → Конфіденційність → «Використовувати випадкову MAC-адресу». Якщо ввімкнено параметри розробника, вимкніть там «непостійну рандомізацію MAC-адреси».",
+        "mm_how_other": "У налаштуваннях Wi-Fi для {ssid} оберіть приватну адресу, що не змінюється (часто «Фіксована»), а не ту, що змінюється. У Windows: Випадкові апаратні адреси → Увімк., не «Змінювати щодня».",
+        "mm_why": "Фіксована приватна адреса так само захищає вас в інших мережах: вона фіксована лише для цієї мережі.",
+        "mm_admin_hardware": "апаратна MAC (глобально адміністрована)",
+        "mm_admin_random_fixed": "випадкова MAC, стабільна для мережі",
+        "mm_admin_rotating": "випадкова MAC, змінна",
+        "mm_addresses": "адрес побачено: {n}",
+        "la_label": "Останній вхід",
+        "la_accept": "Прийнято {when}",
+        "la_reject": "Відхилено {when}",
+        "la_rejected_title": "Домашній Wi-Fi не пускає цей пристрій",
+        "la_rejected_when": "Остання спроба {when}.",
+        "la_reason": "Причина:",
+        "la_do": "Що можна зробити:",
+        "rr_ok": "прийнято",
+        "rr_ok_do": "",
+        "rr_ok_admin": "Access-Accept",
+        "rr_unknown_cert": "пристрій використовує ключ, якого будинок не знає",
+        "rr_unknown_cert_do": "Зазвичай це старий профіль Wi-Fi. Видаліть профіль домашнього Wi-Fi з пристрою і знову додайте пристрій тут.",
+        "rr_unknown_cert_admin": "невідомий серійний номер сертифіката (немає в реєстрі)",
+        "rr_revoked": "пристрій видалено тут, тому його ключ більше не діє",
+        "rr_revoked_do": "Щоб знову ним користуватися, видаліть старий профіль Wi-Fi з пристрою і додайте пристрій тут наново.",
+        "rr_revoked_admin": "сертифікат відкликано (пристрій видалено)",
+        "rr_expired": "термін дії ключа пристрою минув",
+        "rr_expired_do": "Оновіть ключ тут і встановіть новий профіль на пристрій.",
+        "rr_expired_admin": "сертифікат прострочено",
+        "rr_retired": "пристрій досі використовує старий ключ, який замінено новішим",
+        "rr_retired_do": "Встановіть найновіший профіль на пристрій (відкрийте на ньому цю сторінку й оновіть), а старий видаліть.",
+        "rr_retired_admin": "замінений сертифікат (retired_after минув)",
+        "rr_no_cert": "пристрій не надіслав ключа",
+        "rr_no_cert_do": "Профіль Wi-Fi на пристрої неповний. Видаліть його і встановіть знову з цієї сторінки.",
+        "rr_no_cert_admin": "немає клієнтського сертифіката в рукостисканні EAP-TLS",
+        "rr_bad_chain": "пристрій надіслав ключ, виданий не будинком",
+        "rr_bad_chain_do": "Видаліть домашній Wi-Fi з пристрою і знову встановіть профіль з цієї сторінки.",
+        "rr_bad_chain_admin": "ланцюжок сертифікатів не від CA будинку",
+        "rr_not_eap": "пристрій намагався увійти з паролем замість свого ключа",
+        "rr_not_eap_do": "Оберіть встановлений профіль для {ssid}, а не мережу, налаштовану вручну. Якщо сумніваєтеся, забудьте мережу і встановіть профіль знову.",
+        "rr_not_eap_admin": "не EAP-TLS (інший метод EAP або жодного)",
+        "rr_db_error": "портал не зміг перевірити ключ (збій з боку будинку)",
+        "rr_db_error_do": "На пристрої нічого змінювати не треба. Якщо це повторюється, повідомте адміністраторів будинку.",
+        "rr_db_error_admin": "помилка запиту до реєстру (помилка бази даних)",
+        "rr_other": "неочікувана помилка під час входу",
+        "rr_other_do": "Вимкніть і знову ввімкніть Wi-Fi на пристрої. Якщо це повторюється, повідомте адміністраторів будинку.",
+        "rr_other_admin": "інша відмова (див. журнал RADIUS)",
+        "basis_measured": "виміряно",
+        "basis_inferred": "оцінка",
+        "basis_measured_hint": "Повідомлено безпосередньо точками доступу або сервером входу.",
+        "basis_inferred_hint": "Виведено з інших даних, наприклад з пропуску у вимірюваннях. Імовірно, але не напевно.",
+        "ev_based_on": "На основі:",
+        "ev_over": "за {duration}",
+        "ev_sources": "Джерело:",
+        "src_radius_auth": "сервер входу",
+        "src_radius_acct": "журнал сеансів",
+        "src_unifi_syslog": "журнал точок доступу",
+        "src_prometheus": "вимірювання Wi-Fi",
+        "src_device_day": "денний підсумок",
+        "src_ap_day": "денний підсумок",
+        "src_derived": "виведено",
+        "src_incident": "моніторинг будинку",
+        "src_registry": "реєстр пристроїв",
+        "src_device_mac": "історія адрес",
+        "src_admin_device_mac": "device_mac",
+        "src_admin_radius_auth": "RADIUS auth",
+        "src_admin_radius_acct": "RADIUS accounting",
+        "src_admin_unifi_syslog": "системний журнал UniFi",
+        "src_admin_prometheus": "Prometheus (unpoller)",
+        "src_admin_device_day": "rollup device_day",
+        "src_admin_ap_day": "rollup ap_day",
+        "src_admin_derived": "виведено",
+        "src_admin_incident": "інцидент",
+        "src_admin_registry": "реєстр",
+        "evk_signal_dbm": "сигнал",
+        "evk_snr_db": "сигнал над шумом",
+        "evk_noise_dbm": "фоновий шум",
+        "evk_retry_ratio": "надіслано повторно",
+        "evk_tx_attempts_per_s": "спроби надсилання",
+        "evk_channel_util": "канал зайнятий",
+        "evk_channel": "канал",
+        "evk_link_rx_bps": "швидкість радіозв’язку",
+        "evk_throughput_bps": "потік даних",
+        "evk_roams_1h": "зміни точки доступу",
+        "evk_roams_1h_measured": "повідомлено точками доступу",
+        "evk_reconnects_24h": "нові з’єднання",
+        "evk_disconnects_24h_measured": "обриви, повідомлені точками доступу",
+        "evk_causes": "причини",
+        "evk_bands_7d": "використані діапазони",
+        "evk_associated_s": "підключено вже",
+        "evk_count_24h": "відхилені входи",
+        "evk_reasons": "причини",
+        "evk_last_at": "остання спроба",
+        "evk_last_accept": "останній прийнятий вхід",
+        "evk_expires": "дійсний до",
+        "evk_days_left": "залишилося",
+        "evk_macs_30d": "адрес",
+        "evk_ap": "точка доступу",
+        "evk_clients": "пристроїв на ній",
+        "evk_band": "діапазон",
+        "evk_aps": "середній сигнал",
+        "evk_incident": "проблема в будинку",
+        "evk_disconnects": "обрив о",
+        "evk_age_s": "вік даних",
+        "evk_last_seen": "востаннє в мережі",
+        "evk_owners": "інших власників",
+        "evk_limit": "межа",
+        "ev_last_1h": "за останню годину",
+        "ev_last_24h": "за останні 24 години",
+        "ev_last_7d": "за останні 7 днів",
+        "ev_last_30d": "за останні 30 днів",
+        "days_n": "днів: {n}",
+        "times_n": "разів: {n}",
+        "tl_authenticated": "Вхід через {where}",
+        "tl_authenticated_plain": "Вхід",
+        "tl_auth_rejected": "Вхід відхилено: {reason}",
+        "tl_reconnected": "Знову підключено: {where}",
+        "tl_mac_changed": "Почав використовувати іншу адресу Wi-Fi",
+        "tl_mac_changed_admin": "Нова MAC {mac}",
+        "tl_session_ended": "Сеанс завершено: {cause}",
+        "tl_session_ended_plain": "Сеанс завершено",
+        "tl_incident": "Проблема в будинку: {what}",
+        "tl_incident_ended": "Проблему в будинку усунено: {what}",
+        "tl_kind_authenticated": "Вхід",
+        "tl_kind_auth_rejected": "Вхід відхилено",
+        "tl_kind_connected": "Підключено",
+        "tl_kind_disconnected": "Відключено",
+        "tl_kind_reconnected": "Перепідключено",
+        "tl_kind_roamed": "Зміна точки доступу",
+        "tl_kind_band_changed": "Зміна діапазону",
+        "tl_kind_mac_changed": "Нова адреса Wi-Fi",
+        "tl_kind_session_ended": "Сеанс завершено",
+        "tl_kind_incident": "Проблема в будинку",
+        "tl_inferred_legend": "оцінка (виведено з пропусків у даних)",
+        "tl_measured_legend": "виміряно",
+        "tl_filter": "Показати",
+        "tl_filter_all": "усе",
+        "tl_filter_wifi": "лише з’єднання",
+        "tl_filter_logins": "лише входи",
+        "tl_filter_problems": "лише проблеми",
+        "tl_window_note": "Список з’єднань охоплює останні {days} днів; графіки показують увесь період з денних підсумків.",
+        "cause_user_request": "пристрій вийшов з Wi-Fi (Wi-Fi вимкнено, відійшов або заснув)",
+        "cause_lost_carrier": "з’єднання обірвалося (сигнал зник)",
+        "cause_lost_service": "точка доступу втратила з’єднання",
+        "cause_idle_timeout": "довго не було даних",
+        "cause_session_timeout": "настав час регулярного повторного входу",
+        "cause_admin_reset": "відключено адміністраторами будинку",
+        "cause_admin_reboot": "адміністратори перезапустили точку доступу",
+        "cause_port_error": "збій точки доступу",
+        "cause_nas_error": "збій точки доступу",
+        "cause_nas_request": "завершено точкою доступу",
+        "cause_nas_reboot": "точка доступу перезапустилася",
+        "cause_port_unneeded": "з’єднання більше не було потрібне",
+        "cause_port_preempted": "точка доступу звільнила місце для іншого пристрою",
+        "cause_port_suspended": "з’єднання призупинено",
+        "cause_service_unavailable": "служба була недоступна",
+        "cause_callback": "зворотний виклик",
+        "cause_user_error": "помилка входу на пристрої",
+        "cause_host_request": "завершено пристроєм",
+        "cause_supplicant_restart": "пристрій перезапустив свій вхід у Wi-Fi",
+        "cause_reauthentication_failure": "регулярний повторний вхід не вдався",
+        "cause_port_reinitialized": "точка доступу скинула з’єднання",
+        "cause_port_administratively_disabled": "вимкнено адміністраторами будинку",
+        "cause_unknown": "невідомо",
+        "inc_internet_down": "Інтернет не працює",
+        "inc_internet_degraded": "Інтернет повільний або з перебоями",
+        "inc_router_down": "Роутер недоступний",
+        "inc_dns_down": "Не працюють назви сайтів (DNS)",
+        "inc_ap_down": "Точка доступу не в мережі",
+        "inc_ap_restarted": "Точку доступу перезапущено",
+        "inc_switch_down": "Мережевий комутатор не в мережі",
+        "inc_switch_port_down": "Порт комутатора не працює",
+        "inc_unifi_data_stale": "Дані Wi-Fi не оновлюються",
+        "inc_radius_down": "Сервер входу не відповідає",
+        "inc_other": "Проблема мережі",
+        "inc_house_wide": "увесь будинок",
+        "inc_open": "триває",
+        "inc_since": "з {when}",
+        "inc_span": "{start} – {end}",
+        "inc_lasted": "тривала {duration}",
+        "inc_affected": "відключено пристроїв: {n}",
+        "inc_affected_list": "Відключилися:",
+        "inc_affected_none": "Жоден пристрій не відключився.",
+        "inc_none": "За цей період збоїв не було.",
+        "inc_open_none": "Відкритих збоїв немає.",
+        "inc_detail": "Подробиці",
+        "diag_auth_failures": "Входи відхиляються",
+        "diag_auth_failures_why": "Останнім часом домашній Wi-Fi кілька разів не пустив цей пристрій, тому він не може підключитися.",
+        "diag_auth_failures_do": "Причину видно в розділі «Останній вхід». Зазвичай допомагає видалити профіль домашнього Wi-Fi з пристрою і знову додати пристрій тут.",
+        "diag_auth_failures_admin_why": "Відмови RADIUS для сертифіката або MAC цього пристрою (останнім часом: {n}).",
+        "diag_auth_failures_admin_do": "Перевірте причину в сирих даних. unknown_cert або retired зазвичай означає, що ще встановлено старий профіль.",
+        "diag_cert_expiring": "Термін дії ключа пристрою скоро мине",
+        "diag_cert_expiring_why": "Кожен пристрій має власний ключ Wi-Fi з датою завершення. Після неї пристрій не зможе підключитися.",
+        "diag_cert_expiring_do": "Натисніть «Оновити зараз» і встановіть новий профіль на пристрій.",
+        "diag_cert_expired": "Термін дії ключа пристрою минув",
+        "diag_cert_expired_why": "Ключ Wi-Fi цього пристрою прострочено, тому домашній Wi-Fi його не пускає.",
+        "diag_cert_expired_do": "Оновіть ключ тут і встановіть новий профіль на пристрій.",
+        "diag_rotating_mac": "Адреса Wi-Fi постійно змінюється",
+        "diag_rotating_mac_why": "Пристрій знову й знову бере нову приватну адресу. Тоді будинок щоразу бачить «новий» пристрій: історія розпадається на шматки, і проблеми важче знайти.",
+        "diag_rotating_mac_do": "Встановіть приватну адресу для цієї мережі на «Фіксована» (див. «Адреса Wi-Fi»). Для всіх інших мереж вона залишиться приватною.",
+        "diag_rotating_mac_admin_why": "Змінні випадкові MAC (адрес: {n}): історія лише в межах вікна кожної адреси.",
+        "diag_ap_overloaded": "Точка доступу дуже завантажена",
+        "diag_ap_overloaded_why": "Багато пристроїв ділять точку доступу, якою користується цей пристрій, або її радіоканал майже завжди зайнятий. Для всіх на ній усе сповільнюється.",
+        "diag_ap_overloaded_do": "На пристрої нічого змінювати не треба. Інша точка доступу поблизу може бути спокійнішою. Адміністратори будинку теж це бачать.",
+        "diag_ap_overloaded_admin_do": "Перевірте план каналів і навантаження на сторінці точок доступу; інший канал або додаткова точка.",
+        "diag_poor_coverage": "Слабкий Wi-Fi там, де пристрій",
+        "diag_poor_coverage_why": "Сигнал слабкий на кожній точці доступу, якою користується цей пристрій. Імовірно, у цьому місці є прогалина в покритті.",
+        "diag_poor_coverage_do": "Спробуйте місце ближче до точки доступу. Якщо ви зазвичай тут (ваша кімната, ваш стіл), повідомте адміністраторів будинку: можливо, там бракує точки доступу.",
+        "diag_poor_coverage_admin_do": "Прогалина в покритті: слабко на кожній точці, якою користується пристрій. Перевірте розташування або потужність точок для цієї зони.",
+        "diag_incident_correlated": "Відключився під час проблеми в мережі будинку",
+        "diag_incident_correlated_why": "Пристрій утратив з’єднання саме тоді, коли в мережі будинку була проблема. Найімовірніше, причина не в пристрої.",
+        "diag_incident_correlated_do": "На пристрої нічого робити не треба. Адміністратори будинку теж бачать проблему.",
+        "diag_incident_correlated_admin_why": "Відключення в межах 2 хвилин від інциденту його точки, комутатора, роутера чи інтернету (виведено).",
+        "range_90d": "90 днів",
+        "range_1y": "1 рік",
+        "range_all": "Усе",
+        "ch_days_note": "Один стовпчик на день, з денних підсумків.",
+        "ch_signal_sub_day": "Середнє за день у дБм. Ближче до 0 — краще.",
+        "ch_quality_sub_day": "Середнє за день, від 0 до 100.",
+        "ch_traffic_sub_day": "Отримано й надіслано за день.",
+        "ch_link_sub_day": "Середнє за день. Не швидкість інтернету.",
+        "ch_online_sub_day": "Частка кожного дня, коли пристрій був підключений.",
+        "ch_online_day_summary": "у середньому підключено {pct} кожного дня",
+        "ch_traffic_day_summary": "усього {total}, найбільше {day} ({max})",
+        "ch_weakest": "найслабша десята частина",
+        "ch_average": "середнє",
+        "ch_retries": "Надіслано повторно",
+        "ch_retries_sub": "Частка даних, які пристрій мусив надіслати двічі. Кілька відсотків — це нормально.",
+        "ch_snr": "Сигнал над шумом",
+        "ch_snr_sub": "У дБ: від 25 — добре.",
+        "day_total": "{down} отримано · {up} надіслано",
+        "dt_macs": "Адреси Wi-Fi",
+        "dt_mac_now": "використовується",
+        "dt_mac_private": "приватна",
+        "dt_mac_hardware": "апаратна",
+        "dt_mac_seen": "{first} – {last}",
+        "dt_sources": "Дані з",
+        "dt_last_auth": "Останній вхід",
+        "dt_mac_mode": "Тип адреси",
+        "adm_tabs": "Розділи адміністрування",
+        "adm_tab_overview": "Огляд",
+        "adm_tab_aps": "Точки доступу",
+        "adm_tab_incidents": "Збої",
+        "adm_tab_devices": "Пристрої",
+        "ov_title": "Домашній Wi-Fi одним поглядом",
+        "ov_incidents": "Збої",
+        "ov_open": "Зараз відкриті",
+        "ov_recent": "Нещодавно",
+        "ov_all_incidents": "Усі збої",
+        "ov_aps": "Точки доступу",
+        "ov_all_aps": "Подробиці за точками доступу",
+        "ov_auth": "Відхилені входи (24 години)",
+        "ov_auth_none": "За останні 24 години відхилених входів не було.",
+        "ov_auth_total": "відхилено: {n}",
+        "ov_auth_unknown": "невідомий пристрій",
+        "ov_auth_repeats": "×{n}",
+        "ov_fresh": "Дані та збирачі",
+        "ov_fresh_intro": "Наскільки свіже кожне джерело і чи працюють завдання збирача.",
+        "ov_devices": "Усі пристрої",
+        "fresh_age": "вік {age}",
+        "fresh_none": "даних ще немає",
+        "fresh_ok": "свіжі",
+        "fresh_stale": "застарілі",
+        "job_unifi_events": "Події UniFi",
+        "job_incidents": "Збої",
+        "job_rollup": "Денні підсумки",
+        "job_prune": "Зберігання (prune)",
+        "job_offboarding": "Відключення користувачів",
+        "job_ok": "OK",
+        "job_failed": "Помилка",
+        "job_never": "Ще не запускалося",
+        "job_running": "Виконується",
+        "job_late": "Прострочено",
+        "th_job": "Завдання",
+        "th_state": "Стан",
+        "th_last_success": "Останній успіх",
+        "th_last_attempt": "Остання спроба",
+        "th_duration": "Тривалість",
+        "th_error": "Помилка",
+        "th_source": "Джерело",
+        "th_latest": "Найновіші дані",
+        "ap_state_up": "У мережі",
+        "ap_state_down": "Не в мережі",
+        "ap_state_unknown": "Невідомо",
+        "ap_clients": "пристроїв: {n}",
+        "ap_clients_label": "Пристрої",
+        "ap_load_label": "Канал зайнятий",
+        "ap_weak_label": "Слабкий сигнал",
+        "ap_weak": "слабких пристроїв: {pct}",
+        "ap_restarts_label": "Перезапуски",
+        "ap_restarts": "{n} за 24 год",
+        "ap_uptime": "працює {duration}",
+        "ap_radio": "{band} · канал {channel}",
+        "ap_warn_overloaded": "Перевантажена",
+        "ap_warn_busy_channel": "Канал зайнятий",
+        "ap_warn_poor_coverage": "Слабке покриття",
+        "ap_warn_restarted": "Перезапущено",
+        "ap_warn_down": "Не в мережі",
+        "ap_warn_uplink": "Повільний аплінк",
+        "aps_title": "Точки доступу",
+        "aps_intro": "Кожна точка доступу з навантаженням зараз і за днями. Слабкий сигнал — нижче −75 дБм.",
+        "aps_search_ph": "Назва, приміщення або MAC",
+        "aps_sort_name": "Назва",
+        "aps_sort_clients": "Пристрої (найбільше спершу)",
+        "aps_sort_load": "Зайнятість каналу (найбільша спершу)",
+        "aps_sort_weak": "Слабкий сигнал (найбільше спершу)",
+        "aps_none": "Жодна точка доступу не підходить.",
+        "aps_empty": "Даних про точки доступу ще немає.",
+        "aps_days": "За днями",
+        "ch_ap_clients": "Пристрої",
+        "ch_ap_clients_sub": "Середнє за день; риска позначає пік.",
+        "ch_ap_util": "Канал зайнятий",
+        "ch_ap_util_sub": "Середнє за день для кожного радіомодуля.",
+        "ch_ap_weak": "Частка слабкого сигналу",
+        "ch_ap_weak_sub": "Частка пристрій-хвилин нижче −75 дБм.",
+        "ch_ap_restarts": "Перезапуски й простої",
+        "ch_ap_restarts_sub": "Перезапуски за день.",
+        "ap_peak": "пік",
+        "ap_down_for": "не в мережі {duration}",
+        "inc_title": "Збої",
+        "inc_intro": "Проблеми мережі будинку з моніторингу. Уражені пристрої — ті, що відключилися в той час.",
+        "inc_filter_kind": "Вид",
+        "inc_filter_state": "Стан",
+        "inc_state_open": "триває",
+        "inc_state_closed": "завершено",
+        "inc_filter_range": "Період",
+        "inc_shown": "Показано {shown} з {total}",
+        "inc_chart": "Збої в часі",
+        "th_kind": "Вид",
+        "th_scope": "Де",
+        "th_started": "Початок",
+        "th_ended": "Кінець",
+        "th_devices": "Пристрої",
+        "th_basis": "Основа",
+        "raw_title": "Сирі дані",
+        "raw_intro": "Усі записи джерел про цей пристрій, найновіші спершу, за часом будинку.",
+        "raw_tab_auth": "Входи RADIUS",
+        "raw_tab_acct": "Сеанси accounting",
+        "raw_tab_events": "Події UniFi",
+        "raw_tab_macs": "Вікна MAC",
+        "raw_load": "Завантажити сирі дані",
+        "raw_loading": "Завантаження сирих даних…",
+        "raw_error": "Не вдалося завантажити сирі дані.",
+        "raw_empty": "За цей період записів немає.",
+        "raw_span": "Від {start} до {end}",
+        "raw_truncated": "Показано лише {n} найновіших записів.",
+        "raw_conflict": "також заявлено ще {n} пристроями",
+        "th_at": "Час",
+        "th_result": "Результат",
+        "th_reason": "Причина",
+        "th_device": "Пристрій",
+        "th_mac": "MAC",
+        "th_bssid": "BSSID",
+        "th_ssid": "SSID",
+        "th_nas": "NAS",
+        "th_session": "Сеанс",
+        "th_link": "Зв’язано через",
+        "th_ip": "IP",
+        "th_stopped": "Завершено",
+        "th_session_time": "Тривалість сеансу",
+        "th_down": "Вниз",
+        "th_up": "Вгору",
+        "th_cause": "Terminate-Cause",
+        "th_ap": "Точка",
+        "th_from_ap": "З точки",
+        "th_radio": "Радіо",
+        "th_channel": "Канал",
+        "th_rssi": "RSSI",
+        "th_first_seen": "Уперше",
+        "th_last_seen": "Востаннє",
+        "th_logins": "Входи",
+        "th_randomized": "Випадкова",
+        "th_rx": "rx",
+        "th_tx": "tx",
+        "th_conflict": "Конфлікт",
+        "radio_ng": "2,4 ГГц",
+        "radio_na": "5 ГГц",
+        "radio_6e": "6 ГГц",
+        "res_accept": "прийнято",
+        "res_reject": "відхилено",
+        "yes": "так",
+        "no": "ні",
+        "ap_restarts_7d": "{n} за 7 днів",
+        "ap_weak_count": "пристроїв нижче −75 дБм: {n}",
+        "ap_uplink": "{n} Мбіт/с",
+        "ov_unavailable": "Зараз недоступно.",
+        "ov_auth_spread": "пристроїв: {devices} · адрес: {macs}",
+        "fresh_wifi": "Дані Wi-Fi (unpoller)",
+        "fresh_prometheus": "Prometheus",
+        "fresh_jobs": "Завдання збирача",
+        "fresh_state_ok": "відповідає",
+        "fresh_state_unavailable": "не відповідає",
+        "fresh_state_off": "не налаштовано",
+        "fresh_jobs_ok": "усі OK",
+        "fresh_jobs_failed": "принаймні одне з помилкою",
+        "fresh_jobs_none": "ще немає",
+        "fresh_oldest": "найдавніший успіх {age} тому",
+        "raw_tab_days": "Денні підсумки",
+        "raw_tab_incidents": "Збої",
+        "th_day": "День",
+        "th_online": "У мережі",
+        "th_signal": "Сигнал",
+        "th_health": "Якість",
+        "th_roams": "Переходи",
+        "th_reconnects": "Перепідключення",
+        "th_disconnects": "Обриви",
+        "th_macs": "MAC",
+        "th_auth_ok": "Входи",
+        "th_auth_failed": "Відхилено",
+        "th_current": "Використовується",
+        "th_window": "Вікно",
+        "th_subject": "Об’єкт",
+        "ap_uplink_label": "Аплінк",
+        "ap_clients_house": "{n} у домашньому Wi-Fi",
+        "ap_signal_label": "Середній сигнал",
+        "ap_open_incidents": "Відкриті збої",
+    },
+}
+for _lang, _texts in TELEMETRY_TEXT.items():
+    TEXT[_lang].update(_texts)
+
 # The findings diagnostics.py can report (each has diag_<code>, diag_<code>_why, diag_<code>_do;
 # a finding with other texts for admins also has diag_<code>_admin_why/_admin_do, with {n} from
 # its params).
 DIAGNOSES = ("weak_signal", "low_snr", "high_retries", "busy_channel", "unstable_roaming", "frequent_disconnects",
-             "stuck_on_2ghz", "slow_link", "stale_data", "offline", "never_connected", "mac_conflict")
+             "stuck_on_2ghz", "slow_link", "stale_data", "offline", "never_connected", "mac_conflict",
+             "auth_failures", "cert_expiring", "cert_expired", "rotating_mac", "ap_overloaded", "poor_coverage",
+             "incident_correlated")
+
+# The codes of telemetry v2 (docs/TELEMETRY.md), each with its text(s):
+# timeline event kinds (tl_kind_<kind>, and the sentence tl_<kind>)
+EVENT_KINDS = ("authenticated", "auth_rejected", "connected", "disconnected", "reconnected", "roamed",
+               "band_changed", "mac_changed", "session_ended", "incident")
+# why RADIUS rejected a login (radius_auth.reason): rr_<reason> (plain), rr_<reason>_do, rr_<reason>_admin
+REJECT_REASONS = ("ok", "unknown_cert", "revoked", "expired", "retired", "no_cert", "bad_chain", "not_eap",
+                  "db_error", "other")
+# Acct-Terminate-Cause (RFC 2866 5.10, RFC 3580 3.33) by number, as cause_<name> (the attribute's
+# value name lower-cased, "-" -> "_"): FreeRADIUS writes the name, a raw packet the number.
+TERMINATE_CAUSES = ("user_request", "lost_carrier", "lost_service", "idle_timeout", "session_timeout",
+                    "admin_reset", "admin_reboot", "port_error", "nas_error", "nas_request", "nas_reboot",
+                    "port_unneeded", "port_preempted", "port_suspended", "service_unavailable", "callback",
+                    "user_error", "host_request", "supplicant_restart", "reauthentication_failure",
+                    "port_reinitialized", "port_administratively_disabled")
+# how a device's MACs behave (device_mac): mm_<mode>, mm_<mode>_sub, mm_admin_<mode>
+MAC_MODES = ("hardware", "random_fixed", "rotating")
+# infrastructure incidents (incident.kind): inc_<kind>
+INCIDENT_KINDS = ("internet_down", "internet_degraded", "router_down", "dns_down", "ap_down", "ap_restarted",
+                  "switch_down", "switch_port_down", "unifi_data_stale", "radius_down")
+# where a value or an event comes from: src_<source> (plain) and src_admin_<source>
+SOURCES = ("radius_auth", "radius_acct", "unifi_syslog", "prometheus", "device_day", "ap_day", "device_mac",
+           "derived", "incident", "registry")
+# the collector's jobs (job_<name>) and what the overview's freshness shows (fresh_<name>)
+JOBS = ("unifi_events", "incidents", "rollup", "prune", "offboarding")
+FRESHNESS = ("wifi", "prometheus", "jobs")
+# the history's ranges (device page; day bars from device_day beyond 90 days, or when the API says so)
+RANGES = ("24h", "7d", "30d", "90d", "1y", "all")
+# the access points' warnings on the admin pages (ap_warn_<code>)
+AP_WARNINGS = ("overloaded", "busy_channel", "poor_coverage", "restarted", "down", "uplink")
 
 # The device list's label per stored platform (web.py FORMATS plus letswifi).
 PLATFORM_LABEL = {"apple": "for_apple", "apple-mac": "for_mac", "android": "for_android",
@@ -1236,8 +2566,307 @@ class Format:
                 return key, tone
         return "q_poor", "bad"
 
+    # --- telemetry v2 codes -------------------------------------------------------------------
+
+    @staticmethod
+    def cause_key(cause):
+        """An Acct-Terminate-Cause as its text key's suffix: "Lost-Carrier", "lost_carrier" or "2"
+        -> "lost_carrier"; anything else (or nothing) -> "unknown"."""
+        if cause is None or cause == "":
+            return "unknown"
+        text = str(cause).strip()
+        if text.isascii() and text.isdigit():           # not "²" (isdigit, but no int)
+            n = int(text)
+            return TERMINATE_CAUSES[n - 1] if 1 <= n <= len(TERMINATE_CAUSES) else "unknown"
+        key = text.lower().replace("-", "_").replace(" ", "_")
+        return key if key in TERMINATE_CAUSES else "unknown"
+
+    @staticmethod
+    def reason_key(reason):
+        """A RADIUS reject reason as its text key's suffix (unknown ones: "other")."""
+        return reason if reason in REJECT_REASONS else "other"
+
+    @staticmethod
+    def incident_text(incident, lang):
+        """"Access point offline (Scharni · 2nd floor · corner)" from an incident or its kind."""
+        t = _texts(lang)
+        if not incident:
+            return Format.NONE
+        if not isinstance(incident, dict):
+            incident = {"kind": incident}
+        kind = incident.get("kind")
+        what = t.get("inc_" + str(kind)) if kind in INCIDENT_KINDS else t["inc_other"]
+        scope = Format.scope(incident, lang)
+        return "%s (%s)" % (what, scope) if scope else what
+
+    @staticmethod
+    def scope(incident, lang):
+        """Where an incident is: the AP as a room, the switch or port by name, else the house."""
+        t = _texts(lang)
+        subject = incident.get("subject") or ""
+        name = incident.get("subject_name") or subject
+        if not subject and not name:
+            return t["inc_house_wide"]
+        if isinstance(incident.get("ap"), dict):
+            return Format.room(incident["ap"], lang)
+        if str(incident.get("kind", "")).startswith("ap_"):
+            return Format.room(Format.ap_from_name(name), lang)
+        return name
+
+    @staticmethod
+    def ap_from_name(name):
+        """An AP name as the backend splits it (telemetry.ap_info): ap-<house>-<floor>-<spot>."""
+        import re
+        m = re.fullmatch(r"ap-([a-z0-9]+)-(\d{1,2})-([a-z0-9][a-z0-9-]*)", str(name or ""))
+        if not m:
+            return {"name": name, "house": None, "floor": None, "spot": None}
+        return {"name": name, "house": m.group(1), "floor": int(m.group(2)), "spot": m.group(3)}
+
+    @staticmethod
+    def evidence_items(finding, lang, admin=False):
+        """A finding's evidence (diagnostics.py: {key: value}) as [(label, value text)] in the
+        order of EVIDENCE_SPEC for its code, and the time span it covers as a text (or None).
+        Keys outside the spec show only to admins, as they are (thresholds, counters): a resident
+        never sees a raw field name."""
+        t = _texts(lang)
+        evidence = finding.get("evidence") or {}
+        spec = EVIDENCE_SPEC.get(finding.get("code"))
+        if spec is None:
+            spec = [(k, EVIDENCE_FORMAT[k]) for k in evidence if k in EVIDENCE_FORMAT]
+        items, used = [], set()
+        for key, kind in spec:
+            used.add(key)
+            value = evidence.get(key)
+            if value is None or value == "" or value == [] or value == {}:
+                continue
+            label = t["evk_limit"] if kind.startswith("limit_") else t.get("evk_" + key, key)
+            items.append((label, Format.evidence_value(kind, value, lang, admin)))
+        if admin:
+            for key, value in evidence.items():
+                if key not in used and value is not None and value != "" and value != [] and value != {}:
+                    items.append((key, Format._plain(value)))
+        window = EVIDENCE_WINDOW.get(finding.get("code"))
+        return items, (t["ev_last_" + window] if window else None)
+
+    @staticmethod
+    def evidence_short(finding, lang):
+        """The one value a card shows beside a finding's title (EVIDENCE_SHORT, else the first
+        evidence item's value), or None."""
+        t = _texts(lang)
+        short = EVIDENCE_SHORT.get(finding.get("code"))
+        if short:
+            key, kind = short
+            value = (finding.get("evidence") or {}).get(key)
+            if value is None:
+                value = (finding.get("params") or {}).get(key)
+            if value is None or value == "":
+                return None
+            if kind in SHORT_TEXTS:
+                return t[SHORT_TEXTS[kind]].format(n=Format.number(value, lang))
+            return Format.evidence_value(kind, value, lang)
+        items, _window = Format.evidence_items(finding, lang)
+        return items[0][1] if items else None
+
+    @staticmethod
+    def evidence_value(kind, value, lang, admin=False):
+        """One evidence value as text (kind: EVIDENCE_SPEC's)."""
+        t = _texts(lang)
+        kind = kind[6:] if kind.startswith("limit_") else kind
+        try:
+            if kind in ("dbm", "db", "percent", "bitrate", "duration", "bytes"):
+                return getattr(Format, kind)(value, lang)
+            if kind == "per_hour":
+                return t["per_hour"].format(n=Format.number(value, lang))
+            if kind == "count":
+                return Format.number(value, lang)
+            if kind == "rate":
+                return "%s/s" % Format.number(value, lang, 1)
+            if kind == "days":
+                return t["days_n"].format(n=value)
+            if kind == "when":
+                return Format.when(value, lang)
+            if kind == "ago":
+                return Format.ago(value, lang)
+            if kind == "date":
+                return Format.date(value, lang)
+            if kind == "times":
+                times = [Format.when(v, lang) for v in list(value)[:3]]
+                return ", ".join(times) + (" …" if len(value) > 3 else "")
+            if kind == "band":
+                return Format.band(value, lang)
+            if kind == "bands":
+                return ", ".join(Format.band(b, lang) for b in value)
+            if kind == "reason":
+                key = Format.reason_key(value)
+                return t["rr_%s_admin" % key] if admin else t["rr_" + key]
+            if kind == "reasons":
+                pairs = value.items() if isinstance(value, dict) else ((r, None) for r in value)
+                return ", ".join((r if admin else t["rr_" + Format.reason_key(r)]) + (" ×%s" % n if n else "")
+                                 for r, n in pairs)
+            if kind == "causes":
+                pairs = value.items() if isinstance(value, dict) else ((c, None) for c in value)
+                return ", ".join(t["cause_" + Format.cause_key(c)] + (" (%s)" % c if admin else "") + (" ×%s" % n if n else "")
+                                 for c, n in pairs)
+            if kind == "room":
+                return Format.room(value if isinstance(value, dict) else Format.ap_from_name(value), lang)
+            if kind == "ap_signals":
+                return ", ".join("%s %s" % (Format.room(Format.ap_from_name(ap), lang), Format.dbm(v, lang))
+                                 for ap, v in value.items())
+            if kind == "incident":
+                if isinstance(value, dict):
+                    text = Format.incident_text(value, lang)
+                    return "%s, %s" % (text, Format.when(value["started"], lang)) if value.get("started") else text
+                return Format.incident_text(value, lang)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass
+        return Format._plain(value)
+
+    @staticmethod
+    def _plain(value):
+        """As static/format.js plain(): JSON's words for booleans and nothing."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if value is None:
+            return "null"
+        if isinstance(value, dict):
+            return ", ".join("%s %s" % (k, Format._plain(v)) for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return ", ".join(Format._plain(v) for v in value)
+        if isinstance(value, float):
+            return ("%.3f" % value).rstrip("0").rstrip(".")
+        return str(value)
+
+    @staticmethod
+    def ap_state(ap):
+        """up | down | unknown from an AP's state (the API's ok | down | unknown)."""
+        state = (ap or {}).get("state")
+        return "up" if state in ("ok", "up") else state if state == "down" else "unknown"
+
+    @staticmethod
+    def ap_weak_share(ap):
+        """The share of an AP's devices with a weak signal (weak_clients / clients), or None."""
+        if ap.get("weak_share") is not None:
+            return ap["weak_share"]
+        weak, clients = ap.get("weak_clients"), ap.get("clients")
+        return weak / clients if weak is not None and clients else None
+
+    @staticmethod
+    def ap_load(ap):
+        """The busiest radio's channel utilisation (0-1), or None."""
+        loads = [r.get("channel_util") if r.get("channel_util") is not None else r.get("utilization")
+                 for r in ap.get("radios") or ()]
+        loads = [v for v in loads if v is not None]
+        return max(loads) if loads else None
+
+    @staticmethod
+    def ap_warnings(ap):
+        """What the admin pages point out about an AP (ap_warn_<code>), from its live values with
+        the diagnostics' limits (diagnostics.AP_*): down, overloaded (many clients, or a full
+        channel with at least AP_LOAD_MIN_CLIENTS), busy_channel, poor_coverage (a quarter of
+        at least 4 clients weak), restarted (up less than a day), uplink (below 1 Gbit/s)."""
+        from . import diagnostics as d
+        if ap.get("warnings") is not None:
+            return list(ap["warnings"])
+        out = []
+        state, clients, load = Format.ap_state(ap), ap.get("clients"), Format.ap_load(ap)
+        if state == "down":
+            return ["down"]
+        if clients is not None and (clients >= getattr(d, "AP_CLIENTS_WARN", 25) or (
+                load is not None and load >= getattr(d, "AP_UTIL_WARN", 0.8)
+                and clients >= getattr(d, "AP_LOAD_MIN_CLIENTS", 10))):
+            out.append("overloaded")
+        elif load is not None and load >= getattr(d, "BUSY_CHANNEL_WARN", 0.6):
+            out.append("busy_channel")
+        weak = Format.ap_weak_share(ap)
+        if weak is not None and weak >= AP_WEAK_SHARE_WARN and (clients or 0) >= 4:
+            out.append("poor_coverage")
+        if ap.get("uptime_s") is not None and ap["uptime_s"] < 86400:
+            out.append("restarted")
+        if ap.get("uplink_mbps") is not None and ap["uplink_mbps"] < 1000:
+            out.append("uplink")
+        return out
+
+    @staticmethod
+    def before(value, seconds):
+        """The ISO moment `seconds` before value (the incident page's time spans)."""
+        import datetime as dt
+        moment = parse_time(value) or dt.datetime.now(dt.UTC)
+        return (moment - dt.timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+    @staticmethod
+    def span_key(start, end, keys):
+        """Which of keys ("7d", "30d", "90d", "1y") a span [start, end] is (the nearest)."""
+        a, b = parse_time(start), parse_time(end)
+        if a is None or b is None:
+            return None
+        days = (b - a).total_seconds() / 86400
+        sizes = {"7d": 7, "30d": 30, "90d": 90, "1y": 365}
+        return min(keys, key=lambda k: abs(sizes.get(k, 0) - days))
+
+    @staticmethod
+    def day(value, lang):
+        """A day of the day bars ("2026-10-24" or a moment): "24 Oct"."""
+        moment = parse_time(value)
+        if moment is None:
+            return Format.NONE
+        if isinstance(value, str) and len(value) == 10:
+            return Format.strftime(moment, _texts(lang)["day_format"], lang).strip()
+        from zoneinfo import ZoneInfo
+        return Format.strftime(moment.astimezone(ZoneInfo(HOUSE_TZ)), _texts(lang)["day_format"], lang).strip()
+
+
+# A quarter of an AP's devices with a weak signal is a coverage hint (admin pages).
+AP_WEAK_SHARE_WARN = 0.25
+
+# A finding's evidence (diagnostics.py) per code: (key, how it is shown) in the order shown; each
+# key has its label evk_<key>, a limit_* kind the label evk_limit. static/render.js has the same
+# tables. EVIDENCE_FORMAT is the fallback for codes without a spec, EVIDENCE_WINDOW the time
+# span a finding looks at (ev_last_<span>).
+EVIDENCE_SPEC = {
+    "weak_signal": [("signal_dbm", "dbm"), ("warn_dbm", "limit_dbm")],
+    "low_snr": [("snr_db", "db"), ("noise_dbm", "dbm"), ("warn_db", "limit_db")],
+    "high_retries": [("retry_ratio", "percent"), ("warn", "limit_percent"), ("tx_attempts_per_s", "rate")],
+    "busy_channel": [("channel_util", "percent"), ("channel", "plain")],
+    "slow_link": [("link_rx_bps", "bitrate"), ("signal_dbm", "dbm"), ("throughput_bps", "bitrate")],
+    "unstable_roaming": [("roams_1h", "per_hour"), ("roams_1h_measured", "per_hour"), ("warn", "limit_per_hour")],
+    "frequent_disconnects": [("reconnects_24h", "count"), ("disconnects_24h_measured", "count"), ("causes", "causes"),
+                             ("warn", "limit_count")],
+    "stuck_on_2ghz": [("bands_7d", "bands"), ("signal_dbm", "dbm"), ("associated_s", "duration")],
+    "auth_failures": [("count_24h", "count"), ("reasons", "reasons"), ("last_at", "when"), ("last_accept", "when")],
+    "cert_expiring": [("expires", "date"), ("days_left", "days")],
+    "cert_expired": [("expires", "date")],
+    "rotating_mac": [("macs_30d", "count")],
+    "ap_overloaded": [("ap", "room"), ("clients", "count"), ("channel_util", "percent"), ("band", "band")],
+    "poor_coverage": [("aps", "ap_signals")],
+    "incident_correlated": [("incident", "incident"), ("disconnects", "times")],
+    "stale_data": [("age_s", "duration"), ("threshold_s", "limit_duration")],
+    "offline": [("last_seen", "ago")],
+    "mac_conflict": [("owners", "count")],
+    "never_connected": [],
+}
+EVIDENCE_FORMAT = {
+    "signal_dbm": "dbm", "noise_dbm": "dbm", "snr_db": "db", "retry_ratio": "percent", "channel_util": "percent",
+    "roams_1h": "per_hour", "reconnects_24h": "count", "link_rx_bps": "bitrate", "throughput_bps": "bitrate",
+    "age_s": "duration", "associated_s": "duration", "last_at": "when", "last_accept": "when", "last_seen": "ago",
+    "expires": "date", "days_left": "days", "count_24h": "count", "macs_30d": "count", "clients": "count",
+    "owners": "count", "reasons": "reasons", "causes": "causes", "ap": "room", "aps": "ap_signals", "band": "band",
+    "bands_7d": "bands", "incident": "incident", "disconnects": "times",
+}
+# What a card shows beside a finding's title: (key, kind); the kinds of SHORT_TEXTS are counts in
+# a sentence ("8 times in 24 hours").
+EVIDENCE_SHORT = {
+    "frequent_disconnects": ("reconnects_24h", "times_24h"), "auth_failures": ("count_24h", "times_24h"),
+    "rotating_mac": ("macs_30d", "addresses"), "cert_expiring": ("days_left", "days"), "cert_expired": ("expires", "date"),
+    "ap_overloaded": ("clients", "devices"), "poor_coverage": ("best_signal_dbm", "dbm"),
+    "incident_correlated": ("incident", "incident"), "never_connected": ("none", "count"),
+}
+SHORT_TEXTS = {"times_24h": "times_24h", "addresses": "mm_addresses", "days": "days_n", "devices": "ap_clients"}
+EVIDENCE_WINDOW = {"unstable_roaming": "1h", "frequent_disconnects": "24h", "auth_failures": "24h", "poor_coverage": "24h",
+                   "stuck_on_2ghz": "7d", "rotating_mac": "30d"}
+
 
 def template_globals():
     """What the dashboard templates need besides the context processor's values: web.py adds it
     with app.jinja_env.globals.update(i18n.template_globals())."""
-    return {"fmt": Format, "diagnoses": DIAGNOSES}
+    return {"fmt": Format, "diagnoses": DIAGNOSES, "event_kinds": EVENT_KINDS, "incident_kinds": INCIDENT_KINDS,
+            "history_ranges": RANGES}

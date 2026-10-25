@@ -10,7 +10,95 @@ export const SIGNAL_LEVELS = [[-60, 4, "sig_excellent"], [-67, 3, "sig_good"], [
 // Wi-Fi quality (0-100): word and tone.
 export const HEALTH_LEVELS = [[80, "q_good", "ok"], [50, "q_fair", "warn"]];
 export const DIAGNOSES = ["weak_signal", "low_snr", "high_retries", "busy_channel", "unstable_roaming",
-  "frequent_disconnects", "stuck_on_2ghz", "slow_link", "stale_data", "offline", "never_connected", "mac_conflict"];
+  "frequent_disconnects", "stuck_on_2ghz", "slow_link", "stale_data", "offline", "never_connected", "mac_conflict",
+  "auth_failures", "cert_expiring", "cert_expired", "rotating_mac", "ap_overloaded", "poor_coverage", "incident_correlated"];
+
+// Telemetry v2's codes, as in i18n.py (EVENT_KINDS, REJECT_REASONS, TERMINATE_CAUSES, ...).
+export const EVENT_KINDS = ["authenticated", "auth_rejected", "connected", "disconnected", "reconnected", "roamed",
+  "band_changed", "mac_changed", "session_ended", "incident"];
+export const REJECT_REASONS = ["ok", "unknown_cert", "revoked", "expired", "retired", "no_cert", "bad_chain", "not_eap",
+  "db_error", "other"];
+// Acct-Terminate-Cause by number (RFC 2866 5.10, RFC 3580 3.33), as text-key suffixes.
+export const TERMINATE_CAUSES = ["user_request", "lost_carrier", "lost_service", "idle_timeout", "session_timeout",
+  "admin_reset", "admin_reboot", "port_error", "nas_error", "nas_request", "nas_reboot", "port_unneeded",
+  "port_preempted", "port_suspended", "service_unavailable", "callback", "user_error", "host_request",
+  "supplicant_restart", "reauthentication_failure", "port_reinitialized", "port_administratively_disabled"];
+export const INCIDENT_KINDS = ["internet_down", "internet_degraded", "router_down", "dns_down", "ap_down", "ap_restarted",
+  "switch_down", "switch_port_down", "unifi_data_stale", "radius_down"];
+export const MAC_MODES = ["hardware", "random_fixed", "rotating"];
+
+// A finding's evidence per code: [key, how it is shown] in order (i18n.EVIDENCE_SPEC), the
+// fallback per key (EVIDENCE_FORMAT) and the span a finding looks at (EVIDENCE_WINDOW).
+export const EVIDENCE_SPEC = {
+  weak_signal: [["signal_dbm", "dbm"], ["warn_dbm", "limit_dbm"]],
+  low_snr: [["snr_db", "db"], ["noise_dbm", "dbm"], ["warn_db", "limit_db"]],
+  high_retries: [["retry_ratio", "percent"], ["warn", "limit_percent"], ["tx_attempts_per_s", "rate"]],
+  busy_channel: [["channel_util", "percent"], ["channel", "plain"]],
+  slow_link: [["link_rx_bps", "bitrate"], ["signal_dbm", "dbm"], ["throughput_bps", "bitrate"]],
+  unstable_roaming: [["roams_1h", "per_hour"], ["roams_1h_measured", "per_hour"], ["warn", "limit_per_hour"]],
+  frequent_disconnects: [["reconnects_24h", "count"], ["disconnects_24h_measured", "count"], ["causes", "causes"],
+    ["warn", "limit_count"]],
+  stuck_on_2ghz: [["bands_7d", "bands"], ["signal_dbm", "dbm"], ["associated_s", "duration"]],
+  auth_failures: [["count_24h", "count"], ["reasons", "reasons"], ["last_at", "when"], ["last_accept", "when"]],
+  cert_expiring: [["expires", "date"], ["days_left", "days"]],
+  cert_expired: [["expires", "date"]],
+  rotating_mac: [["macs_30d", "count"]],
+  ap_overloaded: [["ap", "room"], ["clients", "count"], ["channel_util", "percent"], ["band", "band"]],
+  poor_coverage: [["aps", "ap_signals"]],
+  incident_correlated: [["incident", "incident"], ["disconnects", "times"]],
+  stale_data: [["age_s", "duration"], ["threshold_s", "limit_duration"]],
+  offline: [["last_seen", "ago"]],
+  mac_conflict: [["owners", "count"]],
+  never_connected: [],
+};
+export const EVIDENCE_FORMAT = {
+  signal_dbm: "dbm", noise_dbm: "dbm", snr_db: "db", retry_ratio: "percent", channel_util: "percent", roams_1h: "per_hour",
+  reconnects_24h: "count", link_rx_bps: "bitrate", throughput_bps: "bitrate", age_s: "duration", associated_s: "duration",
+  last_at: "when", last_accept: "when", last_seen: "ago", expires: "date", days_left: "days", count_24h: "count",
+  macs_30d: "count", clients: "count", owners: "count", reasons: "reasons", causes: "causes", ap: "room",
+  aps: "ap_signals", band: "band", bands_7d: "bands", incident: "incident", disconnects: "times",
+};
+export const EVIDENCE_SHORT = {
+  frequent_disconnects: ["reconnects_24h", "times_24h"], auth_failures: ["count_24h", "times_24h"],
+  rotating_mac: ["macs_30d", "addresses"], cert_expiring: ["days_left", "days"], cert_expired: ["expires", "date"],
+  ap_overloaded: ["clients", "devices"], poor_coverage: ["best_signal_dbm", "dbm"],
+  incident_correlated: ["incident", "incident"], never_connected: ["none", "count"],
+};
+const SHORT_TEXTS = { times_24h: "times_24h", addresses: "mm_addresses", days: "days_n", devices: "ap_clients" };
+export const EVIDENCE_WINDOW = { unstable_roaming: "1h", frequent_disconnects: "24h", auth_failures: "24h",
+  poor_coverage: "24h", stuck_on_2ghz: "7d", rotating_mac: "30d" };
+
+const AP_NAME_RE = /^ap-([a-z0-9]+)-(\d{1,2})-([a-z0-9][a-z0-9-]*)$/;
+/** An AP name as the backend splits it: ap-<house>-<floor>-<spot>. */
+export function apFromName(name) {
+  const m = AP_NAME_RE.exec(String(name ?? ""));
+  return m ? { name, house: m[1], floor: Number(m[2]), spot: m[3] } : { name: name ?? null, house: null, floor: null, spot: null };
+}
+
+/** "Lost-Carrier", "lost_carrier" or "2" -> "lost_carrier"; anything else -> "unknown". */
+export function causeKey(cause) {
+  if (cause === null || cause === undefined || cause === "") return "unknown";
+  const text = String(cause).trim();
+  if (/^\d+$/.test(text)) return TERMINATE_CAUSES[Number(text) - 1] || "unknown";
+  const key = text.toLowerCase().replace(/[- ]/g, "_");
+  return TERMINATE_CAUSES.includes(key) ? key : "unknown";
+}
+
+/** A reject reason's text-key suffix (unknown ones: "other"). */
+export function reasonKey(reason) {
+  return REJECT_REASONS.includes(reason) ? reason : "other";
+}
+
+const empty = (v) => v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length)
+  || (typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length);
+
+/** A value as plain text (an admin's view of evidence without a text). */
+export function plain(value) {
+  if (Array.isArray(value)) return value.map(plain).join(", ");
+  if (value && typeof value === "object") return Object.entries(value).map(([k, v]) => `${k} ${plain(v)}`).join(", ");
+  if (typeof value === "number" && !Number.isInteger(value)) return String(Math.round(value * 1000) / 1000);
+  return String(value);
+}
 
 /** "{n} min" with {n: 5} -> "5 min"; unknown placeholders stay as they are. */
 export function fill(template, values) {
@@ -131,6 +219,8 @@ export function createFormatter(lang, texts, { timeZone = HOUSE_TZ } = {}) {
     const d = toDate(value);
     if (!d) return "";
     const w = wall(d);
+    // a year or more: months (January with its year); a few days and more: days; else the clock
+    if (spanSeconds > 120 * 86400) return w.month === 1 ? String(w.year) : strftime(w, "%b");
     return spanSeconds > 2 * 86400 ? strftime(w, t("day_format")) : strftime(w, t("time_format"));
   }
 
@@ -162,6 +252,90 @@ export function createFormatter(lang, texts, { timeZone = HOUSE_TZ } = {}) {
     return parts.join(" · ") || NONE;
   }
 
-  return { lang, t, fill, number, bytes, bitrate, percent, dbm, db, ms, duration, ago, when, date, axisTime,
-    room, proto, bandName, wifi, signalLevel, healthLevel };
+  /** A day of the day bars: "24 Oct". */
+  function day(value) {
+    const d = toDate(value);
+    return d ? strftime(wall(d), t("day_format")).trim() : NONE;
+  }
+
+  /** Where an incident is: the AP as a room, a switch or port by name, else the whole house. */
+  function scope(incident) {
+    const name = incident.subject_name || incident.subject || "";
+    if (incident.ap && typeof incident.ap === "object") return room(incident.ap);
+    if (!name) return t("inc_house_wide");
+    if (String(incident.kind || "").startsWith("ap_")) return room(apFromName(name));
+    return name;
+  }
+  function incidentText(incident) {
+    if (!incident) return NONE;
+    const inc = typeof incident === "object" ? incident : { kind: incident };
+    const what = INCIDENT_KINDS.includes(inc.kind) ? t(`inc_${inc.kind}`) : t("inc_other");
+    const where = scope(inc);
+    return where ? `${what} (${where})` : what;
+  }
+
+  function evidenceValue(kind, value, admin = false) {
+    const k = kind.startsWith("limit_") ? kind.slice(6) : kind;
+    const pairs = (v) => (Array.isArray(v) ? v.map((x) => [x, null]) : Object.entries(v));
+    try {
+      switch (k) {
+        case "dbm": case "db": case "percent": case "bitrate": case "duration": case "bytes": return api[k](value);
+        case "per_hour": return fill(t("per_hour"), { n: number(value) });
+        case "count": return number(value);
+        case "rate": return `${number(value, 1)}/s`;
+        case "days": return fill(t("days_n"), { n: value });
+        case "when": return when(value);
+        case "ago": return ago(value);
+        case "date": return date(value);
+        case "times": return value.slice(0, 3).map((v) => when(v)).join(", ") + (value.length > 3 ? " …" : "");
+        case "band": return bandName(value);
+        case "bands": return value.map((b) => bandName(b)).join(", ");
+        case "reason": return t(admin ? `rr_${reasonKey(value)}_admin` : `rr_${reasonKey(value)}`);
+        case "reasons": return pairs(value).map(([r, n]) => (admin ? r : t(`rr_${reasonKey(r)}`)) + (n ? ` ×${n}` : "")).join(", ");
+        case "causes": return pairs(value).map(([c, n]) => t(`cause_${causeKey(c)}`) + (admin ? ` (${c})` : "") + (n ? ` ×${n}` : "")).join(", ");
+        case "room": return room(typeof value === "object" ? value : apFromName(value));
+        case "ap_signals": return Object.entries(value).map(([a, v]) => `${room(apFromName(a))} ${dbm(v)}`).join(", ");
+        case "incident": return typeof value === "object" && value.started ? `${incidentText(value)}, ${when(value.started)}` : incidentText(value);
+        default: return plain(value);
+      }
+    } catch {
+      return plain(value);
+    }
+  }
+
+  /** A finding's evidence as [[label, text]] (the spec's order; for admins also the rest, as
+   *  it is) and the span it looks at (or null): i18n.Format.evidence_items. */
+  function evidenceItems(finding, admin = false) {
+    const evidence = finding.evidence || {};
+    const spec = EVIDENCE_SPEC[finding.code] || Object.keys(evidence).filter((k) => k in EVIDENCE_FORMAT).map((k) => [k, EVIDENCE_FORMAT[k]]);
+    const items = [], used = new Set();
+    for (const [key, kind] of spec) {
+      used.add(key);
+      const value = evidence[key];
+      if (empty(value)) continue;
+      items.push([kind.startsWith("limit_") ? t("evk_limit") : t(`evk_${key}`), evidenceValue(kind, value, admin)]);
+    }
+    if (admin) for (const [key, value] of Object.entries(evidence)) if (!used.has(key) && !empty(value)) items.push([key, plain(value)]);
+    const span = EVIDENCE_WINDOW[finding.code];
+    return { items, window: span ? t(`ev_last_${span}`) : null };
+  }
+
+  /** The one value a card shows beside a finding's title (i18n.Format.evidence_short). */
+  function evidenceShort(finding) {
+    const short = EVIDENCE_SHORT[finding.code];
+    if (short) {
+      const [key, kind] = short;
+      let value = (finding.evidence || {})[key];
+      if (value === null || value === undefined) value = (finding.params || {})[key];
+      if (value === null || value === undefined || value === "") return null;
+      return SHORT_TEXTS[kind] ? fill(t(SHORT_TEXTS[kind]), { n: number(value) }) : evidenceValue(kind, value);
+    }
+    const first = evidenceItems(finding).items[0];
+    return first ? first[1] : null;
+  }
+
+  const api = { lang, t, fill, number, evidenceShort, bytes, bitrate, percent, dbm, db, ms, duration, ago, when, date, day, axisTime,
+    room, proto, bandName, wifi, signalLevel, healthLevel, scope, incidentText, evidenceItems, evidenceValue,
+    causeKey, reasonKey, apFromName };
+  return api;
 }
