@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% import "_dash.html" as dash %}
+{% block scripts %}<script type="module" src="/static/dashboard.js"></script>{% endblock %}
+{% block body_attrs %} class="wide" data-page="devices"{% endblock %}
+{# One enrolment form per format: a POST with the CSRF token, as before. #}
+{% macro enrol_button(profile, label, icon, primary=False) %}
+<form method="post" action="/enroll" class="enrol">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="format" value="{{ profile }}">
+  <button class="button{% if primary %} primary big{% endif %}"><svg class="icon" aria-hidden="true"><use href="#i-{{ icon }}"/></svg>{{ label }}</button>
+</form>
+{% endmacro %}
+{% macro app_steps(primary=False) %}
+<ol class="steps">
+  {% for step in t.steps_app %}<li>{{ step.format(host=host, ssid=settings.ssid) }}</li>{% endfor %}
+</ol>
+<p><a class="button{% if primary %} primary big{% endif %}" href="https://www.geteduroam.app/" rel="noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-app"/></svg>{{ t.get_app }}</a></p>
+{% endmacro %}
+{# A device card: the live parts (state, facts, findings) are dash macros that static/render.js
+   redraws on refresh; the name form and the actions stay as the server sent them. #}
+{% macro device_card(d, row) %}
+<article class="card dev" id="device-{{ d.id }}" data-device="{{ d.id }}">
+  <div class="dev-head">
+    {{ dash.device_icon(d) }}
+    <div class="dev-title">
+      {{ dash.name_block(d, "h2") }}
+      {{ dash.state_line(d) }}
+    </div>
+  </div>
+  {{ dash.auth_alert(d) }}
+  {{ dash.live(d) }}
+  {{ dash.how_connects(d) }}
+  {{ dash.findings(d, limit=2) }}
+  <div class="dev-foot">
+    <a class="more" href="/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
+    {% set expires = d.expires if d.expires is defined and d.expires else (row.expires if row else none) %}
+    {% set soon = d.expires_soon if d.expires_soon is defined else (expires_soon(row.expires) if row and row.expires else False) %}
+    <p class="meta">
+      <span>{{ t[platform_label.get(d.platform, 'for_app')] }}</span>
+      {% if d.created %}<span>{{ t.added }} {{ dash.x("date", d.created) }}</span>{% endif %}
+      {% if expires %}<span{% if soon %} class="warn"{% endif %}>{% if soon %}{{ dash.icon("warn") }}{{ t.expires_badge }}: {% else %}{{ t.expires }} {% endif %}{{ dash.x("date", expires) }}</span>{% endif %}
+    </p>
+    <div class="actions">
+      {% if soon %}
+      <form method="post" action="/devices/{{ d.id }}/renew" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button primary">{{ t.renew_action }}</button>
+      </form>
+      {% endif %}
+      <details class="danger">
+        <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
+        <form method="post" action="/devices/{{ d.id }}/revoke" class="confirm">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <p><strong>{{ t.revoke_title }}: {{ d.name }}</strong><br>{{ t.revoke_note }}</p>
+          <button class="button danger">{{ t.revoke }}</button>
+        </form>
+      </details>
+    </div>
+  </div>
+</article>
+{% endmacro %}
+{% set first = options[0] %}
+{% set detected = {"apple": t.for_apple, "apple-mac": t.for_mac, "android": t.for_android, "android-app": t.for_android,
+                   "windows": t.for_windows, "linux": t.for_linux}[first] %}
+{# The registry rows (expiry, renewal) by id, and the cards: the dashboard's devices, or the
+   registry's alone while the dashboard data is missing. #}
+{% set rows = fmt.by_key(devices if devices is defined else [], "id") %}
+{% set live_on = dashboard is defined and dashboard %}
+{% set cards = dashboard.devices if live_on else fmt.registry_cards(devices if devices is defined else []) %}
+{% block body %}
+{% macro connect_card(heading) %}
+<section class="card connect" id="add" aria-labelledby="add-h">
+  <{{ heading }} id="add-h">{{ t.add_device }}</{{ heading }}>
+  {% if options|length < 3 %}
+  <p class="detected"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>{{ t.detected.format(device=detected) }}
+    <span class="muted">{{ t.detected_help }}</span></p>
+  {% else %}
+  <p class="muted">{{ t.intro }}</p>
+  {% endif %}
+  {% if no_passpoint_browser %}
+  <div class="notice"><svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg><p>{{ t.other_browser }}</p></div>
+  {% endif %}
+  {% for opt in options %}
+    {% set primary = loop.first %}
+    {% if opt == "apple" %}{{ enrol_button("apple", t.connect_apple if primary else t.for_apple, "phone", primary) }}
+    {% elif opt == "apple-mac" %}{{ enrol_button("apple-mac", t.connect_mac if primary else t.for_mac, "laptop", primary) }}
+    {% elif opt == "android" %}{{ enrol_button("android", t.connect_android if primary else t.for_android, "phone", primary) }}
+    {% elif opt == "android-app" %}{{ enrol_button("eap-config", t.connect_android_app if primary else t.for_android_app, "app", primary) }}
+    {% elif opt in ("windows", "linux") %}
+      {% if primary %}<h3 class="h-sub">{{ t.connect_desktop }} ({{ t.for_windows if opt == "windows" else t.for_linux }})</h3>{% endif %}
+      {{ app_steps(primary) }}
+    {% endif %}
+  {% endfor %}
+  {# A recognised browser gets one or two options; an unknown one already sees every option. #}
+  {% if options|length < 3 %}
+  <details class="others">
+    <summary>{{ t.add_other }}</summary>
+    <div class="grid">
+      {{ enrol_button("apple", t.for_apple, "phone") }}
+      {{ enrol_button("apple-mac", t.for_mac, "laptop") }}
+      {% if settings.passpoint %}{{ enrol_button("android", t.for_android, "phone") }}{% endif %}
+      {{ enrol_button("eap-config", t.for_android_app, "app") }}
+    </div>
+    <h3 class="h-sub">{{ t.for_windows }} / {{ t.for_linux }}</h3>
+    {{ app_steps() }}
+  </details>
+  {% endif %}
+</section>
+{% endmacro %}
+
+{% if not cards %}{{ connect_card("h1") }}{% endif %}
+
+<section class="dev-section" aria-labelledby="devices-h">
+  <div class="section-head">
+    <{{ "h1" if cards else "h2" }} id="devices-h">{{ t.your_devices }} <span class="count" data-part="count">{{ cards|length }}</span></{{ "h1" if cards else "h2" }}>
+    {% if cards %}<a class="pill add-link" href="#add">{{ dash.icon("plus") }}{{ t.add_short }}</a>{% endif %}
+  </div>
+  {% if live_on %}{{ dash.live_line(dashboard) }}{{ dash.banners(dashboard) }}{% endif %}
+  {% if live_on %}{{ dash.house_strip(dashboard.house, hidden=dashboard.telemetry != "ok") }}{% endif %}
+  {% if not cards %}
+  <p class="card empty">{{ t.no_devices }} <span class="muted">{{ t.no_devices_hint }}</span></p>
+  {% endif %}
+  <div class="dev-grid" data-part="devices">
+  {% for d in cards %}{{ device_card(d, rows.get(d.id|string)) }}{% endfor %}
+  </div>
+</section>
+
+{% if cards %}{{ connect_card("h2") }}{% endif %}
+
+{% if live_on %}{{ dash.page_data({"page": "devices", "lang": lang, "api": "/api/devices", "login": "/login",
+                                    "ssid": settings.ssid}, dashboard) }}{% endif %}
+{% endblock %}

@@ -1,0 +1,103 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/netportal-core",
+    "crates/netportal-pki",
+    "crates/netportal-telemetry",
+    "crates/netportal-collect",
+    "crates/netportal-offboard",
+    "crates/netportal-web",
+    "crates/netportal",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+# Every dependency the port needs (docs/ARCHITECTURE.md, "Crates"). Crates refer to them with
+# `name.workspace = true` and may add features locally.
+[workspace.dependencies]
+# internal
+netportal-core = { path = "crates/netportal-core" }
+netportal-pki = { path = "crates/netportal-pki" }
+netportal-telemetry = { path = "crates/netportal-telemetry" }
+netportal-collect = { path = "crates/netportal-collect" }
+netportal-offboard = { path = "crates/netportal-offboard" }
+netportal-web = { path = "crates/netportal-web" }
+
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie-private", "typed-header"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "fs", "process", "io-util"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["fs", "set-header"] }
+http = "1"
+bytes = "1"
+futures = "0.3"
+
+# templates
+minijinja = { version = "3", features = ["json", "urlencode"] }
+
+# PostgreSQL: runtime-checked queries only (no compile-time database). TLS like libpq's default
+# sslmode=prefer (rustls with the same provider as reqwest).
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "derive", "macros", "migrate", "time", "uuid", "json"] }
+
+# OIDC client (its HTTP client is our reqwest; no default features, so no second reqwest)
+openidconnect = { version = "4", default-features = false }
+
+# X.509, EC keys, PKCS#12 (the same OpenSSL the Python `cryptography` package uses)
+openssl = "0.10"
+
+# artefacts
+plist = "1"
+quick-xml = "0.42"
+
+# HTTP client (Authentik, Prometheus, Loki)
+reqwest = { version = "0.13", features = ["json", "query", "form"] }
+
+# metrics
+prometheus-client = "0.25"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# data
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+url = "2"
+percent-encoding = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# time: formatting with `time`, IANA zones (Europe/Berlin days) with `jiff`
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+
+# logging (sqlx takes `log` level filters for its statement logging)
+tracing = "0.1"
+log = "0.4"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry", "tracing-log"] }
+
+# tokens, hashes, constant-time comparisons
+rand = "0.10"
+sha2 = "0.11"
+hmac = "0.13"
+md-5 = "0.11"
+subtle = "2"
+zeroize = "1"
+base64 = "0.23"
+hex = "0.4"
+
+# errors
+thiserror = "2"
+anyhow = "1"
+
+# tests
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+

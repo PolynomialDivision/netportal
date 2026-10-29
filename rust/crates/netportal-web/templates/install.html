@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{# profile: the artefact's format (apple, apple-mac, android, eap-config; Python's `fmt`) #}
+{% set steps = {"apple": t.steps_apple, "apple-mac": t.steps_mac, "android": t.steps_android}.get(profile, t.steps_android_app) %}
+{% set action = t.load_profile if profile in ("apple", "apple-mac") else t.install %}
+{% block body %}
+<section class="card">
+  <p class="eyebrow">{{ t.add_device }}</p>
+  <h1>{{ name }}</h1>
+  {% if profile == "android" and no_passpoint_browser %}
+  <div class="notice"><svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg><p>{{ t.other_browser }}</p></div>
+  {% endif %}
+  <ol class="steps">
+    {% for step in steps %}<li>{{ step.format(ssid=settings.ssid, host=host) }}</li>{% endfor %}
+  </ol>
+  {# A plain link: Android installs a Passpoint file only from a user tap on an element (GET). #}
+  <p class="cta"><a class="button primary big" href="/download/{{ token|urlencode }}"><svg class="icon" aria-hidden="true"><use href="#i-key"/></svg>{{ action }}</a></p>
+  <p class="muted small">{{ t.link_once }}</p>
+</section>
+<p class="backlink"><a href="/"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>{{ t.back_devices }}</a></p>
+{% endblock %}

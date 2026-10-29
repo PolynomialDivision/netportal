@@ -1,0 +1,32 @@
+[package]
+name = "netportal-pki"
+description = "PKI, issuing, artefacts (profiles) and RADIUS Disconnect (pki.py, enroll.py, profiles.py, disconnect.py)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# No dependency on netportal-core: every function here takes explicit parameters, so the
+# crate builds and tests on its own; netportal-web wires the settings and the registry to it.
+[dependencies]
+openssl.workspace = true
+plist.workspace = true
+quick-xml.workspace = true
+base64.workspace = true
+hex.workspace = true
+md-5.workspace = true
+hmac.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "net", "time"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+# The build context of rust/Dockerfile (BuildKit reads <Dockerfile>.dockerignore instead of the
+# repository root's .dockerignore, which leaves rust/ out of the Python image): the Rust
+# workspace without its build output and test runs, and the static files the binary embeds.
+*
+!rust/
+rust/target/
+rust/tests/runs/
+rust/**/__pycache__/
+rust/Dockerfile*
+rust/radius/
+!netportal/static/

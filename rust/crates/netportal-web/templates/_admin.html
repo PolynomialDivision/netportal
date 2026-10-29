@@ -1,0 +1,280 @@
+{#- The admin pages' building blocks (admin.html, admin_aps.html, admin_incidents.html and the
+    device page's deep view), imported. static/admin.js draws the same markup when a page
+    refreshes itself: change both. Payloads are the admin API's (/api/admin/overview,
+    /api/admin/aps, /api/admin/incidents, /api/admin/devices/<id>/raw); a field that is missing
+    leaves its part out, it never breaks the page. -#}
+{%- import "_dash.html" as dash -%}
+
+{#- the admin sections as tabs: the same on every admin page -#}
+{%- macro tabs(active) -%}
+<nav class="adm-tabs" aria-label="{{ t.adm_tabs }}">
+  {%- for key, href, ic in (("overview", "/admin", "home"), ("aps", "/admin/aps", "ap"), ("incidents", "/admin/incidents", "bolt"),
+                            ("devices", "/admin#devices", "people")) %}
+  <a href="{{ href }}"{% if key == active %} aria-current="page"{% endif %}>{{ dash.icon(ic) }}<span>{{ t["adm_tab_" ~ key] }}</span></a>
+  {%- endfor %}
+</nav>
+{%- endmacro -%}
+
+{#- an AP as a room: the API's AP carries name, house, floor and spot itself -#}
+{%- macro ap_room(ap) -%}{{ fmt.ap_room(ap, lang) }}{%- endmacro -%}
+
+{#- the scope of an incident (the AP as a room, the switch or port by name, else the house) -#}
+{%- macro inc_scope(inc) -%}{{ fmt.scope(inc, lang) }}{%- endmacro -%}
+{%- macro inc_kind(inc) -%}{{ t.get("inc_" ~ inc.kind, t.inc_other) }}{%- endmacro -%}
+
+{%- macro duration_between(start, end) -%}{{ fmt.elapsed(start, lang, end) }}{%- endmacro -%}
+
+{#- one incident: what, where, when (open: since when), measured or estimated, the devices that
+    dropped out at the time (links to their deep view) -#}
+{%- macro incident_item(inc, full=False, shown=True) -%}
+{%- set open = inc.open if inc.open is defined else not inc.ended -%}
+{%- set devices = inc.devices if inc.devices is defined and inc.devices else [] -%}
+{%- set affected = inc.affected if inc.affected is defined and inc.affected is not none else devices|length -%}
+<li class="inc {{ 'inc-open' if open else 'inc-closed' }}{% if inc.basis == 'inferred' %} inferred{% endif %}" data-kind="{{ inc.kind }}" data-state="{{ 'open' if open else 'closed' }}" id="incident-{{ inc.id }}"{% if not shown %} hidden{% endif %}>
+  <span class="inc-icon">{{ dash.icon("bolt") }}</span>
+  <div class="inc-main">
+    <p class="inc-title"><strong>{{ inc_kind(inc) }}</strong> <span class="inc-scope">{{ inc_scope(inc) }}</span> {{ dash.basis_tag(inc.basis) }}</p>
+    <p class="inc-when">
+      {%- if open %}<span class="badge sev-bad">{{ t.inc_open }}</span> {{ (t.inc_since|e).format(when=dash.time(inc.started)) }} · {{ dash.x("duration", inc.duration_s) if inc.duration_s is defined and inc.duration_s is not none else duration_between(inc.started, none) }}
+      {%- else %}{{ (t.inc_span|e).format(start=dash.time(inc.started), end=dash.time(inc.ended)) }} · {{ t.inc_lasted.format(duration=dash.x("duration", inc.duration_s) if inc.duration_s is defined and inc.duration_s is not none else duration_between(inc.started, inc.ended)) }}{% endif %}</p>
+    {%- if affected %}
+    <p class="inc-devices">{% if devices %}<span>{{ t.inc_affected_list }}</span> {% else %}<span>{{ t.inc_affected.format(n=affected) }}</span>{% endif %}
+      {%- if devices %}{% for dv in devices[:(50 if full else 4)] %}{% if not loop.first %}, {% endif %}<a href="/admin/devices/{{ dv.id }}">{{ dv.name }}</a>{% if full and dv.owner %} <span class="muted">({{ dv.owner.display or dv.owner.username if dv.owner is mapping else dv.owner }})</span>{% endif %}{% endfor %}{% if devices|length > (50 if full else 4) %} …{% endif %}{% endif %}</p>
+    {%- elif full and (inc.devices is defined or inc.affected is defined) %}<p class="inc-devices muted">{{ t.inc_affected_none }}</p>
+    {%- endif %}
+    {%- if full and inc.detail %}
+    <details class="inc-detail"><summary>{{ t.inc_detail }}</summary><dl class="mini-kv">{% for k, v in inc.detail|items %}<div><dt>{{ k }}</dt><dd class="mono">{{ fmt.plain(v) }}</dd></div>{% endfor %}{% if inc.subject %}<div><dt>subject</dt><dd class="mono">{{ inc.subject }}</dd></div>{% endif %}</dl></details>
+    {%- endif %}
+  </div>
+</li>
+{%- endmacro -%}
+
+{#- --- access points --------------------------------------------------------------------- -#}
+{#- the radios of an AP: band and channel, how busy the channel is (meter + percent) -#}
+{%- macro radios(ap) -%}
+{%- set list = ap.radios if ap.radios is defined and ap.radios else [] -%}
+{%- if list %}
+<ul class="ap-radios">
+  {%- for r in list %}
+  {%- set u = fmt.util_of(r) %}
+  {%- set tone = "bad" if u is not none and u >= 0.8 else ("warn" if u is not none and u >= 0.6 else "ok") %}
+  <li><span class="ap-radio-name">{{ dash.x("band", r.band) if r.band else r.radio }}{% if r.channel %} · {{ r.channel }}{% endif %}</span>
+    {%- if u is not none %}{{ dash.meter((u * 100)|round, tone) }}<span class="tone-text-{{ tone }}">{{ dash.x("percent", u) }}</span>{% endif %}
+    {%- if r.clients is defined and r.clients is not none %}<span class="muted">{{ t.ap_clients.format(n=r.clients) }}</span>{% endif %}</li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{%- endmacro -%}
+
+{#- what to look at: from the AP's values (format::ap_warnings) and its open incidents -#}
+{%- macro ap_warnings(ap) -%}
+{%- set w = fmt.ap_warnings(ap) -%}
+{%- set open = ap.open_incidents if ap.open_incidents is defined and ap.open_incidents else [] -%}
+{%- if w or open %}<span class="ap-warns">
+  {%- for code in w %}<span class="badge sev-{{ 'bad' if code in ('down', 'overloaded') else 'warn' }}">{{ dash.icon("warn") }}{{ t.get("ap_warn_" ~ code, code) }}</span>{% endfor %}
+  {%- for i in open %}{% if i.kind != "ap_down" or "down" not in w %}<a class="badge sev-bad" href="/admin/incidents#incident-{{ i.id }}">{{ dash.icon("bolt") }}{{ inc_kind(i) }}</a>{% endif %}{% endfor %}
+</span>{% endif %}
+{%- endmacro -%}
+
+{%- set ap_state_icon = {"up": "check", "down": "bad", "unknown": "help"} -%}
+
+{#- an AP at a glance (the overview): room, state, devices, channel load, warnings -#}
+{%- macro ap_tile(ap) -%}
+{%- set st = fmt.ap_state(ap) -%}
+{%- set n = fmt.ap_clients(ap) -%}
+{%- set weak = fmt.ap_weak_share(ap) -%}
+<li class="ap-tile ap-{{ st }}" data-ap="{{ ap.mac }}">
+  <a class="ap-link" href="/admin/aps#ap-{{ (ap.mac or ap.name or '')|replace(':', '') }}">
+    <span class="ap-head">{{ dash.icon("ap") }}<strong>{{ ap_room(ap) }}</strong>
+      <span class="ap-state tone-text-{{ {'up': 'ok', 'down': 'bad'}.get(st, 'muted') }}">{{ dash.icon(ap_state_icon[st]) }}<span class="sr">{{ t["ap_state_" ~ st] }}</span></span></span>
+    <span class="ap-sub">{% if n is not none %}{{ t.ap_clients.format(n=n) }}{% endif %}{% if weak is not none %} · {{ t.ap_weak.format(pct=dash.x("percent", weak)) }}{% endif %}</span>
+  </a>
+  {{ radios(ap) }}
+  {{ ap_warnings(ap) }}
+</li>
+{%- endmacro -%}
+
+{#- --- rejected logins (24 h): OVERVIEW["auth"] ------------------------------------------- -#}
+{%- macro auth_failures(af) -%}
+{%- set af = af if af is mapping else {"recent": af or []} -%}
+{%- set rows = af.recent or af.latest or af.events or [] -%}
+{%- set total = af.count if af.count is defined and af.count is not none else rows|length -%}
+{%- set by_reason = af.by_reason if af.by_reason is defined and af.by_reason else {} -%}
+<section class="card ov-auth" aria-labelledby="ov-auth-h" data-part="ov-auth">
+  <h2 id="ov-auth-h">{{ dash.icon("reject") }}{{ t.ov_auth }} {% if total %}<span class="count">{{ total }}{% if af.truncated %}+{% endif %}</span>{% endif %}</h2>
+  {%- if af.available is defined and not af.available %}
+  <p class="muted">{{ dash.icon("warn") }} {{ t.ov_unavailable }}</p>
+  {%- elif not total %}
+  <p class="all-good">{{ dash.icon("check") }}{{ t.ov_auth_none }}</p>
+  {%- else %}
+  {%- if af.devices is defined %}<p class="muted small">{{ t.ov_auth_spread.format(devices=af.devices, macs=af.macs) }}</p>{% endif %}
+  <ul class="reason-bars">
+    {%- for reason, n in by_reason|dictsort(by="value", reverse=True) %}
+    <li><span class="rb-label">{{ t.get("rr_" ~ dash.reason_key(reason) ~ "_admin", reason) }} <span class="mono muted">{{ reason }}</span></span><b>{{ n }}</b></li>
+    {%- endfor %}
+  </ul>
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th scope="col">{{ t.th_at }}</th><th scope="col">{{ t.th_device }}</th><th scope="col">{{ t.th_reason }}</th><th scope="col">{{ t.th_mac }}</th><th scope="col">{{ t.th_ap }}</th></tr></thead>
+    <tbody>
+    {%- for r in rows[:12] %}
+      <tr><td>{{ dash.time(r.at) }}</td>
+        <td>{% if r.device_id %}<a href="/admin/devices/{{ r.device_id }}">{{ r.device_name or r.device_id|string|truncate(8) }}</a>{% else %}<span class="muted">{{ t.ov_auth_unknown }}</span>{% endif %}{% if r.owner %} <span class="muted">{{ (r.owner.display or r.owner.username) if r.owner is mapping else r.owner }}</span>{% endif %}{% if r.serial and not r.device_id %} <span class="mono muted">{{ r.serial|truncate(14) }}</span>{% endif %}</td>
+        <td>{{ t.get("rr_" ~ dash.reason_key(r.reason) ~ "_admin", r.reason) }}{% if r.count is defined and r.count and r.count > 1 %} <span class="badge tone-info">{{ t.ov_auth_repeats.format(n=r.count) }}</span>{% endif %}</td>
+        <td class="mono">{{ r.mac or "–" }}</td>
+        <td>{% if r.ap is defined and r.ap %}{{ ap_room(r.ap) }}{% elif r.bssid %}<span class="mono">{{ r.bssid }}</span>{% else %}–{% endif %}</td></tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  </div>
+  {%- endif %}
+</section>
+{%- endmacro -%}
+
+{#- --- data freshness and the collector's jobs: OVERVIEW["freshness"], OVERVIEW["jobs"] ------ -#}
+{#- a job's state (views::job_state: older than three intervals of the collector's schedule is
+    late) and its tone -#}
+{%- set job_tone = {"ok": "ok", "failed": "bad", "never": "warn", "late": "warn", "running": "info"} -%}
+
+{%- macro freshness(fr, jobs, available=True) -%}
+{%- set fr = fr if fr is mapping else {} -%}
+{%- set items = jobs or [] -%}
+<section class="card ov-fresh" aria-labelledby="ov-fresh-h" data-part="ov-fresh">
+  <h2 id="ov-fresh-h">{{ dash.icon("db") }}{{ t.ov_fresh }}</h2>
+  <p class="muted small">{{ t.ov_fresh_intro }}</p>
+  <ul class="fresh-list">
+    {%- set age = fr.wifi_data_age_s %}
+    {%- set stale = age is not number or age > 600 %}
+    <li class="fresh tone-{{ 'warn' if stale else 'ok' }}">{{ dash.icon("warn" if stale else "check") }}<span class="fresh-name">{{ t.fresh_wifi }}</span>
+      <span class="fresh-age">{% if age is number %}{{ t.fresh_age.format(age=dash.x("duration", age)) }}{% else %}{{ t.fresh_none }}{% endif %}{% if stale and age is number %} · <strong>{{ t.fresh_stale }}</strong>{% endif %}</span></li>
+    {%- set p = fr.prometheus or "off" %}
+    <li class="fresh tone-{{ 'ok' if p == 'ok' else 'warn' }}">{{ dash.icon("check" if p == "ok" else "warn") }}<span class="fresh-name">{{ t.fresh_prometheus }}</span>
+      <span class="fresh-age">{{ t.get("fresh_state_" ~ p, p) }}</span></li>
+    {%- set ok = fr.jobs_ok %}
+    <li class="fresh tone-{{ 'ok' if ok else 'warn' }}">{{ dash.icon("check" if ok else "warn") }}<span class="fresh-name">{{ t.fresh_jobs }}</span>
+      <span class="fresh-age">{{ t.fresh_jobs_ok if ok else (t.fresh_jobs_none if ok is none else t.fresh_jobs_failed) }}{% if fr.oldest_job_success_age_s is not none and fr.oldest_job_success_age_s is defined %} · {{ t.fresh_oldest.format(age=dash.x("duration", fr.oldest_job_success_age_s)) }}{% endif %}</span></li>
+  </ul>
+  {%- if available is not none and available == false %}
+  <p class="muted">{{ dash.icon("warn") }} {{ t.ov_unavailable }}</p>
+  {%- elif items %}
+  <div class="table-wrap">
+  <table class="data jobs">
+    <thead><tr><th scope="col">{{ t.th_job }}</th><th scope="col">{{ t.th_state }}</th><th scope="col">{{ t.th_last_success }}</th><th scope="col">{{ t.th_last_attempt }}</th><th scope="col">{{ t.th_duration }}</th></tr></thead>
+    <tbody>
+    {%- for j in items %}
+      {%- set st = fmt.job_state(j) %}
+      <tr class="job-{{ st }}"><th scope="row">{{ t.get("job_" ~ j.name, j.name) }} <span class="mono muted">{{ j.name }}</span></th>
+        <td><span class="badge tone-{{ job_tone[st] }}">{{ dash.icon(dash.tone_icon[job_tone[st]]) }}{{ t["job_" ~ st] }}</span></td>
+        <td>{% if j.last_success %}{{ dash.time(j.last_success, "ago") }}{% else %}–{% endif %}</td>
+        <td>{% if j.last_attempt %}{{ dash.time(j.last_attempt, "ago") }}{% else %}–{% endif %}</td>
+        <td>{% if j.duration_s is not none and j.duration_s is defined %}{{ dash.x("duration", j.duration_s) if j.duration_s >= 1 else dash.x("ms", j.duration_s * 1000) }}{% else %}–{% endif %}</td></tr>
+      {%- if j.last_error and st == "failed" %}<tr class="job-error"><td colspan="5"><span class="mono">{{ j.last_error|truncate(300, "") }}</span></td></tr>{% endif %}
+    {%- endfor %}
+    </tbody>
+  </table>
+  </div>
+  {%- endif %}
+</section>
+{%- endmacro -%}
+
+{#- --- a device's raw data (deep view): RAW ------------------------------------------------------ -#}
+{#- (key, header text, how the cell is shown) per part; static/admin.js has the same table -#}
+{%- set raw_columns = {
+  "auth": [("at", "th_at", "when"), ("result", "th_result", "result"), ("reason", "th_reason", "reason"), ("mac", "th_mac", "mono"),
+           ("ssid", "th_ssid", "text"), ("bssid", "th_bssid", "mono"), ("nas_ip", "th_nas", "mono")],
+  "acct": [("started", "th_started", "when"), ("stopped", "th_stopped", "when"), ("session_time_s", "th_session_time", "duration"),
+           ("output_octets", "th_down", "bytes"), ("input_octets", "th_up", "bytes"), ("terminate_cause", "th_cause", "cause"),
+           ("mac", "th_mac", "mono"), ("bssid", "th_bssid", "mono"), ("framed_ip", "th_ip", "mono"), ("link", "th_link", "mono"),
+           ("nas_ip", "th_nas", "mono"), ("acct_session_id", "th_session", "mono")],
+  "events": [("at", "th_at", "when"), ("kind", "th_kind", "text"), ("ap_name", "th_ap", "text"), ("from_ap_name", "th_from_ap", "text"),
+             ("radio", "th_radio", "text"), ("channel", "th_channel", "text"), ("rssi", "th_rssi", "text"),
+             ("duration_s", "th_duration", "duration"), ("rx_bytes", "th_rx", "bytes"), ("tx_bytes", "th_tx", "bytes"),
+             ("mac", "th_mac", "mono"), ("source", "th_source", "mono")],
+  "macs": [("mac", "th_mac", "mono"), ("randomized", "th_randomized", "bool"), ("current", "th_current", "bool"),
+           ("first_seen", "th_first_seen", "when"), ("last_seen", "th_last_seen", "when"), ("auth_count", "th_logins", "number"),
+           ("start", "th_window", "window"), ("other_owners", "th_conflict", "conflict")],
+  "days": [("day", "th_day", "day"), ("online_s", "th_online", "duration"), ("signal_avg_dbm", "th_signal", "dbm"),
+           ("health_avg", "th_health", "number"), ("rx_bytes", "th_down", "bytes"), ("tx_bytes", "th_up", "bytes"),
+           ("roams", "th_roams", "number"), ("reconnects", "th_reconnects", "number"), ("disconnects", "th_disconnects", "number"),
+           ("macs", "th_macs", "number"), ("auth_ok", "th_auth_ok", "number"), ("auth_failed", "th_auth_failed", "number")],
+  "incidents": [("started", "th_started", "when"), ("ended", "th_ended", "when"), ("kind", "th_kind", "incident"),
+                ("subject_name", "th_subject", "text"), ("duration_s", "th_duration", "duration"), ("basis", "th_basis", "basis")],
+} -%}
+{%- set raw_aliases = {"auth": ("auth", "radius_auth", "auth_events"), "acct": ("acct", "radius_acct", "acct_sessions"),
+                       "events": ("events", "connection_events"), "macs": ("windows", "macs", "mac_windows"),
+                       "days": ("days",), "incidents": ("incidents",)} -%}
+{%- set raw_source = {"auth": "radius_auth", "acct": "radius_acct", "events": "unifi_syslog", "macs": "device_mac",
+                      "days": "device_day", "incidents": "incident"} -%}
+{%- set raw_parts = ("auth", "acct", "events", "macs", "days", "incidents") -%}
+
+{%- macro cell(kind, v) -%}
+{%- if v is none or v == "" -%}<span class="muted">–</span>
+{%- elif kind == "when" -%}{{ dash.time(v) }}
+{%- elif kind == "result" -%}<span class="badge tone-{{ 'ok' if v == 'accept' else 'bad' }}">{{ t.get("res_" ~ v, v) }}</span>
+{%- elif kind == "reason" -%}{{ v }}
+{%- elif kind == "cause" -%}{{ v }} <span class="muted">{{ t["cause_" ~ fmt.cause_key(v)] }}</span>
+{%- elif kind == "bool" -%}{{ t.yes if v else t.no }}
+{%- elif kind == "day" -%}{{ fmt.day(v, lang) }}
+{%- elif kind == "dbm" -%}{{ dash.x("dbm", v) }}
+{%- elif kind == "incident" -%}{{ t.get("inc_" ~ v, v) }} <span class="mono muted">{{ v }}</span>
+{%- elif kind == "basis" -%}{{ t.get("basis_" ~ v, v) }}
+{%- elif kind == "conflict" -%}{% if v %}<span class="badge sev-warn">{{ t.raw_conflict.format(n=v) }}</span>{% else %}<span class="muted">–</span>{% endif %}
+{%- elif kind in ("duration", "bytes", "number") -%}{{ dash.x(kind, v) }}
+{%- elif kind == "mono" -%}<span class="mono">{{ v }}</span>
+{%- else -%}{{ v }}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro raw_table(part, rows, conflicts={}) -%}
+{%- if rows %}
+<div class="table-wrap">
+<table class="data raw-table">
+  <thead><tr>{% for key, th, kind in raw_columns[part] %}<th scope="col">{{ t[th] }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {%- for r in rows %}
+    <tr{% if part == "auth" and r.result == "reject" %} class="row-bad"{% endif %}>
+    {%- for key, th, kind in raw_columns[part] -%}
+      {%- if kind == "window" -%}<td>{% if r.start %}{{ dash.time(r.start) }}{% else %}<span class="muted">…</span>{% endif %} – {% if r.end %}{{ dash.time(r.end) }}{% else %}<span class="muted">{{ t.inc_open }}</span>{% endif %}</td>
+      {%- elif kind == "conflict" -%}<td>{{ cell(kind, (conflicts.get(r.mac) or {}).get("other_owners") if r.other_owners is not defined else r.other_owners) }}</td>
+      {%- else -%}<td>{{ cell(kind, r[key] if key in r else none) }}</td>
+      {%- endif -%}
+    {%- endfor -%}
+    </tr>
+  {%- endfor %}
+  </tbody>
+</table>
+</div>
+{%- else %}
+<p class="muted raw-empty">{{ t.raw_empty }}</p>
+{%- endif %}
+{%- endmacro -%}
+
+{#- the raw-data section of the deep view: tabs per source (the script switches them; without it
+    the parts stand one below the other), loaded with the page or on demand -#}
+{%- macro raw_section(d, raw, rng) -%}
+{%- set conflicts = fmt.by_key(raw.conflicts if raw and raw.conflicts is defined and raw.conflicts else [], "mac") -%}
+<section class="card raw" id="raw" aria-labelledby="raw-h" data-raw>
+  <div class="section-head">
+    <h2 id="raw-h">{{ dash.icon("db") }}{{ t.raw_title }}</h2>
+    <button type="button" class="pill needs-js" data-raw-load{% if raw %} hidden{% endif %}>{{ dash.icon("list") }}{{ t.raw_load }}</button>
+  </div>
+  <p class="muted small">{{ t.raw_intro }}</p>
+  <p class="raw-status" data-raw-status role="status">{% if raw and raw["from"] %}{{ (t.raw_span|e).format(start=dash.time(raw["from"]), end=dash.time(raw.to or raw.until)) }}{% endif %}</p>
+  <div class="raw-tabs needs-js" role="tablist" aria-label="{{ t.raw_title }}" data-raw-tabs{% if not raw %} hidden{% endif %}>
+    {%- for part in raw_parts %}
+    {%- set rows = namespace(v=none) %}{% for alias in raw_aliases[part] %}{% if raw and rows.v is none and raw[alias] is defined %}{% set rows.v = raw[alias] %}{% endif %}{% endfor %}
+    <button type="button" role="tab" id="raw-tab-{{ part }}" aria-controls="raw-{{ part }}" aria-selected="{{ 'true' if loop.first else 'false' }}" data-raw-tab="{{ part }}">{{ t["raw_tab_" ~ part] }} <span class="count" data-raw-count="{{ part }}">{{ (rows.v or [])|length }}</span></button>
+    {%- endfor %}
+  </div>
+  <div data-raw-parts{% if not raw %} hidden{% endif %}>
+  {%- for part in raw_parts %}
+    {%- set rows = namespace(v=none) %}{% for alias in raw_aliases[part] %}{% if raw and rows.v is none and raw[alias] is defined %}{% set rows.v = raw[alias] %}{% endif %}{% endfor %}
+    {%- set cut = raw and raw.truncated is defined and raw.truncated is mapping and raw.truncated.get(part) %}
+    <div class="raw-part" id="raw-{{ part }}" role="tabpanel" aria-labelledby="raw-tab-{{ part }}" data-raw-part="{{ part }}">
+      <h3 class="raw-part-h">{{ t["raw_tab_" ~ part] }} <span class="muted small">· {{ t.get("src_admin_" ~ raw_source[part], raw_source[part]) }}</span></h3>
+      <div data-raw-body>{% if cut %}<p class="muted small">{{ t.raw_truncated.format(n=(raw.limits or {}).get(part, (rows.v or [])|length)) }}</p>{% endif %}{{ raw_table(part, rows.v or [], conflicts) }}</div>
+    </div>
+  {%- endfor %}
+  </div>
+</section>
+{%- endmacro -%}

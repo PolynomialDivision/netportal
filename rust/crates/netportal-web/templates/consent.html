@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <div class="hero-mark small" aria-hidden="true"><svg class="icon"><use href="#i-app"/></svg></div>
+  <h1>{{ t.consent }}</h1>
+  <p class="muted">{{ t.consent_note.format(ssid=settings.ssid) }}</p>
+  <p class="muted small">{{ t.consent_app }}: <strong>{{ app_name }}</strong><br>{{ t.consent_return }}: <code>{{ redirect_uri }}</code></p>
+  <form method="post" action="/oauth/authorize">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% for key in consent_args %}
+      {% if args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ args.get(key) }}">{% endif %}
+    {% endfor %}
+    <label class="field">{{ t.device_name }}
+      <input name="name" value="{{ name }}" maxlength="60">
+      <span class="muted small">{{ t.consent_name_help }}</span>
+    </label>
+    <p class="cta"><button class="button primary big">{{ t.allow }}</button></p>
+  </form>
+</section>
+<p class="backlink"><a href="/"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>{{ t.cancel }}</a></p>
+{% endblock %}

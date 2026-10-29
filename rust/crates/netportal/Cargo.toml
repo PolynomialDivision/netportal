@@ -1,0 +1,32 @@
+[package]
+name = "netportal"
+description = "The netportal binary: serve, init-db, offboard, collect, job, pki (__main__.py, wsgi.py)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "netportal"
+path = "src/main.rs"
+
+[dependencies]
+netportal-core.workspace = true
+netportal-pki.workspace = true
+netportal-telemetry.workspace = true
+netportal-collect.workspace = true
+netportal-offboard.workspace = true
+netportal-web.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+url.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

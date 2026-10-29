@@ -1,0 +1,7 @@
+# cargo audit (check.sh): the advisories ignored on purpose. The same list, with the reasons, is
+# deny.toml's [advisories] ignore: keep both in step.
+[advisories]
+ignore = [
+    "RUSTSEC-2023-0071",   # rsa via openidconnect: ID-token signature verification only
+    "RUSTSEC-2026-0387",   # crypto-bigint 0.5 via elliptic-curve 0.13: ECDSA verification only
+]

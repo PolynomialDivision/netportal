@@ -1,0 +1,51 @@
+[package]
+name = "netportal-web"
+description = "The portal: routes, sessions, OIDC, Let's Wi-Fi, templates, static files, /metrics (web.py, metrics.py)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+netportal-core.workspace = true
+netportal-pki.workspace = true
+netportal-telemetry.workspace = true
+netportal-offboard.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http = { workspace = true, features = ["timeout", "limit"] }
+http.workspace = true
+bytes.workspace = true
+futures.workspace = true
+minijinja = { workspace = true, features = ["serde", "loop_controls"] }
+openidconnect.workspace = true
+reqwest.workspace = true
+prometheus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+uuid.workspace = true
+time.workspace = true
+jiff.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+subtle.workspace = true
+base64.workspace = true
+hex.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+openssl.workspace = true
+
+[lints]
+workspace = true

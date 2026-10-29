@@ -1,0 +1,17 @@
+# Test tooling of rust/tests/radius/run.sh (not part of the product): issues the device
+# certificates for the RADIUS cases with the Rust PKI (crates/netportal-pki), from the files of
+# `netportal pki`. Its own workspace (the [workspace] below), so it stays outside the product
+# workspace in rust/Cargo.toml; run.sh seeds its Cargo.lock from rust/Cargo.lock, so it builds
+# with the same versions.
+[package]
+name = "radius-test-certs"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+netportal-pki = { path = "../../../crates/netportal-pki" }
+time = "0.3"
+uuid = { version = "1", features = ["v4"] }

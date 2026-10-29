@@ -1,0 +1,128 @@
+{
+ "_about": "netportal/presence.py decide() + public() for PresencePagesTests.test_the_backends_presence_renders (NOW 2026-10-25T12:00:00Z), made by presence_backend.py",
+ "cases": {
+  "connecting": {
+   "basis": "measured",
+   "confirmed_at": "2026-10-25T11:59:57+00:00",
+   "confirmed_by": "radius_auth",
+   "evidence": [
+    {
+     "at": "2026-10-25T11:59:57+00:00",
+     "kind": "accept",
+     "source": "radius_auth"
+    },
+    {
+     "at": "2026-10-25T11:58:20+00:00",
+     "kind": "association_gone",
+     "source": "prometheus"
+    }
+   ],
+   "poll_s": 5,
+   "reason": "accept_pending",
+   "session": null,
+   "since": "2026-10-25T11:59:57+00:00",
+   "stale_after_s": 660,
+   "state": "connecting"
+  },
+  "offline": {
+   "basis": "measured",
+   "confirmed_at": "2026-10-25T11:58:20+00:00",
+   "confirmed_by": "prometheus",
+   "evidence": [
+    {
+     "at": "2026-10-25T11:58:20+00:00",
+     "kind": "association_gone",
+     "source": "prometheus"
+    }
+   ],
+   "poll_s": 30,
+   "reason": "association_gone",
+   "session": null,
+   "since": "2026-10-25T10:58:20+00:00",
+   "stale_after_s": 660,
+   "state": "offline"
+  },
+  "online": {
+   "basis": "measured",
+   "confirmed_at": "2026-10-25T11:59:48+00:00",
+   "confirmed_by": "radius_acct",
+   "evidence": [
+    {
+     "at": "2026-10-25T11:59:48+00:00",
+     "kind": "acct_interim",
+     "source": "radius_acct"
+    },
+    {
+     "at": "2026-10-25T11:59:46+00:00",
+     "kind": "acct_start",
+     "source": "radius_acct"
+    },
+    {
+     "at": "2026-10-25T11:59:45+00:00",
+     "kind": "accept",
+     "source": "radius_auth"
+    },
+    {
+     "at": "2026-10-25T11:58:20+00:00",
+     "kind": "association_gone",
+     "source": "prometheus"
+    }
+   ],
+   "poll_s": 5,
+   "reason": "acct_interim",
+   "session": {
+    "acct_session_id": "A-1",
+    "ap": {
+     "floor": 0,
+     "house": "colbe",
+     "mac": "d0:21:f9:00:00:03",
+     "name": "ap-colbe-0-far",
+     "spot": "far"
+    },
+    "cause": null,
+    "interim_basis": "measured",
+    "interim_s": 300,
+    "nas_ip": "10.10.0.23",
+    "started": "2026-10-25T11:59:46+00:00",
+    "stopped": null,
+    "updated": "2026-10-25T11:59:48+00:00"
+   },
+   "since": "2026-10-25T11:59:46+00:00",
+   "stale_after_s": 660,
+   "state": "online"
+  },
+  "unknown": {
+   "basis": "inferred",
+   "confirmed_at": null,
+   "confirmed_by": null,
+   "evidence": [
+    {
+     "at": "2026-10-25T10:36:40+00:00",
+     "kind": "acct_interim",
+     "source": "radius_acct"
+    },
+    {
+     "at": "2026-10-25T09:30:00+00:00",
+     "kind": "acct_start",
+     "source": "radius_acct"
+    }
+   ],
+   "poll_s": 30,
+   "reason": "session_stale",
+   "session": {
+    "acct_session_id": "A-0",
+    "ap": null,
+    "cause": null,
+    "interim_basis": "measured",
+    "interim_s": 300,
+    "nas_ip": "10.10.0.23",
+    "started": "2026-10-25T09:30:00+00:00",
+    "stopped": null,
+    "updated": "2026-10-25T10:36:40+00:00"
+   },
+   "since": null,
+   "stale_after_s": 660,
+   "state": "unknown"
+  }
+ }
+}

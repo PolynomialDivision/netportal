@@ -1,0 +1,5 @@
+# The build context of rust/radius/Dockerfile (BuildKit reads <Dockerfile>.dockerignore): only
+# rust/radius/ (the repository root's .dockerignore would send rust/target, gigabytes).
+*
+!rust/radius/
+rust/radius/Dockerfile*

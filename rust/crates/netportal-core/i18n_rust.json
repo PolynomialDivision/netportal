@@ -1,0 +1,23 @@
+{
+  "source": "texts the Rust version adds (security review 2026-10-29), merged into i18n.json's at load; a key here must not exist there (test_rust_texts_only_add)",
+  "texts": {
+    "en": {
+      "consent_app": "App",
+      "consent_return": "Afterwards your browser opens",
+      "too_many_devices": "You have reached the limit of {n} devices. Remove a device you no longer use under \"Your devices\", then try again.",
+      "rate_limited": "Too many new devices or downloads in a short time. Please try again later."
+    },
+    "de": {
+      "consent_app": "App",
+      "consent_return": "Danach öffnet dein Browser",
+      "too_many_devices": "Du hast die Grenze von {n} Geräten erreicht. Entferne unter \"Deine Geräte\" ein Gerät, das du nicht mehr nutzt, und versuche es dann noch einmal.",
+      "rate_limited": "Zu viele neue Geräte oder Downloads in kurzer Zeit. Bitte versuche es später noch einmal."
+    },
+    "uk": {
+      "consent_app": "Застосунок",
+      "consent_return": "Потім ваш браузер відкриє",
+      "too_many_devices": "Досягнуто ліміту пристроїв ({n}). Видаліть у розділі \"Ваші пристрої\" пристрій, яким ви більше не користуєтеся, і спробуйте ще раз.",
+      "rate_limited": "Забагато нових пристроїв або завантажень за короткий час. Спробуйте пізніше."
+    }
+  }
+}
