@@ -9,7 +9,7 @@
 {%- macro tabs(active) -%}
 <nav class="adm-tabs" aria-label="{{ t.adm_tabs }}">
   {%- for key, href, ic in (("overview", "/admin", "home"), ("aps", "/admin/aps", "ap"), ("incidents", "/admin/incidents", "bolt"),
-                            ("devices", "/admin#devices", "people")) %}
+                            ("devices", "/admin#devices", "people"), ("home", "/admin/home", "cast")) %}
   <a href="{{ href }}"{% if key == active %} aria-current="page"{% endif %}>{{ dash.icon(ic) }}<span>{{ t["adm_tab_" ~ key] }}</span></a>
   {%- endfor %}
 </nav>

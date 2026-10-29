@@ -21,7 +21,7 @@
 {% set back = "&amp;from=admin"|safe if from_admin and not request.path is startingwith("/admin/") else "" %}
 {% block body %}
 {% if from_admin %}{{ adm.tabs("devices") }}{% endif %}
-<p class="backlink"><a href="{{ '/admin' if from_admin else '/' }}">{{ dash.icon("back") }}{{ t.adm_tab_devices if from_admin else t.back_devices }}</a></p>
+<p class="backlink"><a href="{{ '/admin' if from_admin else '/wifi' }}">{{ dash.icon("back") }}{{ t.adm_tab_devices if from_admin else t.back_devices }}</a></p>
 
 <article class="card dev dev-detail" id="device-{{ d.id }}" data-device="{{ d.id }}">
   <div class="dev-head">
@@ -126,7 +126,7 @@
   </dl>
   <details class="danger">
     <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
-    <form method="post" action="/devices/{{ d.id }}/revoke" class="confirm">
+    <form method="post" action="/wifi/devices/{{ d.id }}/revoke" class="confirm">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       {% if from_admin %}<input type="hidden" name="back" value="/admin">{% endif %}
       <p><strong>{{ t.revoke_title }}: {{ d.name }}</strong><br>{{ t.revoke_note }}</p>

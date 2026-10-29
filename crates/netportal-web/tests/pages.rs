@@ -893,6 +893,7 @@ fn settings() -> SettingsView {
         display_name: "Example".into(),
         home: "https://example.org/".into(),
         ssid: "Example".into(),
+        iot_ssid: "Example-IoT".into(),
         passpoint: true,
     }
 }
@@ -1005,11 +1006,11 @@ impl Site {
             assert_eq!(sub, ADMIN_SUB, "{url}: admins only");
             return self.device_page(url, lang, sub, id, true);
         }
-        if let Some(id) = path.strip_prefix("/devices/") {
+        if let Some(id) = path.strip_prefix("/wifi/devices/") {
             return self.device_page(url, lang, sub, id, false);
         }
         match path {
-            "/" => {
+            "/wifi" => {
                 let own: Vec<&Value> = self.rows.iter().filter(|r| r["owner"] == sub).collect();
                 let page = json!({"devices": own, "dashboard": self.dashboard(&own, None),
                                   "options": ["apple", "apple-mac", "android", "android-app", "windows", "linux"]});
@@ -1161,7 +1162,7 @@ mod devices_page_tests {
     fn test_every_language_renders_every_state() {
         let site = Site::new();
         for lang in LANGS {
-            let page = site.get("/", lang, RESIDENT_SUB);
+            let page = site.get("/wifi", lang, RESIDENT_SUB);
             assert_csp_safe(&page);
             assert!(page.contains(&format!(r#"<html lang="{lang}">"#)));
             for state in ["online", "offline", "never_connected"] {
@@ -1177,7 +1178,7 @@ mod devices_page_tests {
 
     #[test]
     fn test_the_cards_are_complete_without_javascript() {
-        let page = Site::new().get("/", "de", RESIDENT_SUB);
+        let page = Site::new().get("/wifi", "de", RESIDENT_SUB);
         for text in [
             "Scharni · 2. Stock · Ecke",
             "5 GHz · Kanal 36 · Wi-Fi 6",
@@ -1192,18 +1193,18 @@ mod devices_page_tests {
         ] {
             assert!(page.contains(text), "{text}");
         }
-        assert!(page.contains(&format!(r#"href="/devices/{}""#, ids()[0])));
-        assert!(page.contains(&format!(r#"action="/devices/{}/rename""#, ids()[0])));
+        assert!(page.contains(&format!(r#"href="/wifi/devices/{}""#, ids()[0])));
+        assert!(page.contains(&format!(r#"action="/wifi/devices/{}/rename""#, ids()[0])));
         assert!(page.contains(&esc(&t("de", "diag_never_connected_do"))));
         assert!(page.contains(&t("de", "expires_badge")));
-        assert!(page.contains(&format!(r#"action="/devices/{}/renew""#, ids()[2])));
+        assert!(page.contains(&format!(r#"action="/wifi/devices/{}/renew""#, ids()[2])));
         assert!(page.contains(r#"value="android""#));
         assert!(page.contains(r#"id="add""#));
     }
 
     #[test]
     fn test_a_card_shows_two_findings_and_links_to_the_rest() {
-        let page = Site::new().get("/", "en", RESIDENT_SUB);
+        let page = Site::new().get("/wifi", "en", RESIDENT_SUB);
         let card = between(&page, 1, 2);
         assert_eq!(card.matches(r#"class="finding sev-"#).count(), 2);
         assert!(card.contains(&fill(&t("en", "diag_more"), &[("n", "3")])));
@@ -1211,12 +1212,12 @@ mod devices_page_tests {
 
     #[test]
     fn test_the_name_is_a_heading_with_an_edit_button() {
-        let page = Site::new().get("/", "en", RESIDENT_SUB);
+        let page = Site::new().get("/wifi", "en", RESIDENT_SUB);
         let card = between(&page, 0, 1);
         assert!(card.contains(r#"<h2 class="dev-name-text" data-name>Pixel 8</h2>"#));
         assert!(card.contains(r#"<summary class="edit-button" title="Rename">"#));
         assert!(card.contains(r#"<span class="sr" data-name-label>Rename: Pixel 8</span>"#));
-        let form = &card[index(&card, &format!(r#"<form method="post" action="/devices/{}/rename""#, ids()[0]))..];
+        let form = &card[index(&card, &format!(r#"<form method="post" action="/wifi/devices/{}/rename""#, ids()[0]))..];
         let form = &form[..index(form, "</form>")];
         assert!(form.contains(r#"name="csrf" value="example-csrf""#));
         assert!(form.contains(r#"name="name" value="Pixel 8""#));
@@ -1235,13 +1236,13 @@ mod devices_page_tests {
             "last_seen": null, "diagnostics": [{"code": "mac_conflict", "severity": "warn", "params": {"owners": 2}}]}),
         );
         for lang in LANGS {
-            let page = site.get("/", lang, RESIDENT_SUB);
+            let page = site.get("/wifi", lang, RESIDENT_SUB);
             let card = between(&page, 0, 1);
             assert!(card.contains(&esc(&t(lang, "diag_mac_conflict"))));
             assert!(card.contains(&esc(&t(lang, "diag_mac_conflict_do"))));
             assert!(!card.contains(&esc(&t(lang, "unknown_line"))));
             assert!(!card.contains(&esc(&t(lang, "diag_mac_conflict_admin_do"))), "the residents' text");
-            let page = site.get(&format!("/devices/{}", ids()[0]), lang, RESIDENT_SUB);
+            let page = site.get(&format!("/wifi/devices/{}", ids()[0]), lang, RESIDENT_SUB);
             assert!(page.contains(&esc(&t(lang, "diag_mac_conflict_why"))));
             let page = site.get("/admin", lang, ADMIN_SUB);
             assert!(page.contains(&esc(&fill(&t(lang, "diag_mac_conflict_admin_why"), &[("n", "2")]))));
@@ -1260,7 +1261,7 @@ mod devices_page_tests {
 
     #[test]
     fn test_the_scripts_get_texts_config_and_data() {
-        let page = Site::new().get("/", "uk", RESIDENT_SUB);
+        let page = Site::new().get("/wifi", "uk", RESIDENT_SUB);
         assert_eq!(json_block(&page, "np-texts"), texts_json("uk"));
         let config = json_block(&page, "np-config");
         assert_eq!(config["api"], "/api/devices");
@@ -1273,7 +1274,7 @@ mod devices_page_tests {
     #[test]
     fn test_no_devices() {
         let site = Site { devices: vec![], ..Site::new() };
-        let page = site.get("/", "en", RESIDENT_SUB);
+        let page = site.get("/wifi", "en", RESIDENT_SUB);
         assert!(page.contains(&t("en", "no_devices")));
         assert!(index(&page, r#"id="add""#) < index(&page, r#"id="devices-h""#), "enrolment first");
     }
@@ -1283,7 +1284,7 @@ mod devices_page_tests {
     /// formatted value and the state.
     #[test]
     fn test_without_the_formatting_global_the_page_still_renders() {
-        let page = Site::new().get("/", "en", RESIDENT_SUB);
+        let page = Site::new().get("/wifi", "en", RESIDENT_SUB);
         assert!(page.contains("\u{2212}58 dBm"));
         assert!(page.contains(&t("en", "state_online")));
     }
@@ -1298,7 +1299,7 @@ mod telemetry_states_tests {
     fn test_off() {
         let site = Site { telemetry: "off", ..Site::new() };
         for lang in LANGS {
-            let page = site.get("/", lang, RESIDENT_SUB);
+            let page = site.get("/wifi", lang, RESIDENT_SUB);
             assert!(page.contains(&esc(&t(lang, "telemetry_off"))));
             assert!(page.contains(r#"data-part="house" hidden"#), "no house strip of unknowns");
             assert!(page.contains("state-unknown"));
@@ -1310,7 +1311,7 @@ mod telemetry_states_tests {
     #[test]
     fn test_unavailable() {
         let site = Site { telemetry: "unavailable", ..Site::new() };
-        let page = site.get("/", "de", RESIDENT_SUB);
+        let page = site.get("/wifi", "de", RESIDENT_SUB);
         assert!(page.contains(&esc(&t("de", "telemetry_unavailable"))));
         assert!(page.contains(r#"data-part="house" hidden"#));
         assert!(page.contains(&t("de", "st_unknown")));
@@ -1345,7 +1346,7 @@ mod device_page_tests {
         let site = Site::new();
         for lang in LANGS {
             for i in 0..site.devices.len() {
-                let page = site.get(&format!("/devices/{}", ids()[i]), lang, ADMIN_SUB);
+                let page = site.get(&format!("/wifi/devices/{}", ids()[i]), lang, ADMIN_SUB);
                 assert_csp_safe(&page);
                 assert!(page.contains(&esc(&t(lang, "history_title"))));
                 for key in ["signal", "quality", "traffic", "link", "online"] {
@@ -1364,7 +1365,7 @@ mod device_page_tests {
 
     #[test]
     fn test_details_and_full_findings() {
-        let page = Site::new().get(&format!("/devices/{}", ids()[1]), "en", RESIDENT_SUB);
+        let page = Site::new().get(&format!("/wifi/devices/{}", ids()[1]), "en", RESIDENT_SUB);
         for code in ["weak_signal", "high_retries", "busy_channel", "unstable_roaming", "stuck_on_2ghz"] {
             assert!(page.contains(&esc(&t("en", &format!("diag_{code}_why")))), "{code}");
             assert!(page.contains(&esc(&t("en", &format!("diag_{code}_do")))), "{code}");
@@ -1385,18 +1386,18 @@ mod device_page_tests {
     #[test]
     fn test_range_from_the_address() {
         let site = Site::new();
-        let page = site.get(&format!("/devices/{}?range=7d", ids()[0]), "en", RESIDENT_SUB);
+        let page = site.get(&format!("/wifi/devices/{}?range=7d", ids()[0]), "en", RESIDENT_SUB);
         assert!(page.contains(r#"aria-current="true">7 days<"#));
         assert_eq!(json_block(&page, "np-config")["range"], "7d");
-        let page = site.get(&format!("/devices/{}?range=1y", ids()[0]), "en", RESIDENT_SUB);
+        let page = site.get(&format!("/wifi/devices/{}?range=1y", ids()[0]), "en", RESIDENT_SUB);
         assert!(page.contains(r#"aria-current="true">1 year<"#), "telemetry v2: up to \"all\"");
-        let page = site.get(&format!("/devices/{}?range=2y", ids()[0]), "en", RESIDENT_SUB);
+        let page = site.get(&format!("/wifi/devices/{}?range=2y", ids()[0]), "en", RESIDENT_SUB);
         assert!(page.contains(r#"aria-current="true">24 hours<"#));
     }
 
     #[test]
     fn test_from_the_admin_page() {
-        let page = Site::new().get(&format!("/devices/{}?from=admin", ids()[0]), "en", ADMIN_SUB);
+        let page = Site::new().get(&format!("/wifi/devices/{}?from=admin", ids()[0]), "en", ADMIN_SUB);
         assert!(page.contains(r#"href="/admin""#));
         assert!(page.contains(r#"name="back" value="/admin""#));
         assert_eq!(json_block(&page, "np-config")["admin"], true);
@@ -1408,7 +1409,7 @@ mod device_page_tests {
         let dashboard = sample_dashboard("ok", None, json!({}));
         let page = render(
             "device.html",
-            &base("en", None, "/devices/x"),
+            &base("en", None, "/wifi/devices/x"),
             json!({"device": dashboard["devices"][0], "dashboard": dashboard, "history": sample_history("24h")}),
         );
         assert!(page.contains("Connected: Scharni · 2nd floor · corner (5 GHz)"));
@@ -1438,7 +1439,11 @@ mod admin_page_tests {
                 "\"Other\" has no telemetry sample"
             );
             assert!(page.contains(&esc(&t(lang, "adm_search_ph"))));
-            assert_eq!(page.matches(r#"action="/devices/"#).count(), site.rows.len() - 1, "a revoke form per device");
+            assert_eq!(
+                page.matches(r#"action="/wifi/devices/"#).count(),
+                site.rows.len() - 1,
+                "a revoke form per device"
+            );
             assert!(page.contains(r#"name="back" value="/admin""#));
             for code in codes("DIAGNOSES") {
                 assert!(page.contains(&format!(r#"<option value="{code}""#)), "{code}");
@@ -1608,7 +1613,7 @@ mod v2_device_pages_tests {
     fn test_how_each_device_connects_in_every_language() {
         let site = Site::v2();
         for lang in LANGS {
-            let page = site.get("/", lang, RESIDENT_SUB);
+            let page = site.get("/wifi", lang, RESIDENT_SUB);
             assert_csp_safe(&page);
             assert!(!visible(&page).contains('{'));
             for (i, mode) in [(0, "random_fixed"), (1, "hardware"), (2, "rotating"), (3, "hardware")] {
@@ -1634,7 +1639,7 @@ mod v2_device_pages_tests {
             ("eap-config", "mm_how_other"),
         ] {
             site.devices[2]["platform"] = json!(platform);
-            let page = site.get("/", "de", RESIDENT_SUB);
+            let page = site.get("/wifi", "de", RESIDENT_SUB);
             assert!(card(&page, 2).contains(&esc(&fill(&t("de", key), &[("ssid", "Example")]))), "{platform}");
         }
     }
@@ -1643,7 +1648,7 @@ mod v2_device_pages_tests {
     fn test_rejected_logins_say_why_and_what_to_do() {
         let mut site = Site::v2();
         for lang in LANGS {
-            let page = site.get("/", lang, RESIDENT_SUB);
+            let page = site.get("/wifi", lang, RESIDENT_SUB);
             let kindle = card(&page, 3);
             assert!(kindle.contains(r#"class="alert tone-bad""#));
             for key in ["la_rejected_title", "rr_unknown_cert", "rr_unknown_cert_do"] {
@@ -1658,7 +1663,7 @@ mod v2_device_pages_tests {
         reasons.push("something-unknown".into());
         for reason in reasons {
             site.devices[3]["last_auth"] = json!({"at": iso(60), "result": "reject", "reason": reason});
-            let page = site.get(&format!("/devices/{}", ids()[3]), "uk", RESIDENT_SUB);
+            let page = site.get(&format!("/wifi/devices/{}", ids()[3]), "uk", RESIDENT_SUB);
             let key = fmt::reason_key(&json!(reason));
             assert!(page.contains(&esc(&t("uk", &format!("rr_{key}")))), "{reason}");
             assert!(!visible(&page).contains('{'));
@@ -1668,12 +1673,12 @@ mod v2_device_pages_tests {
     #[test]
     fn test_cards_show_the_evidence_and_the_estimated_tag() {
         let site = Site::v2();
-        let page = site.get("/", "en", RESIDENT_SUB);
+        let page = site.get("/wifi", "en", RESIDENT_SUB);
         assert!(card(&page, 1).contains(r#"<span class="evidence">24%</span>"#));
         let ipad = card(&page, 2);
         assert!(ipad.contains(r#"<span class="evidence">8 times in 24 hours</span>"#));
         assert!(!ipad.contains(&esc(&t("en", "ev_based_on"))), "the full line only on the device page");
-        let page = site.get(&format!("/devices/{}", ids()[2]), "en", RESIDENT_SUB);
+        let page = site.get(&format!("/wifi/devices/{}", ids()[2]), "en", RESIDENT_SUB);
         assert!(page.contains(&esc(&t("en", "ev_based_on"))));
         assert!(page.contains("drop-outs reported by the access points <b>7</b>"));
         assert!(page.contains(&esc(&t("en", "cause_lost_carrier"))));
@@ -1695,7 +1700,7 @@ mod v2_device_pages_tests {
         site.devices[1]["state"] = json!("offline");
         for lang in LANGS {
             for (url, sub, admin) in [
-                (format!("/devices/{}", ids()[1]), RESIDENT_SUB, false),
+                (format!("/wifi/devices/{}", ids()[1]), RESIDENT_SUB, false),
                 (format!("/admin/devices/{}", ids()[1]), ADMIN_SUB, true),
             ] {
                 let page = site.get(&url, lang, sub);
@@ -1728,7 +1733,7 @@ mod v2_device_pages_tests {
     fn test_the_merged_timeline_without_javascript() {
         let site = Site::v2();
         for lang in LANGS {
-            let page = site.get(&format!("/devices/{}?range=90d", ids()[0]), lang, RESIDENT_SUB);
+            let page = site.get(&format!("/wifi/devices/{}?range=90d", ids()[0]), lang, RESIDENT_SUB);
             let events = events_of(&page);
             for kind in codes("EVENT_KINDS") {
                 assert!(events.contains(&format!(r#"class="ev ev-{kind}"#)), "{lang} {kind}");
@@ -1757,7 +1762,7 @@ mod v2_device_pages_tests {
         let site = Site::v2();
         for lang in LANGS {
             for r in codes("RANGES") {
-                let page = site.get(&format!("/devices/{}?range={r}", ids()[0]), lang, RESIDENT_SUB);
+                let page = site.get(&format!("/wifi/devices/{}?range={r}", ids()[0]), lang, RESIDENT_SUB);
                 assert_csp_safe(&page);
                 assert!(page.contains(&format!(r#"aria-current="true">{}<"#, t(lang, &format!("range_{r}")))));
                 assert_eq!(json_block(&page, "np-config")["range"], r.as_str());
@@ -1776,7 +1781,7 @@ mod v2_device_pages_tests {
 
     #[test]
     fn test_identity_details() {
-        let page = Site::v2().get(&format!("/devices/{}", ids()[2]), "en", RESIDENT_SUB);
+        let page = Site::v2().get(&format!("/wifi/devices/{}", ids()[2]), "en", RESIDENT_SUB);
         let shown = visible(&page);
         let details = &shown[index(&shown, r#"id="details-h""#)..];
         assert!(details.contains(&esc(&t("en", "dt_macs"))));
@@ -1971,7 +1976,7 @@ mod v2_admin_pages_tests {
             assert_eq!(config["raw"], format!("/api/admin/devices/{}/raw", ids()[0]));
             assert_eq!(json_block(&page, "np-data")["raw"]["acct"][1]["terminate_cause"], "Lost-Carrier");
         }
-        let page = site.get(&format!("/devices/{}?from=admin", ids()[0]), "en", ADMIN_SUB);
+        let page = site.get(&format!("/wifi/devices/{}?from=admin", ids()[0]), "en", ADMIN_SUB);
         assert!(page.contains("data-raw"), "v1's link still works");
         assert!(page.contains("data-raw-load"));
     }
@@ -2196,7 +2201,7 @@ mod presence_pages_tests {
         let mut site = Site::new();
         just_logged_in(&mut site);
         for lang in LANGS {
-            for url in ["/".to_string(), format!("/devices/{}", ids()[1])] {
+            for url in ["/wifi".to_string(), format!("/wifi/devices/{}", ids()[1])] {
                 let page = site.get(&url, lang, RESIDENT_SUB);
                 assert_csp_safe(&page);
                 let line = state_html(&page, Some(1));
@@ -2209,12 +2214,12 @@ mod presence_pages_tests {
                 assert!(line.contains(&esc(&t(lang, "pr_src_radius_acct"))));
                 assert!(line.contains(r#"data-rel="recent""#), "the script keeps it current");
                 assert!(line.contains(&format!(r#"title="{}""#, fmt::stamp(&json!(iso(12)), lang))), "to the second");
-                let shown = if url == "/" { card(&page, 1) } else { visible(&page) };
+                let shown = if url == "/wifi" { card(&page, 1) } else { visible(&page) };
                 assert!(!shown.contains(&esc(&t(lang, "diag_offline"))), "no \"Not connected\" note");
                 assert!(!shown.contains(&esc(&t(lang, "diag_offline_why"))));
             }
         }
-        let page = site.get("/", "en", RESIDENT_SUB);
+        let page = site.get("/wifi", "en", RESIDENT_SUB);
         assert!(tags_removed(&state_html(&page, Some(1))).contains("Confirmed 12 s ago by Wi-Fi session records"));
     }
 
@@ -2230,7 +2235,7 @@ mod presence_pages_tests {
             "diagnostics": [finding("offline", "info", "measured", None, json!({"last_seen": iso(3 * 3600)}))]}),
         );
         for lang in LANGS {
-            let page = site.get("/", lang, RESIDENT_SUB);
+            let page = site.get("/wifi", lang, RESIDENT_SUB);
             let line = state_html(&page, Some(2));
             assert!(line.contains(r#"class="dev-state state-connecting""#));
             assert!(line.contains(r##"<use href="#i-refresh"/>"##));
@@ -2259,7 +2264,7 @@ mod presence_pages_tests {
                                     json!({"last_seen": iso(130)}))]}),
         );
         for lang in LANGS {
-            let page = site.get(&format!("/devices/{}", ids()[2]), lang, RESIDENT_SUB);
+            let page = site.get(&format!("/wifi/devices/{}", ids()[2]), lang, RESIDENT_SUB);
             let line = state_html(&page, None);
             assert!(line.contains(r#"class="dev-state state-offline""#));
             assert!(line.contains(&esc(&first_part(&t(lang, "pr_offline_since")))));
@@ -2271,7 +2276,7 @@ mod presence_pages_tests {
             assert!(shown[index(&shown, r#"class="diag""#)..].contains(&esc(&t(lang, "pr_src_radius_acct"))));
             assert!(!shown.contains(&esc(&t(lang, "pr_admin_title"))), "the evidence is the admins'");
         }
-        let page = site.get(&format!("/devices/{}", ids()[2]), "en", RESIDENT_SUB);
+        let page = site.get(&format!("/wifi/devices/{}", ids()[2]), "en", RESIDENT_SUB);
         assert!(
             tags_removed(&state_html(&page, None))
                 .contains("Offline disconnected 2 min ago Confirmed 2 min ago by Wi-Fi session records")
@@ -2292,7 +2297,7 @@ mod presence_pages_tests {
                 "diagnostics": []}),
             );
             for lang in LANGS {
-                let page = site.get("/", lang, RESIDENT_SUB);
+                let page = site.get("/wifi", lang, RESIDENT_SUB);
                 let line = state_html(&page, Some(0));
                 assert!(line.contains(r#"class="dev-state state-unknown""#));
                 let known = codes("PRESENCE_REASONS").contains(&reason);
@@ -2402,13 +2407,13 @@ mod presence_pages_tests {
                 assert!(!block.contains('{'));
             }
         }
-        let page = site.get(&format!("/devices/{}", ids()[1]), "en", RESIDENT_SUB);
+        let page = site.get(&format!("/wifi/devices/{}", ids()[1]), "en", RESIDENT_SUB);
         assert!(!page.contains(r#"data-part="presence""#), "the resident");
     }
 
     #[test]
     fn test_without_presence_the_v1_line_stays() {
-        let page = Site::new().get("/", "en", RESIDENT_SUB);
+        let page = Site::new().get("/wifi", "en", RESIDENT_SUB);
         assert!(state_html(&page, Some(0)).contains(t("en", "since_line").split('{').next().unwrap_or("")));
         assert!(state_html(&page, Some(2)).contains(t("en", "seen_line").split('{').next().unwrap_or("")));
         assert!(!visible(&page).contains(&first_part(&t("en", "pr_confirmed"))), "nothing claimed");
@@ -2474,11 +2479,12 @@ mod presence_pages_tests {
                 "diagnostics": [finding("offline", "info", "measured", Some(json!({"last_seen": iso(3700)})), json!({}))]}),
             );
             for lang in LANGS {
-                for (url, sub) in [("/".to_string(), RESIDENT_SUB), (format!("/admin/devices/{}", ids()[1]), ADMIN_SUB)]
+                for (url, sub) in
+                    [("/wifi".to_string(), RESIDENT_SUB), (format!("/admin/devices/{}", ids()[1]), ADMIN_SUB)]
                 {
                     let page = site.get(&url, lang, sub);
                     assert_csp_safe(&page);
-                    let line = state_html(&page, if url == "/" { Some(1) } else { None });
+                    let line = state_html(&page, if url == "/wifi" { Some(1) } else { None });
                     assert!(line.contains(&format!(r#"class="dev-state state-{state}""#)), "{state} {lang}");
                     for other in codes("PRESENCE_STATES") {
                         if other != state {
@@ -2488,7 +2494,7 @@ mod presence_pages_tests {
                             );
                         }
                     }
-                    let shown = if url == "/" { card(&page, 1) } else { visible(&page) };
+                    let shown = if url == "/wifi" { card(&page, 1) } else { visible(&page) };
                     assert_eq!(shown.contains(&esc(&t(lang, "diag_offline"))), state == "offline", "{state} {lang}");
                     assert!(!visible(&page).contains('{'));
                 }
@@ -2596,7 +2602,7 @@ mod other_pages {
             ("android", "install", "steps_android"),
             ("eap-config", "install", "steps_android_app"),
         ] {
-            let mut b = base("en", Some(RESIDENT_SUB), "/enroll");
+            let mut b = base("en", Some(RESIDENT_SUB), "/wifi/enroll");
             b.no_passpoint_browser = true;
             let page =
                 render("install.html", &b, json!({"profile": profile, "token": "tok-EN_1", "name": "Pixel <8>"}));
@@ -2646,7 +2652,7 @@ mod other_pages {
         let page = render("message.html", &b, json!({"message": "Fehler <1> & 'zwei'"}));
         assert!(page.contains("<p>Fehler &lt;1&gt; &amp; &#39;zwei&#39;</p>"));
         assert!(page.contains(r#"<form method="post" action="/logout" class="inline">"#));
-        assert!(page.contains(r#"<a class="pill" href="/admin">"#), "the admin pill");
+        assert!(page.contains(r#"<nav class="main-nav""#) && page.contains(r#"href="/admin"><svg"#), "the admin tab");
         assert!(page.contains(r#"<a href="/">"#));
         b.user = None;
         let page = render("message.html", &b, json!({"message": "x"}));

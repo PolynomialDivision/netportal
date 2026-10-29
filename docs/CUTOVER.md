@@ -8,6 +8,12 @@ house-infra's side of it: `stacks/netaccess/README.md` "Python or Rust".
 
 Everything here that changes production is done by the owner, not by an agent.
 
+**Status: done on 2026-10-29.** Production runs the Rust netportal; afterwards the Python images
+were removed, the Python database `netportal` emptied (it stays as the server's default
+database) and house-infra's switch `netaccess.implementation` removed (house-infra
+`stacks/netaccess/README.md` "History"). The rollback below is no longer possible; it is kept as
+the record of the switch-over. The checks after the cutover stay useful after any deploy.
+
 ## What changes for whom
 
 | Who | What |

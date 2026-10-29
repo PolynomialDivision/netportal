@@ -35,7 +35,7 @@ pub enum RegistryError {
     Conflict(String),
 }
 
-type Result<T> = std::result::Result<T, RegistryError>;
+pub type Result<T> = std::result::Result<T, RegistryError>;
 
 // --- schema ----------------------------------------------------------------------------------------
 
@@ -45,6 +45,8 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations"
 
 /// The FreeRADIUS role's rights, applied after every migration run (declarative, may change).
 pub const RADIUS_GRANTS_SQL: &str = include_str!("../../../sql/radius_grants.sql");
+/// The discovery proxy's read-only role's rights, applied the same way (migration 0006).
+pub const DISCOVERY_GRANTS_SQL: &str = include_str!("../../../sql/discovery_grants.sql");
 
 /// sqlx's ledger table (version, description, checksum, success, ...).
 pub const MIGRATIONS_TABLE: &str = "_sqlx_migrations";
@@ -139,6 +141,7 @@ async fn apply_grants(db: &mut Db) -> Result<bool> {
         let conn = db.tx().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))").bind(SCHEMA_LOCK).execute(&mut *conn).await?;
         conn.execute(sqlx::raw_sql(RADIUS_GRANTS_SQL)).await?;
+        conn.execute(sqlx::raw_sql(DISCOVERY_GRANTS_SQL)).await?;
         let role: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'radius')")
             .fetch_one(&mut *conn)
             .await?;
@@ -745,7 +748,7 @@ const LOCKED_LIVE: &str = "
                (SELECT max(au.at) FROM audit au
                  WHERE au.device_id = d.id AND au.action LIKE 'policy:%') AS moved_at
         FROM live l
-        JOIN device d ON d.id = l.device_id
+        JOIN device d ON d.id = l.device_id AND d.kind = 'cert'
         JOIN policy p ON p.name = d.policy
         LEFT JOIN LATERAL (
             SELECT r.at, r.serial, r.vlan FROM radius_auth r
@@ -2140,7 +2143,8 @@ mod tests {
                 (2, "radius contract"),
                 (3, "session epoch"),
                 (4, "security review"),
-                (5, "sessions and rechecks")
+                (5, "sessions and rechecks"),
+                (6, "iot")
             ]
         );
         // every file in migrations is embedded (a new file needs a rebuild, not a code change)
@@ -2156,7 +2160,8 @@ mod tests {
                 "0002_radius_contract.sql",
                 "0003_session_epoch.sql",
                 "0004_security_review.sql",
-                "0005_sessions_and_rechecks.sql"
+                "0005_sessions_and_rechecks.sql",
+                "0006_iot.sql"
             ]
         );
     }

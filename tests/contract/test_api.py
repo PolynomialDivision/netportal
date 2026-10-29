@@ -67,11 +67,11 @@ class PolledApiTests(ContractCase):
 
     def test_etag_changes_with_the_data(self):
         before = self.get().headers["ETag"]
-        self.b.post("/devices/%s/rename" % self.dev, data={"csrf": self.b.csrf(), "name": "renamed for etag"})
+        self.b.post("/wifi/devices/%s/rename" % self.dev, data={"csrf": self.b.csrf(), "name": "renamed for etag"})
         r = self.get(**{"If-None-Match": before})
         self.assertEqual(r.status_code, 200)
         self.assertNotEqual(r.headers["ETag"], before)
-        self.b.post("/devices/%s/rename" % self.dev, data={"csrf": self.b.csrf(), "name": "poll phone"})
+        self.b.post("/wifi/devices/%s/rename" % self.dev, data={"csrf": self.b.csrf(), "name": "poll phone"})
 
     def test_login_is_checked_before_the_304(self):
         tag = self.get().headers["ETag"]
@@ -189,7 +189,7 @@ class AdminApiTests(ContractCase):
         cls.dev = newest_device(A, cls.owner.sub)["id"]
         enrol(ob, "apple", "revoked one")
         cls.revoked = newest_device(A, cls.owner.sub)["id"]
-        ob.post("/devices/%s/revoke" % cls.revoked, data={"csrf": ob.csrf()})
+        ob.post("/wifi/devices/%s/revoke" % cls.revoked, data={"csrf": ob.csrf()})
         cls.ab = A.browser().logged_in(admin_person("aap"))
 
     def test_admin_devices_with_owner_and_filters(self):

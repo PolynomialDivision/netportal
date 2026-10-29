@@ -7,7 +7,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{Browser, Portal, admin, newest_device, resident};
+use common::{Browser, Portal, admin, fresh_mac, newest_device, register_home, resident};
 use netportal_core::registry;
 use netportal_web::web::{Gate, routes};
 use uuid::Uuid;
@@ -17,23 +17,34 @@ async fn is_admin(portal: &Portal, sub: &str) -> bool {
     registry::person_state(&mut db, sub).await.expect("state").is_some_and(|s| s.is_admin)
 }
 
-/// Another resident's new device.
-async fn someones_device(portal: &Portal) -> Uuid {
+/// Another resident's new device: a Wi-Fi device, or (for the home routes) a home device.
+async fn someones_device(portal: &Portal, home: bool) -> Uuid {
     let owner = resident("own");
     let mut b = portal.browser().logged_in(&owner).await;
+    if home {
+        let (r, id) = register_home(&mut b, "theirs", "cast", "").await;
+        assert_eq!(r.status, StatusCode::FOUND, "{}", r.text());
+        return id.expect("the home device's id");
+    }
     b.enrol("apple", "theirs").await;
     newest_device(portal, &owner.sub).await
 }
 
 /// The route called the way a browser or a script would: GET, or (a POST-only route) the form
-/// with the session's CSRF token.
-async fn call(b: &mut Browser<'_>, path: &str) -> common::Resp {
+/// with the session's CSRF token and every field one of the forms has (the share's grantee is
+/// the caller, a person with a policy; the claim's MAC a fresh one).
+async fn call(b: &mut Browser<'_>, path: &str, me: &str) -> common::Resp {
     let r = b.get(path).await;
     if r.status != StatusCode::METHOD_NOT_ALLOWED {
         return r;
     }
     let csrf = b.csrf().await;
-    b.post(path, &[("csrf", &csrf), ("name", "renamed by the walk")]).await
+    let mac = fresh_mac();
+    b.post(
+        path,
+        &[("csrf", &csrf), ("name", "renamed by the walk"), ("grantee", me), ("visibility", "house"), ("mac", &mac)],
+    )
+    .await
 }
 
 #[tokio::test]
@@ -54,32 +65,44 @@ async fn test_every_admin_route_checks_the_right_with_authentik() {
         "/api/admin/incidents",
         "/api/admin/auth",
         "/api/admin/devices/{id}/raw",
-        "/devices/{id}",
-        "/devices/{id}/rename",
-        "/devices/{id}/revoke",
+        "/wifi/devices/{id}",
+        "/wifi/devices/{id}/rename",
+        "/wifi/devices/{id}/revoke",
         "/api/devices/{id}",
         "/api/devices/{id}/history",
+        "/admin/home",
+        "/api/admin/home/devices",
+        "/home/devices/{id}",
+        "/home/devices/{id}/claim",
+        "/home/devices/{id}/rotate-key",
+        "/home/devices/{id}/share",
+        "/home/devices/{id}/unshare",
+        "/home/devices/{id}/visibility",
+        "/home/devices/{id}/rename",
+        "/home/devices/{id}/remove",
+        "/api/home/devices/{id}",
     ] {
         assert!(gated.contains(&path), "{path} is not admin-gated");
     }
-    assert_eq!(gated.len(), 15, "{gated:?}");
+    assert_eq!(gated.len(), 26, "{gated:?}");
     for path in gated {
+        let home = path.contains("/home/devices/");
         // Authentik confirms: the route serves the admin (another person's device for {id})
-        let device = someones_device(&portal).await;
+        let device = someones_device(&portal, home).await;
         let url = path.replace("{id}", &device.to_string());
         let person = admin("ok");
         let mut b = portal.browser().logged_in(&person).await;
-        let r = call(&mut b, &url).await;
+        let r = call(&mut b, &url, &person.sub).await;
         assert!(r.status == StatusCode::OK || r.status == StatusCode::FOUND, "{path}: {} {}", r.status, r.text());
         // Authentik says no (out of the admin group since the login): refused, the flag cleared,
         // the sessions ended, nothing changed; also when the script calls the API directly
-        let device = someones_device(&portal).await;
+        let device = someones_device(&portal, home).await;
         let url = path.replace("{id}", &device.to_string());
         let person = admin("no");
         let mut b = portal.browser().logged_in(&person).await;
         assert!(is_admin(&portal, &person.sub).await, "{path}: the login's groups gave the flag");
         portal.idp.set_groups(&person.sub, &["residents"]);
-        let r = call(&mut b, &url).await;
+        let r = call(&mut b, &url, &person.sub).await;
         assert_eq!(r.status, StatusCode::FORBIDDEN, "{path}: {}", r.text());
         if url.starts_with("/api/") {
             assert_eq!(r.error().as_deref(), Some("forbidden"), "{path}");
@@ -147,7 +170,7 @@ async fn test_a_deactivated_or_deleted_admin_loses_the_right() {
 async fn test_authentik_unreachable_refuses_admin_requests_only() {
     let admin_url = need_db!();
     let portal = Portal::new(&admin_url).await;
-    let device = someones_device(&portal).await;
+    let device = someones_device(&portal, false).await;
     let person = admin("down");
     let mut b = portal.browser().logged_in(&person).await;
     b.enrol("apple", "mine").await;
@@ -160,8 +183,8 @@ async fn test_authentik_unreachable_refuses_admin_requests_only() {
     let r = b.get("/api/admin/devices").await;
     assert_eq!((r.status, r.error().as_deref()), (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable")));
     // another person's device needs the right: 503; their own: the resident's view
-    assert_eq!(b.get(&format!("/devices/{device}")).await.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(b.get(&format!("/devices/{mine}")).await.status, StatusCode::OK);
+    assert_eq!(b.get(&format!("/wifi/devices/{device}")).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(b.get(&format!("/wifi/devices/{mine}")).await.status, StatusCode::OK);
     assert_eq!(b.get(&format!("/api/devices/{mine}")).await.status, StatusCode::OK);
     // resident pages: unaffected; the right stays in the registry (nothing was decided)
     assert_eq!(b.get("/").await.status, StatusCode::OK);
@@ -189,10 +212,10 @@ async fn test_without_the_users_api_every_admin_request_is_refused() {
 async fn test_residents_never_ask_authentik() {
     let admin_url = need_db!();
     let portal = Portal::new(&admin_url).await;
-    let device = someones_device(&portal).await;
+    let device = someones_device(&portal, false).await;
     let mut b = portal.browser().logged_in(&resident("res")).await;
     assert_eq!(b.get("/admin").await.status, StatusCode::FORBIDDEN);
-    assert_eq!(b.get(&format!("/devices/{device}")).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(b.get(&format!("/wifi/devices/{device}")).await.status, StatusCode::NOT_FOUND);
     assert_eq!(b.get(&format!("/api/devices/{device}")).await.status, StatusCode::NOT_FOUND);
     assert_eq!(b.get("/").await.status, StatusCode::OK);
     assert_eq!(portal.idp.api_calls(), 0);

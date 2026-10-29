@@ -287,7 +287,7 @@ export function findings(d, f, { full = false, telemetry = "ok", limit = 0, admi
         todo ? h("p", { class: "finding-do" }, h("strong", {}, t("diag_do_label")), " ", todo) : null));
     })));
     if (all.length > list.length) {
-      box.appendChild(h("p", { class: "diag-more" }, h("a", { href: `/devices/${encodeURIComponent(d.id)}` },
+      box.appendChild(h("p", { class: "diag-more" }, h("a", { href: `/wifi/devices/${encodeURIComponent(d.id)}` },
         f.fill(t("diag_more"), { n: all.length - list.length }))));
     }
   } else if (stateOf(d) === "online" && telemetry === "ok") {

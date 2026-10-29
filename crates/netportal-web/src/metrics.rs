@@ -11,9 +11,14 @@
 //! Disconnects of the last hour of every process, the offboarding's last success and the jobs'
 //! gauges (rebuilt each scrape; a job without an attempt has no `_up` and `_last_attempt`), the
 //! Disconnect reconciliation's running totals (`netportal_disconnect_rechecks_total{result}`, a
-//! counter kept in the job's cursor by the offboarding sidecar) and the live sessions of locked
+//! counter kept in the job's cursor by the offboarding sidecar), the live sessions of locked
 //! devices (`netportal_locked_sessions_live{reason}`: still connected after the
-//! reconciliation's tries, for the alert "a revoked device is still connected").
+//! reconciliation's tries, for the alert "a revoked device is still connected") and the home
+//! devices (house-infra docs/IOT-ACCESS.md): `netportal_iot_devices`, `netportal_iot_shares`,
+//! `netportal_iot_address_conflicts` and `netportal_iot_backend_ok{backend}` from the
+//! controller's job cursor (the row `iot`, whose age and success the job gauges carry like any
+//! job's), `netportal_iot_sync{status}` from the sync table and `netportal_iot_join_attempts`
+//! (unknown MACs that tried to join within the claim window) from the registry.
 //!
 //! Encoding: prometheus-client's OpenMetrics text when the scraper asks for it (`Accept:
 //! application/openmetrics-text`, as Prometheus does), else the classic text format 0.0.4
@@ -27,6 +32,7 @@ use std::time::Duration;
 use std::sync::Mutex;
 
 use netportal_core::Pool;
+use netportal_core::iot;
 use netportal_core::registry::{self, DISCONNECT_RESULTS, LOCK_REASONS};
 use netportal_offboard::recheck;
 use netportal_telemetry::telemetry::Telemetry;
@@ -54,6 +60,13 @@ const COUNTERS: [&str; 5] = [
 ];
 /// A scrape waits at most this long for the registry.
 const DB_TIMEOUT: Duration = Duration::from_secs(5);
+/// The controller's job row (`netportal iot` writes it with its counts in the cursor).
+pub const IOT_JOB: &str = "iot";
+/// The sync statuses `netportal_iot_sync{status}` counts (the table's other value, `applied`,
+/// is the healthy one and not a gauge).
+const IOT_SYNC_STATUSES: [&str; 2] = ["pending", "failed"];
+/// The backends `netportal_iot_backend_ok{backend}` names (the cursor's `unifi_ok`, `opnsense_ok`).
+const IOT_BACKENDS: [&str; 2] = ["unifi", "opnsense"];
 
 fn label(name: &'static str, value: &str) -> Labels {
     vec![(name, value.to_string())]
@@ -118,6 +131,12 @@ pub struct Metrics {
     job_duration: Family<Labels, FloatGauge>,
     rechecks: std::sync::Arc<Mutex<Vec<(&'static str, u64)>>>,
     locked_live: Family<Labels, FloatGauge>,
+    iot_devices: FloatGauge,
+    iot_shares: FloatGauge,
+    iot_sync: Family<Labels, FloatGauge>,
+    iot_address_conflicts: FloatGauge,
+    iot_backend_ok: Family<Labels, FloatGauge>,
+    iot_join_attempts: FloatGauge,
     /// `NETPORTAL_ACCT_INTERIM_S` (which sessions are live)
     interim_s: u32,
     /// one scrape at a time (the gauges are shared)
@@ -194,6 +213,40 @@ impl Metrics {
         for result in DISCONNECT_RESULTS {
             let _ = disconnects.get_or_create(&label("result", result));
         }
+        let iot_devices = FloatGauge::default();
+        let iot_shares = FloatGauge::default();
+        let iot_sync = Family::<Labels, FloatGauge>::default();
+        let iot_address_conflicts = FloatGauge::default();
+        let iot_backend_ok = Family::<Labels, FloatGauge>::default();
+        let iot_join_attempts = FloatGauge::default();
+        registry.register("netportal_iot_devices", "Home devices the controller manages", iot_devices.clone());
+        registry.register("netportal_iot_shares", "Shares of home devices the controller manages", iot_shares.clone());
+        registry.register(
+            "netportal_iot_sync",
+            "Home device sync rows (UniFi keys and blocks, firewall aliases, rules and states) by status",
+            iot_sync.clone(),
+        );
+        registry.register(
+            "netportal_iot_address_conflicts",
+            "Home devices whose address the controller found in use by another device",
+            iot_address_conflicts.clone(),
+        );
+        registry.register(
+            "netportal_iot_backend_ok",
+            "Whether the controller's last round reached the backend",
+            iot_backend_ok.clone(),
+        );
+        registry.register(
+            "netportal_iot_join_attempts",
+            "Unknown MACs that tried to join the home devices' Wi-Fi within the claim window",
+            iot_join_attempts.clone(),
+        );
+        for status in IOT_SYNC_STATUSES {
+            iot_sync.get_or_create(&label("status", status)).set(0.0);
+        }
+        for backend in IOT_BACKENDS {
+            iot_backend_ok.get_or_create(&label("backend", backend)).set(0.0);
+        }
         Metrics {
             registry,
             enrolments,
@@ -209,8 +262,28 @@ impl Metrics {
             job_duration,
             rechecks: recheck_totals,
             locked_live,
+            iot_devices,
+            iot_shares,
+            iot_sync,
+            iot_address_conflicts,
+            iot_backend_ok,
+            iot_join_attempts,
             interim_s,
             scrape: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// The home devices' gauges of the controller's cursor (`{devices, shares, sync_pending,
+    /// sync_failed, address_conflicts, unifi_ok, opnsense_ok}`; a field that is missing or not
+    /// a number counts 0, as before the controller's first round).
+    fn read_iot_cursor(&self, cursor: &serde_json::Value) {
+        let n = |key: &str| cursor.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        self.iot_devices.set(n("devices"));
+        self.iot_shares.set(n("shares"));
+        self.iot_address_conflicts.set(n("address_conflicts"));
+        for backend in IOT_BACKENDS {
+            let ok = n(&format!("{backend}_ok")) >= 1.0;
+            self.iot_backend_ok.get_or_create(&label("backend", backend)).set(if ok { 1.0 } else { 0.0 });
         }
     }
 
@@ -242,6 +315,14 @@ impl Metrics {
             for (reason, n) in registry::locked_live_counts(&mut db, self.interim_s).await? {
                 self.locked_live.get_or_create(&label("reason", reason)).set(n as f64);
             }
+            let sync = iot::sync_counts(&mut db).await?;
+            for status in IOT_SYNC_STATUSES {
+                let n = sync.get(status).copied().unwrap_or(0);
+                self.iot_sync.get_or_create(&label("status", status)).set(n as f64);
+            }
+            // the claim window's rows (the page's list, at most 50: enough for a gauge whose
+            // alert threshold is a handful)
+            self.iot_join_attempts.set(iot::join_attempts(&mut db).await?.len() as f64);
             let jobs = registry::job_status(&mut db).await;
             let _ = db.close().await;
             Ok::<_, registry::RegistryError>(jobs)
@@ -262,6 +343,9 @@ impl Metrics {
                                 })
                                 .collect();
                             *self.rechecks.lock().unwrap_or_else(|e| e.into_inner()) = totals;
+                        }
+                        if let Some(row) = rows.iter().find(|r| r.name == IOT_JOB) {
+                            self.read_iot_cursor(&row.cursor.0);
                         }
                         for row in rows.iter().filter(|r| !r.name.is_empty()) {
                             let labels = label("job", &row.name);
@@ -384,6 +468,27 @@ mod tests {
             "netportal_locked_sessions_live{reason=\"revoked\"} 0.0",
             "netportal_locked_sessions_live{reason=\"credential\"} 0.0",
             "netportal_locked_sessions_live{reason=\"vlan\"} 0.0",
+            "# TYPE netportal_iot_devices gauge",
+            "netportal_iot_devices 0.0",
+            "netportal_iot_shares 0.0",
+            "netportal_iot_sync{status=\"pending\"} 0.0",
+            "netportal_iot_sync{status=\"failed\"} 0.0",
+            "netportal_iot_address_conflicts 0.0",
+            "netportal_iot_backend_ok{backend=\"unifi\"} 0.0",
+            "netportal_iot_backend_ok{backend=\"opnsense\"} 0.0",
+            "netportal_iot_join_attempts 0.0",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} missing in\n{text}");
+        }
+        metrics.read_iot_cursor(&serde_json::json!({"devices": 3, "shares": 2, "sync_pending": 1, "sync_failed": 0,
+                                                    "address_conflicts": 1, "unifi_ok": 1, "opnsense_ok": 0}));
+        let (_, text) = metrics.scrape(&pool, "").await;
+        for line in [
+            "netportal_iot_devices 3.0",
+            "netportal_iot_shares 2.0",
+            "netportal_iot_address_conflicts 1.0",
+            "netportal_iot_backend_ok{backend=\"unifi\"} 1.0",
+            "netportal_iot_backend_ok{backend=\"opnsense\"} 0.0",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} missing in\n{text}");
         }

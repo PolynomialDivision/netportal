@@ -1,0 +1,83 @@
+{#- The home devices' building blocks (home.html, home_device.html, admin_home.html), imported.
+    A device is the JSON of src/home.rs device_json: the registry's fields, the live ones of the
+    presence pipeline when there are any (state, since, ap, band, ...), `sync` for the owner. -#}
+{%- import "_dash.html" as dash -%}
+
+{%- set class_icon = {"cast": "cast", "airplay": "tv", "printer": "printer", "tv": "tv", "speaker": "speaker", "other": "home"} -%}
+
+{#- the class as an icon, coloured by the device's state like the Wi-Fi devices' -#}
+{%- macro class_icon_of(d) -%}
+<span class="dev-icon state-{{ dash.state_of(d) }}" aria-hidden="true"><svg class="icon"><use href="#i-{{ class_icon.get(d.class, 'home') }}"/></svg></span>
+{%- endmacro -%}
+
+{#- the state line, as the Wi-Fi devices' but naming the home devices' network -#}
+{%- macro state_line(d) -%}
+{%- set v = fmt.presence_view(d, lang, dash.now, settings.iot_ssid) -%}
+<p class="dev-state state-{{ v.state }}">{{ dash.icon(v.icon) }}<strong>{{ v.label }}</strong>
+{%- if v.more %} <span class="state-more">{% for seg in v.more %}{% if not loop.first %} · {% endif %}{{ dash.segment(seg) }}{% endfor %}</span>{% endif %}
+{%- if v.confirmed %} <span class="state-confirmed">{{ dash.segment(v.confirmed) }}</span>{% endif -%}
+</p>
+{%- endmacro -%}
+
+{#- "Firewall and Wi-Fi: applied / pending / failed: <detail>" (the controller's sync rows) -#}
+{%- macro sync_line(d) -%}
+{%- if d.sync is defined and d.sync %}
+{%- set s = d.sync %}
+{%- set tone = {"applied": "ok", "pending": "warn", "failed": "bad"}.get(s.status, "warn") %}
+<p class="sync-line tone-text-{{ tone }}">{{ dash.icon(dash.tone_icon[tone]) }}<span>{{ t.home_sync_label }}: {% if s.status == "failed" %}{{ t.home_sync_failed.format(detail=s.detail) }}{% else %}{{ t["home_sync_" ~ s.status] }}{% endif %}</span></p>
+{%- endif %}
+{%- endmacro -%}
+
+{#- who may use it: private (the shares) or the whole house -#}
+{%- macro visibility_line(d) -%}
+<p class="meta">
+  {%- if d.visibility == "house" %}<span>{{ dash.icon("globe") }}{{ t.home_visible_house }}</span>
+  {%- else %}<span>{{ dash.icon("share") }}{{ t.home_visible_private }}</span>{% endif %}
+  {%- if d.shares is defined %}<span>{% if d.shares %}{{ t.home_shared_with_n.format(n=d.shares|length) }}{% else %}{{ t.home_not_shared }}{% endif %}</span>{% endif %}
+  {%- if d.mac is defined %}{% if d.mac %}<span class="mono">{{ d.mac }}</span>{% else %}<span class="warn">{{ dash.icon("warn") }}{{ t.home_mac_missing }}</span>{% endif %}{% endif %}
+</p>
+{%- endmacro -%}
+
+{#- a device card on the lists: icon, name, owner (for shared ones), state, visibility, sync, the
+    link to its page -#}
+{%- macro card(d, admin=False) -%}
+<article class="card dev home-dev" id="device-{{ d.id }}" data-device="{{ d.id }}">
+  <div class="dev-head">
+    {{ class_icon_of(d) }}
+    <div class="dev-title">
+      <h2 class="dev-name-text">{{ d.name }}</h2>
+      <p class="home-kind">{{ t["cls_" ~ d.class] }}{% if d.role == "shared" or admin %} · {{ t.home_shared_by.format(name=d.owner.display) }}{% endif %}</p>
+      {{ state_line(d) }}
+    </div>
+  </div>
+  {{ visibility_line(d) }}
+  {{ sync_line(d) }}
+  <div class="dev-foot">
+    <a class="more" href="/home/devices/{{ d.id }}{% if admin %}?from=admin{% endif %}">{{ dash.icon("key") }}<span>{{ t.home_details }}</span>{{ dash.icon("next") }}</a>
+  </div>
+</article>
+{%- endmacro -%}
+
+{#- the join attempts of the last minutes: one line each, and a claim button per device without
+    an address (`unclaimed`: [{id, name, owner?}]) -#}
+{%- macro attempts_list(attempts, unclaimed, back) -%}
+<ul class="attempts">
+  {%- for a in attempts %}
+  <li class="attempt">
+    <p>{{ dash.icon("wifi") }}{{ (t.home_attempt|e).format(when=dash.time(a.last_seen, "ago"), mac=('<span class="mono">' ~ a.mac ~ '</span>')|safe) }}{% if a.tries > 1 %} <span class="muted">({{ t.home_attempt_tries.format(n=a.tries) }})</span>{% endif %}</p>
+    {%- if unclaimed %}
+    <div class="actions">
+      {%- for u in unclaimed %}
+      <form method="post" action="/home/devices/{{ u.id }}/claim" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="mac" value="{{ a.mac }}">
+        {%- if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}
+        <button class="button small">{{ dash.icon("check") }}{{ t.home_claim_action.format(name=u.name) }}{% if u.owner is defined and u.owner %} <span class="muted">({{ u.owner }})</span>{% endif %}</button>
+      </form>
+      {%- endfor %}
+    </div>
+    {%- else %}<p class="muted small">{{ t.home_claim_hint }}</p>{% endif %}
+  </li>
+  {%- endfor %}
+</ul>
+{%- endmacro -%}

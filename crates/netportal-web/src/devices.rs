@@ -79,8 +79,8 @@ fn install_page(app: &App, ctx: &Ctx, user: &User, format: &str, token: &str, na
     app.page(ctx, Some(user), "install.html", context! { profile => format, token => token, name => name })
 }
 
-/// `POST /enroll`: a new device of this format, its 10-minute one-time download link (within
-/// the person's device limit and rate).
+/// `POST /wifi/enroll`: a new device of this format, its 10-minute one-time download link
+/// (within the person's device limit and rate).
 pub async fn enrol(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
     let user = ctx.need_user(&mut reg).await?;
     let format = ctx.field("format");
@@ -100,10 +100,10 @@ pub async fn enrol(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Res
     install_page(&app, &ctx, &user, format, &token, &name)
 }
 
-/// The device of this URL if this person may act on it, not revoked; else 404: their own, or
-/// (`admin_any`) another person's with the admin right checked live (refused when Authentik no
-/// longer confirms it, 503 when it cannot be asked). The [`Admin`] when the device is someone
-/// else's.
+/// The Wi-Fi device of this URL if this person may act on it, not revoked; else 404 (a home
+/// device's id too): their own, or (`admin_any`) another person's with the admin right checked
+/// live (refused when Authentik no longer confirms it, 503 when it cannot be asked). The
+/// [`Admin`] when the device is someone else's.
 async fn own_device(
     app: &App,
     ctx: &Ctx,
@@ -114,7 +114,7 @@ async fn own_device(
 ) -> Result<(registry::DeviceRow, Option<Admin>), Reject> {
     let id = device_id(id).ok_or_else(Reject::not_found)?;
     let dev = match registry::device(db, id, None).await? {
-        Some(dev) if dev.revoked_at.is_none() => dev,
+        Some(dev) if dev.revoked_at.is_none() && crate::dashboard::is_wifi(&dev) => dev,
         _ => return Err(Reject::not_found()),
     };
     if dev.owner == user.sub {
@@ -130,8 +130,8 @@ async fn own_device(
     }
 }
 
-/// `POST /devices/<id>/renew`: a new download link for the device (own devices only, also for
-/// admins); an app's device is renewed by the app.
+/// `POST /wifi/devices/<id>/renew`: a new download link for the device (own devices only, also
+/// for admins); an app's device is renewed by the app.
 pub async fn renew(State(app): State<App>, ctx: Ctx, mut reg: Reg, Path(id): Path<String>) -> Result<Response, Reject> {
     let user = ctx.need_user(&mut reg).await?;
     let (dev, _) = own_device(&app, &ctx, &mut reg, &id, &user, false).await?;
@@ -171,9 +171,9 @@ pub async fn download(
     Ok(artefact_response(artefact))
 }
 
-/// `POST /devices/<id>/rename`: the form (302 `/`; an empty name changes nothing) or the inline
-/// rename of the dashboard (`{"ok", "name"}`: the name as stored, or the old one for an empty
-/// name with 400).
+/// `POST /wifi/devices/<id>/rename`: the form (302 `/wifi`; an empty name changes nothing) or
+/// the inline rename of the dashboard (`{"ok", "name"}`: the name as stored, or the old one for
+/// an empty name with 400).
 pub async fn rename(
     State(app): State<App>,
     ctx: Ctx,
@@ -193,14 +193,14 @@ pub async fn rename(
         let body = json!({"ok": name.is_some(), "name": name.unwrap_or(dev.name)});
         return Ok((status, axum::Json(body)).into_response());
     }
-    Ok(redirect("/"))
+    Ok(redirect("/wifi"))
 }
 
-/// `POST /devices/<id>/revoke`: revoked in the registry (every new authentication fails), then
-/// every running session cut with a Disconnect-Request; back to `/admin` only from there. When
-/// an access point did not confirm its Disconnect (timeout, NAK, not sent), the page says so
-/// instead: the device may stay connected until the reconciliation (`netportal offboard
-/// --every`) or the RADIUS Session-Timeout cuts it.
+/// `POST /wifi/devices/<id>/revoke`: revoked in the registry (every new authentication fails),
+/// then every running session cut with a Disconnect-Request; back to `/admin` only from there
+/// (`back`), else to `/wifi`. When an access point did not confirm its Disconnect (timeout, NAK,
+/// not sent), the page says so instead: the device may stay connected until the reconciliation
+/// (`netportal offboard --every`) or the RADIUS Session-Timeout cuts it.
 pub async fn revoke(
     State(app): State<App>,
     ctx: Ctx,
@@ -214,7 +214,7 @@ pub async fn revoke(
     for result in &results {
         app.metrics.disconnected(result.as_str());
     }
-    let back = if ctx.field("back") == "/admin" { "/admin" } else { "/" };
+    let back = if ctx.field("back") == "/admin" { "/admin" } else { "/wifi" };
     if results.iter().all(|r| r.confirmed()) {
         return Ok(redirect(back));
     }

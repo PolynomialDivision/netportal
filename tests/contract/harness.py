@@ -345,14 +345,22 @@ def idp_api_requests():
 # --- enrolment ------------------------------------------------------------------------------------
 
 def enrol(browser, fmt, name=""):
-    """POST /enroll: (response, download token or None)."""
-    r = browser.post("/enroll", data={"csrf": browser.csrf(), "format": fmt, "name": name})
+    """POST /wifi/enroll: (response, download token or None)."""
+    r = browser.post("/wifi/enroll", data={"csrf": browser.csrf(), "format": fmt, "name": name})
     m = re.search(r'href="/download/([^"]+)"', r.text)
     return r, (m.group(1) if m else None)
 
 
 def newest_device(instance, owner):
     return instance.reg.newest_device(owner)
+
+
+def register_home(browser, name, cls="cast", mac=""):
+    """POST /home/register: the new home device's id (from the redirect to its page)."""
+    r = browser.post("/home/register", data={"csrf": browser.csrf(), "name": name, "class": cls, "mac": mac})
+    m = re.match(r"^/home/devices/([0-9a-f-]{36})", r.headers.get("Location", ""))
+    assert m, (r.status_code, r.headers.get("Location"), r.text[:200])
+    return m.group(1)
 
 
 def token_hash(token):

@@ -1,0 +1,33 @@
+[package]
+name = "netportal-iot"
+description = "The IoT controller: UniFi PPSK keys, OPNsense aliases, rules and states, the IoT offboarding (house-infra docs/IOT-ACCESS.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+netportal-core.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+uuid.workspace = true
+time.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+url.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+base64.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

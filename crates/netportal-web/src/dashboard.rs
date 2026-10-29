@@ -1,9 +1,14 @@
-//! The dashboard pages and their JSON API (INVENTORY 3.2 rows 4-6, 12-25, 3.3): the resident's
-//! devices, one device's page, the admin pages, and the polled APIs (weak ETag without the
-//! per-request values, 304, `Cache-Control: private, no-store`: the page's script keeps the
-//! last body and its ETag itself and sends `If-None-Match`, so nothing needs the browser's
-//! cache; the login is checked before the 304). The payloads are `netportal-telemetry`'s; every request has one Prometheus budget for
-//! everything it shows.
+//! The dashboard pages and their JSON API (INVENTORY 3.2 rows 4-6, 12-25, 3.3): the overview,
+//! the resident's Wi-Fi devices (`/wifi`), one device's page, the admin pages, and the polled
+//! APIs (weak ETag without the per-request values, 304, `Cache-Control: private, no-store`: the
+//! page's script keeps the last body and its ETag itself and sends `If-None-Match`, so nothing
+//! needs the browser's cache; the login is checked before the 304). The payloads are
+//! `netportal-telemetry`'s; every request has one Prometheus budget for everything it shows.
+//!
+//! The Wi-Fi pages and APIs show certificate devices only: the registry lists home devices
+//! (`platform` `iot`, house-infra docs/IOT-ACCESS.md) among the devices, [`crate::home`] shows
+//! those; here they are left out everywhere ([`wifi_rows`], [`is_wifi`]), and a home device's id
+//! on a Wi-Fi route is 404 like a foreign device.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -32,6 +37,17 @@ use crate::login::redirect;
 use crate::pipeline::Policy;
 use crate::platform::enrol_options;
 use crate::web::{App, Reg};
+use netportal_core::iot;
+
+/// A certificate device (the Wi-Fi area's), not a home device.
+pub fn is_wifi(row: &DeviceRow) -> bool {
+    row.platform != "iot"
+}
+
+/// The certificate devices among registry rows.
+pub fn wifi_rows(rows: Vec<DeviceRow>) -> Vec<DeviceRow> {
+    rows.into_iter().filter(is_wifi).collect()
+}
 
 /// The renewal hint's window (days).
 const EXPIRES_SOON_DAYS: i64 = 30;
@@ -85,7 +101,7 @@ pub fn people_json(people: &IndexMap<String, Person>) -> Value {
     )
 }
 
-fn serde<T: serde::Serialize>(value: &T) -> Page {
+pub(crate) fn serde<T: serde::Serialize>(value: &T) -> Page {
     Page::from(Serde(value))
 }
 
@@ -96,7 +112,7 @@ fn dashboard_page(response: Result<Response, Reject>) -> Result<Response, Reject
 }
 
 /// The DASHBOARD of these rows with the renewal hint per device.
-async fn dashboard_of(
+pub(crate) async fn dashboard_of(
     app: &App,
     page: &netportal_telemetry::telemetry::Page,
     db: &mut Db,
@@ -128,14 +144,14 @@ async fn admin_dashboard(
     db: &mut Db,
 ) -> Result<(Vec<DeviceRow>, IndexMap<String, Person>, Dashboard), Reject> {
     let people = registry::people(db).await?;
-    let rows = registry::devices(db, None, false).await?;
+    let rows = wifi_rows(registry::devices(db, None, false).await?);
     let payload = dashboard_of(app, page, db, &rows, Some(&people), true, false).await?;
     Ok((rows, people, payload))
 }
 
 /// A polled API's answer: 304 when the browser has this payload's ETag, else the JSON; both
 /// with the ETag and `Cache-Control: private, no-store` (`polled::CACHE_CONTROL`).
-fn polled_response(payload: Value, headers: &HeaderMap) -> Response {
+pub(crate) fn polled_response(payload: Value, headers: &HeaderMap) -> Response {
     let tag = polled::etag(&payload);
     let inm = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
     let mut response = if polled::matches(inm, &tag) {
@@ -150,15 +166,15 @@ fn polled_response(payload: Value, headers: &HeaderMap) -> Response {
     response
 }
 
-fn to_json<T: serde::Serialize>(value: &T) -> Result<Value, Reject> {
+pub(crate) fn to_json<T: serde::Serialize>(value: &T) -> Result<Value, Reject> {
     serde_json::to_value(value).map_err(|_| crate::errors::internal("payload not serialisable"))
 }
 
-/// The device of this URL for this person, not revoked, else 404: theirs, or another person's
-/// for an admin. The admin view (other people's devices, conflicts, owners) needs the right
-/// checked live: for another person's device it is required (refused or 503 without it), for
-/// their own it is the admin's view when Authentik confirms it and the resident's when it cannot
-/// be asked.
+/// The Wi-Fi device of this URL for this person, not revoked, else 404: theirs, or another
+/// person's for an admin. The admin view (other people's devices, conflicts, owners) needs the
+/// right checked live: for another person's device it is required (refused or 503 without it),
+/// for their own it is the admin's view when Authentik confirms it and the resident's when it
+/// cannot be asked.
 async fn visible_device(
     app: &App,
     ctx: &Ctx,
@@ -168,7 +184,7 @@ async fn visible_device(
 ) -> Result<(DeviceRow, Option<Admin>), Reject> {
     let id = device_id(id).ok_or_else(Reject::not_found)?;
     let row = match registry::device(db, id, None).await? {
-        Some(dev) if dev.revoked_at.is_none() => dev,
+        Some(dev) if dev.revoked_at.is_none() && is_wifi(&dev) => dev,
         _ => return Err(Reject::not_found()),
     };
     let own = row.owner == user.sub;
@@ -242,7 +258,9 @@ pub async fn welcome(State(app): State<App>, ctx: Ctx) -> Result<Response, Rejec
 }
 
 /// `GET /`: the Let's Wi-Fi document for an app's probe (`Accept` with JSON, without HTML);
-/// straight to the login when not logged in (no target remembered); else "My devices".
+/// straight to the login when not logged in (no target remembered); else the overview: the
+/// person's Wi-Fi devices (how many, which expire soon) and home devices (own, shared with
+/// them), each with its next step. No telemetry here: the counts are the registry's.
 pub async fn index(State(app): State<App>, ctx: Ctx) -> Result<Response, Reject> {
     if ctx.accept.contains("application/json") && !ctx.accept.contains("text/html") {
         return Ok(axum::Json(document(&app.settings.base_url)).into_response());
@@ -254,8 +272,23 @@ pub async fn index(State(app): State<App>, ctx: Ctx) -> Result<Response, Reject>
     let Some(user) = ctx.user(&mut reg).await? else {
         return Ok(redirect("/login"));
     };
+    let now = app.now();
+    let rows = wifi_rows(registry::devices(&mut reg, Some(&user.sub), false).await?);
+    let expiring: Vec<&str> =
+        rows.iter().filter(|r| expires_soon(r.expires, now, EXPIRES_SOON_DAYS)).map(|r| r.name.as_str()).collect();
+    let own = iot::devices_of(&mut reg, &user.sub, false).await?;
+    let shared = iot::shared_with(&mut reg, &user.sub).await?;
+    let wifi = json!({"count": rows.len(), "expiring": expiring});
+    let home = json!({"own": own.len(), "shared": shared.len()});
+    app.page(&ctx, Some(&user), "overview.html", context! { wifi => serde(&wifi), home => serde(&home) })
+}
+
+/// `GET /wifi`: the Wi-Fi area's front page (the former `/`): "Your devices" and the enrolment
+/// options, unchanged in its flow.
+pub async fn wifi(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
+    let user = ctx.need_user(&mut reg).await?;
     let page = app.telemetry.page();
-    let rows = registry::devices(&mut reg, Some(&user.sub), false).await?;
+    let rows = wifi_rows(registry::devices(&mut reg, Some(&user.sub), false).await?);
     let payload = dashboard_of(&app, &page, &mut reg, &rows, None, false, false).await?;
     let rows_json: Vec<Value> = rows.iter().map(row_json).collect();
     let options = enrol_options(&ctx.user_agent, app.settings.passpoint);
@@ -265,6 +298,22 @@ pub async fn index(State(app): State<App>, ctx: Ctx) -> Result<Response, Reject>
         "devices.html",
         context! { devices => serde(&rows_json), dashboard => serde(&payload), options => options },
     ))
+}
+
+/// `GET /devices/<id>`: the device page's address before the Wi-Fi area moved under `/wifi`
+/// (IOT-ACCESS 6.1): a permanent redirect for a canonical device id, 404 for anything else (no
+/// session, no registry: whether the device exists is the new address's business).
+pub async fn old_device_path(Path(id): Path<String>) -> Response {
+    match device_id(&id) {
+        Some(id) => {
+            let mut response = StatusCode::PERMANENT_REDIRECT.into_response();
+            if let Ok(v) = HeaderValue::from_str(&format!("/wifi/devices/{id}")) {
+                response.headers_mut().insert(header::LOCATION, v);
+            }
+            response
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// device.html's values: DASHBOARD of the device, DEVICE, the registry row, HISTORY of the
@@ -300,7 +349,7 @@ async fn device_context(
     Ok(values)
 }
 
-/// `GET /devices/<id>`.
+/// `GET /wifi/devices/<id>`.
 pub async fn device_page(
     State(app): State<App>,
     ctx: Ctx,
@@ -369,7 +418,7 @@ pub async fn admin_device(
     let user = right.user();
     let id = device_id(&id).ok_or_else(Reject::not_found)?;
     let row = match registry::device(&mut reg, id, None).await? {
-        Some(dev) if dev.revoked_at.is_none() => dev,
+        Some(dev) if dev.revoked_at.is_none() && is_wifi(&dev) => dev,
         _ => return Err(Reject::not_found()),
     };
     let mut values = device_context(&app, &ctx, &mut reg, &row, Some(&right)).await?;
@@ -399,7 +448,7 @@ pub async fn api_devices(
 ) -> Result<Response, Reject> {
     let user = ctx.api_user(&mut reg).await?;
     let page = app.telemetry.page();
-    let rows = registry::devices(&mut reg, Some(&user.sub), false).await?;
+    let rows = wifi_rows(registry::devices(&mut reg, Some(&user.sub), false).await?);
     let payload = dashboard_of(&app, &page, &mut reg, &rows, None, false, false).await?;
     Ok(polled_response(to_json(&payload)?, &headers))
 }
@@ -534,7 +583,7 @@ pub async fn api_admin_device_raw(
 ) -> Result<Response, Reject> {
     let not_found = || Reject::Json(StatusCode::NOT_FOUND, "not_found");
     let id = device_id(&id).ok_or_else(not_found)?;
-    let row = registry::device(&mut reg, id, None).await?.ok_or_else(not_found)?;
+    let row = registry::device(&mut reg, id, None).await?.filter(is_wifi).ok_or_else(not_found)?;
     let now = unix(app.now());
     let Some((since, until)) = admin_span(&ctx, now, RAW_SPAN, false) else {
         return Err(Reject::Json(StatusCode::BAD_REQUEST, "bad_range"));

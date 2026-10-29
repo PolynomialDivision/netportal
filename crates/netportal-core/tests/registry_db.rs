@@ -368,9 +368,9 @@ async fn test_empty_database_then_idempotent() {
     let mut db = Db::connect(&url).await.expect("connect");
     let _ddl = ROLE_DDL.lock().await;
     let first = registry::migrate(&mut db).await.expect("migrate");
-    assert_eq!((first.applied.as_slice(), first.version, first.radius_role), (&[1, 2, 3, 4, 5][..], Some(5), true));
+    assert_eq!((first.applied.as_slice(), first.version, first.radius_role), (&[1, 2, 3, 4, 5, 6][..], Some(6), true));
     let second = registry::migrate(&mut db).await.expect("migrate");
-    assert_eq!((second.applied.as_slice(), second.version, second.unknown.as_slice()), (&[][..], Some(5), &[][..]));
+    assert_eq!((second.applied.as_slice(), second.version, second.unknown.as_slice()), (&[][..], Some(6), &[][..]));
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_schema || '.' || table_name FROM information_schema.tables
          WHERE table_schema IN ('public', 'radius') ORDER BY 1",
@@ -398,6 +398,12 @@ async fn test_empty_database_then_idempotent() {
         "public.ap_day",
         "public.incident",
         "public.web_session",
+        "public.iot_device",
+        "public.iot_share",
+        "public.iot_access",
+        "public.iot_sync",
+        "public.iot_join_attempt",
+        "radius.iot_mac",
         "public.disconnect_recheck",
         "public._sqlx_migrations",
         "public.device_mac_window",
@@ -498,7 +504,7 @@ async fn test_upgrade_from_an_older_release() {
     db.commit().await.expect("commit");
     let _ddl = ROLE_DDL.lock().await;
     let report = registry::migrate(&mut db).await.expect("migrate");
-    assert_eq!((report.applied, report.version), (vec![2, 3, 4, 5], Some(5)));
+    assert_eq!((report.applied, report.version), (vec![2, 3, 4, 5, 6], Some(6)));
     let people = registry::people(&mut db).await.expect("people");
     assert_eq!(people.keys().collect::<Vec<_>>(), ["a"]);
 }
@@ -544,7 +550,7 @@ async fn test_concurrent_migrate() {
         results.push(t.await.expect("join").expect("migrate"));
     }
     results.sort();
-    assert_eq!(results, [vec![], vec![], vec![1, 2, 3, 4, 5]]);
+    assert_eq!(results, [vec![], vec![], vec![1, 2, 3, 4, 5, 6]]);
 }
 
 // --- the FreeRADIUS contract -----------------------------------------------------------------------
@@ -643,6 +649,7 @@ async fn test_contract_objects() {
              p_nas_ip text, p_framed_ip text, p_session_time text, p_in_octets text, p_out_octets text, \
              p_in_gigawords text, p_out_gigawords text, p_terminate_cause text, p_event_ts text)",
             "cert_status(p_serial text)",
+            "iot_mac:v",
             "login(p_device_id text, p_serial text, p_calling text, p_called text, p_nas_ip text, \
              p_acct_session_id text, p_user_name text, p_vlan text)",
             "reject(p_serial text, p_calling text, p_called text, p_nas_ip text, p_reason_hint text)",
@@ -2070,7 +2077,7 @@ async fn test_stats() {
     registry::audit(&mut case.db, "x", "disconnect:timeout", Some(d)).await.expect("audit");
     registry::audit(&mut case.db, "x", "disconnect:timeout", Some(d)).await.expect("audit");
     let s = registry::stats(&mut case.db).await.expect("stats");
-    assert_eq!((s.radius_role, s.schema_version), (true, Some(5)));
+    assert_eq!((s.radius_role, s.schema_version), (true, Some(6)));
     assert_eq!((s.active, s.revoked, s.valid_certificates, s.expiring_30d, s.expired), (4, 1, 3, 3, 1));
     assert!(s.offboarding_last_success.is_some());
     assert_eq!(

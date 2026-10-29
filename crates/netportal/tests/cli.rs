@@ -75,7 +75,7 @@ async fn test_init_db_creates_and_upgrades_the_schema() {
     ];
     let out = netportal(&["init-db"], &vars);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "schema ready (version 5)\n");
+    assert_eq!(text(&out.stdout), "schema ready (version 6)\n");
     let log = text(&out.stderr);
     assert!(log.contains(" netportal.registry INFO applying migration 0001 (registry)"), "{log}");
     assert!(log.contains(" netportal.registry INFO applying migration 0002 (radius contract)"), "{log}");
@@ -84,7 +84,7 @@ async fn test_init_db_creates_and_upgrades_the_schema() {
     assert!(log.contains(" netportal.registry INFO applying migration 0005 (sessions and rechecks)"), "{log}");
     // again: nothing to apply, the same answer
     let out = netportal(&["init-db"], &vars);
-    assert_eq!((out.status.code(), text(&out.stdout).as_str()), (Some(0), "schema ready (version 5)\n"));
+    assert_eq!((out.status.code(), text(&out.stdout).as_str()), (Some(0), "schema ready (version 6)\n"));
     assert!(!text(&out.stderr).contains("applying"), "{}", text(&out.stderr));
     let mut db = PgConnection::connect(url.as_str()).await.expect("connect");
     let policies: Vec<(String, i32)> =

@@ -78,6 +78,22 @@ class Registry:
         row = self._one("SELECT extract(epoch FROM last_success)::float8 AS t FROM job WHERE name = 'offboarding'")
         return row["t"] if row else None
 
+    # --- home devices (migration 0006, crates/netportal-core/src/iot.rs)
+    def home_device(self, device_id):
+        """{"psk", "mac", "class", "visibility"} of a home device, or None."""
+        return self._one("""SELECT psk, mac::text AS mac, class, visibility FROM iot_device
+                            WHERE device_id = %s""", str(device_id))
+
+    def join_attempt(self, mac, ssid="Scharni-IoT", tries=1):
+        """What radius.reject records for an unknown MAC on the IoT SSID."""
+        self._sql("INSERT INTO iot_join_attempt (mac, tries, ssid) VALUES (%s, %s, %s)", mac, tries, ssid)
+
+    def set_sync(self, target, key, status, detail=""):
+        """What the controller writes about a target and key."""
+        self._sql("""INSERT INTO iot_sync (target, key, status, detail) VALUES (%s, %s, %s, %s)
+                     ON CONFLICT (target, key) DO UPDATE SET status = excluded.status, detail = excluded.detail""",
+                  target, str(key), status, detail)
+
     # --- devices
     def device(self, device_id):
         """{"id", "owner", "name", "platform", "policy", "revoked": bool} or None."""

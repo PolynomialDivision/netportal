@@ -55,7 +55,7 @@
         <a class="more" href="/admin/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
         <details class="danger">
           <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
-          <form method="post" action="/devices/{{ d.id }}/revoke" class="confirm">
+          <form method="post" action="/wifi/devices/{{ d.id }}/revoke" class="confirm">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <input type="hidden" name="back" value="/admin">
             <p>{{ t.revoke_title }}: <strong>{{ d.name }}</strong></p>
@@ -165,7 +165,7 @@
   <p class="empty" data-none{% if listing.shown %} hidden{% endif %}>{{ t.adm_none }}</p>
 </section>
 
-<p class="backlink"><a href="/">{{ dash.icon("back") }}{{ t.back_devices }}</a></p>
+<p class="backlink"><a href="/wifi">{{ dash.icon("back") }}{{ t.back_devices }}</a></p>
 {% if live_on or ov %}{{ dash.page_data({"page": "admin", "lang": lang, "api": "/api/admin/devices", "login": "/login",
                                     "ssid": settings.ssid, "overview": "/api/admin/overview" if ov else none},
                                     dict(dashboard if live_on else {}, overview=ov)) }}{% endif %}

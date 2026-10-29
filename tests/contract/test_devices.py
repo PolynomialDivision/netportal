@@ -57,17 +57,17 @@ class EnrolTests(ContractCase):
         before = len(A.reg.devices(self.person.sub))
         for fmt in ["", "windows", "android-app", "letswifi", "APPLE"]:
             with self.subTest(fmt=fmt):
-                r = self.b.post("/enroll", data={"csrf": self.b.csrf(), "format": fmt})
+                r = self.b.post("/wifi/enroll", data={"csrf": self.b.csrf(), "format": fmt})
                 self.assertPage(r, 400)
         self.assertEqual(len(A.reg.devices(self.person.sub)), before)
 
     def test_android_needs_passpoint(self):
         """NETPORTAL_PASSPOINT off (instance B): no Passpoint download, the option is not offered."""
         b = B.browser().logged_in(resident("np"))
-        r = b.post("/enroll", data={"csrf": b.csrf(), "format": "android"})
+        r = b.post("/wifi/enroll", data={"csrf": b.csrf(), "format": "android"})
         self.assertPage(r, 400)
-        self.assertNotIn('value="android"', b.get("/").text)
-        self.assertIn('value="android"', self.b.get("/").text)
+        self.assertNotIn('value="android"', b.get("/wifi").text)
+        self.assertIn('value="android"', self.b.get("/wifi").text)
 
     def test_recommended_format_per_platform(self):
         """3.2 enrolment options: the first (recommended) enrolment form fits the browser's platform;
@@ -76,7 +76,7 @@ class EnrolTests(ContractCase):
         for ua, fmt in [(IPHONE_UA, "apple"), (MAC_UA, "apple-mac"), (ANDROID_UA, "android"),
                         (FIREFOX_ANDROID_UA, "eap-config")]:
             with self.subTest(fmt=fmt):
-                page = A.browser(ua=ua).logged_in(resident("ua")).get("/").text
+                page = A.browser(ua=ua).logged_in(resident("ua")).get("/wifi").text
                 first = re.search(r'name="format" value="([^"]+)"', page)
                 self.assertEqual(first.group(1) if first else None, fmt)
 
@@ -134,7 +134,7 @@ class DownloadTests(ContractCase):
     def test_revoked_device_gives_no_artefact(self):
         _, token = enrol(self.b, "apple")
         dev = newest_device(A, self.person.sub)["id"]
-        self.b.post("/devices/%s/revoke" % dev, data={"csrf": self.b.csrf()})
+        self.b.post("/wifi/devices/%s/revoke" % dev, data={"csrf": self.b.csrf()})
         self.assertPage(self.b.get("/download/" + token), 404)
         self.assertEqual(A.reg.credential_count(dev), 0)
 
@@ -155,7 +155,7 @@ class RenewTests(ContractCase):
         person = resident("ren")
         b = instance.browser().logged_in(person)
         _, first, device_id = download(b, "apple")
-        r = b.post("/devices/%s/renew" % device_id, data={"csrf": b.csrf()})
+        r = b.post("/wifi/devices/%s/renew" % device_id, data={"csrf": b.csrf()})
         self.assertPage(r, 200)
         token = re.search(r'href="/download/([^"]+)"', r.text).group(1)
         r = b.get("/download/" + token)
@@ -180,9 +180,9 @@ class RenewTests(ContractCase):
         enrol(b, "apple")
         dev = newest_device(A, person.sub)["id"]
         other = A.browser().logged_in(resident("ren3"))
-        self.assertPage(other.post("/devices/%s/renew" % dev, data={"csrf": other.csrf()}), 404)
-        b.post("/devices/%s/revoke" % dev, data={"csrf": b.csrf()})
-        self.assertPage(b.post("/devices/%s/renew" % dev, data={"csrf": b.csrf()}), 404)
+        self.assertPage(other.post("/wifi/devices/%s/renew" % dev, data={"csrf": other.csrf()}), 404)
+        b.post("/wifi/devices/%s/revoke" % dev, data={"csrf": b.csrf()})
+        self.assertPage(b.post("/wifi/devices/%s/renew" % dev, data={"csrf": b.csrf()}), 404)
 
 
 class RenameTests(ContractCase):
@@ -196,13 +196,13 @@ class RenameTests(ContractCase):
         cls.dev = newest_device(A, cls.person.sub)["id"]
 
     def rename(self, name, as_json=False):
-        return self.b.post("/devices/%s/rename" % self.dev, data={"csrf": self.b.csrf(), "name": name},
+        return self.b.post("/wifi/devices/%s/rename" % self.dev, data={"csrf": self.b.csrf(), "name": name},
                            headers={"Accept": "application/json"} if as_json else None)
 
     def test_form_rename(self):
-        self.assertRedirect(self.rename("  phone  "), "/")
+        self.assertRedirect(self.rename("  phone  "), "/wifi")
         self.assertEqual(api_device(self.b, self.dev)["name"], "phone")
-        self.assertRedirect(self.rename("   "), "/")                    # empty: nothing changes
+        self.assertRedirect(self.rename("   "), "/wifi")                  # empty: nothing changes
         self.assertEqual(api_device(self.b, self.dev)["name"], "phone")
 
     def test_json_rename(self):
@@ -226,14 +226,14 @@ class RevokeTests(ContractCase):
 
     def revoke(self, browser=None, **data):
         browser = browser or self.b
-        return browser.post("/devices/%s/revoke" % self.dev, data=dict(data, csrf=browser.csrf()))
+        return browser.post("/wifi/devices/%s/revoke" % self.dev, data=dict(data, csrf=browser.csrf()))
 
     def test_revoke_with_a_session_disconnects_it(self):
         A.reg.radius_session(self.dev, self.cert, calling="02:00:00:00:aa:42", user_name="anonymous@scharni.org")
         _, before = A.metrics()
         started = time.time()
         r = self.revoke()
-        self.assertRedirect(r, "/")
+        self.assertRedirect(r, "/wifi")
         packets = A.nas.wait(1)
         self.assertEqual(len(packets), 1, packets)
         p = packets[0]
@@ -254,10 +254,10 @@ class RevokeTests(ContractCase):
         self.assertEqual((sample(after, "netportal_disconnects_total", result="ack") or 0)
                          - (sample(before, "netportal_disconnects_total", result="ack") or 0), 1)
         self.assertEqual(self.b.get("/api/devices").json()["devices"], [])
-        self.assertPage(self.b.get("/devices/" + self.dev), 404)
+        self.assertPage(self.b.get("/wifi/devices/" + self.dev), 404)
 
     def test_revoke_without_a_session(self):
-        self.assertRedirect(self.revoke(), "/")
+        self.assertRedirect(self.revoke(), "/wifi")
         self.assertEqual(A.nas.wait(1, timeout=1), [])
         self.assertEqual(A.reg.audit(self.dev)[-1], (self.person.sub, "disconnect:no-session"))
         self.assertEqual(A.reg.credential(self.cert)["status"], "revoked")
@@ -268,7 +268,7 @@ class RevokeTests(ContractCase):
         after an ACK)."""
         A.nas.reset("nak")
         A.reg.radius_session(self.dev, self.cert)
-        self.assertRedirect(self.revoke(), "/")
+        self.assertRedirect(self.revoke(), "/wifi")
         self.assertEqual(A.reg.audit(self.dev)[-1], (self.person.sub, "disconnect:not-found"))
 
     def test_timeout_retries_with_the_same_identifier(self):
@@ -293,7 +293,7 @@ class RevokeTests(ContractCase):
 
     def test_back_is_only_honoured_for_admin(self):
         r = self.revoke(back="https://evil.example/")
-        self.assertRedirect(r, "/")
+        self.assertRedirect(r, "/wifi")
         self.assertFalse(urllib.parse.urlsplit(r.headers["Location"]).netloc not in ("", "127.0.0.1:28080"))
 
     def test_admin_revokes_someone_elses_device(self):

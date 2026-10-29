@@ -52,7 +52,7 @@ async fn test_enrol_download_once() {
     }
     for bad in ["", "windows", "android-app", "letswifi", "APPLE"] {
         let csrf = b.csrf().await;
-        assert_eq!(b.post("/enroll", &[("csrf", &csrf), ("format", bad)]).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(b.post("/wifi/enroll", &[("csrf", &csrf), ("format", bad)]).await.status, StatusCode::BAD_REQUEST);
     }
 }
 
@@ -82,8 +82,8 @@ async fn test_names_and_passpoint() {
     let device = newest_device(&portal, &person.sub).await;
     assert_eq!(registry::device(&mut db, device, None).await.expect("d").expect("row").name, "x".repeat(60));
     let csrf = b.csrf().await;
-    assert_eq!(b.post("/enroll", &[("csrf", &csrf), ("format", "android")]).await.status, StatusCode::BAD_REQUEST);
-    assert!(!b.get("/").await.text().contains("value=\"android\""));
+    assert_eq!(b.post("/wifi/enroll", &[("csrf", &csrf), ("format", "android")]).await.status, StatusCode::BAD_REQUEST);
+    assert!(!b.get("/wifi").await.text().contains("value=\"android\""));
 }
 
 #[tokio::test]
@@ -94,14 +94,14 @@ async fn test_firefox_on_android_is_told_and_gets_the_app_first() {
     let mut chrome = portal.browser().logged_in(&resident("ch")).await;
     // the visible page (the texts are also in the scripts' np-texts block)
     let visible = |page: String| page.split("<script type=\"application/json\"").next().unwrap_or("").to_string();
-    let page = visible(chrome.get("/").await.text());
+    let page = visible(chrome.get("/wifi").await.text());
     let other_browser = netportal_core::i18n::text("en", "other_browser").expect("text");
     assert!(!page.contains(other_browser));
     assert!(page.find("value=\"android\"") < page.find("value=\"eap-config\""));
     let mut firefox = portal.browser();
     firefox.ua = FIREFOX_ANDROID.into();
     let mut firefox = firefox.logged_in(&resident("ff")).await;
-    let page = visible(firefox.get("/").await.text());
+    let page = visible(firefox.get("/wifi").await.text());
     assert!(page.contains(other_browser));
     assert!(page.find("value=\"eap-config\"") < page.find("value=\"android\""));
 }
@@ -116,7 +116,7 @@ async fn test_renew_keeps_the_device_and_overlaps() {
     b.get(&format!("/download/{}", token.expect("token"))).await;
     let device = newest_device(&portal, &person.sub).await;
     let csrf = b.csrf().await;
-    let page = b.post(&format!("/devices/{device}/renew"), &[("csrf", &csrf)]).await;
+    let page = b.post(&format!("/wifi/devices/{device}/renew"), &[("csrf", &csrf)]).await;
     assert_eq!(page.status, StatusCode::OK);
     let token = download_token(&page.text()).expect("token");
     assert_eq!(b.get(&format!("/download/{token}")).await.status, StatusCode::OK);
@@ -134,7 +134,10 @@ async fn test_renew_keeps_the_device_and_overlaps() {
     // someone else's, or an admin renewing someone else's: 404
     let mut ab = portal.browser().logged_in(&admin("adm")).await;
     let csrf = ab.csrf().await;
-    assert_eq!(ab.post(&format!("/devices/{device}/renew"), &[("csrf", &csrf)]).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        ab.post(&format!("/wifi/devices/{device}/renew"), &[("csrf", &csrf)]).await.status,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -145,10 +148,10 @@ async fn test_rename_form_and_json() {
     let mut b = portal.browser().logged_in(&person).await;
     b.enrol("apple", "before").await;
     let device = newest_device(&portal, &person.sub).await;
-    let path = format!("/devices/{device}/rename");
+    let path = format!("/wifi/devices/{device}/rename");
     let csrf = b.csrf().await;
     let r = b.post(&path, &[("csrf", &csrf), ("name", "  phone  ")]).await;
-    assert_eq!(r.location().as_deref(), Some("/"));
+    assert_eq!(r.location().as_deref(), Some("/wifi"));
     let json = [("accept", "application/json")];
     let r = b.post_with(&path, &[("csrf", &csrf), ("name", &"y".repeat(65))], &json).await;
     assert_eq!((r.status, r.json()), (StatusCode::OK, serde_json::json!({"ok": true, "name": "y".repeat(60)})));
@@ -179,11 +182,15 @@ async fn test_revoke_and_its_metrics() {
     assert!(metrics.contains("netportal_certificates{state=\"valid\"} 1"));
     assert!(metrics.contains("netportal_registry_up 1"));
     let csrf = b.csrf().await;
-    let r = b.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf), ("back", "https://evil.example/")]).await;
-    assert_eq!(r.location().as_deref(), Some("/"));
+    let r =
+        b.post(&format!("/wifi/devices/{device}/revoke"), &[("csrf", &csrf), ("back", "https://evil.example/")]).await;
+    assert_eq!(r.location().as_deref(), Some("/wifi"));
     let actions: Vec<String> = sqlx_actions(&portal, &device.to_string()).await;
     assert_eq!(actions[actions.len() - 2..], ["revoke".to_string(), "disconnect:no-session".to_string()]);
-    assert_eq!(b.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf)]).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        b.post(&format!("/wifi/devices/{device}/revoke"), &[("csrf", &csrf)]).await.status,
+        StatusCode::NOT_FOUND
+    );
     let metrics = metrics_text(&portal).await;
     assert!(metrics.contains("netportal_disconnects_total{result=\"no-session\"} 1"), "{metrics}");
     assert!(metrics.contains("netportal_devices{state=\"revoked\"} 1"));
@@ -192,7 +199,7 @@ async fn test_revoke_and_its_metrics() {
     let (_, token) = b.enrol("apple", "other").await;
     let other = newest_device(&portal, &person.sub).await;
     let csrf = b.csrf().await;
-    b.post(&format!("/devices/{other}/revoke"), &[("csrf", &csrf)]).await;
+    b.post(&format!("/wifi/devices/{other}/revoke"), &[("csrf", &csrf)]).await;
     assert_eq!(b.get(&format!("/download/{}", token.expect("token"))).await.status, StatusCode::NOT_FOUND);
 }
 
@@ -212,11 +219,11 @@ async fn test_a_revocation_whose_disconnect_is_not_confirmed_says_so() {
         ))
         .await;
     let csrf = b.csrf().await;
-    let r = b.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
+    let r = b.post(&format!("/wifi/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
     assert_eq!(r.status, StatusCode::OK);
     let page = r.text();
     assert!(page.contains("is removed: it cannot join the Wi-Fi again") && page.contains("kitchen tablet"), "{page}");
-    assert!(page.contains(r#"<a href="/">"#), "{page}");
+    assert!(page.contains(r#"<a href="/wifi">"#), "{page}");
     let actions = sqlx_actions(&portal, &device.to_string()).await;
     assert_eq!(actions[actions.len() - 2..], ["revoke".to_string(), "disconnect:skipped".to_string()]);
     // an admin's revocation from the admin page goes back there
@@ -232,7 +239,7 @@ async fn test_a_revocation_whose_disconnect_is_not_confirmed_says_so() {
         .await;
     let mut ab = portal.browser().logged_in(&admin("unca")).await;
     let csrf = ab.csrf().await;
-    let r = ab.post(&format!("/devices/{theirs}/revoke"), &[("csrf", &csrf), ("back", "/admin")]).await;
+    let r = ab.post(&format!("/wifi/devices/{theirs}/revoke"), &[("csrf", &csrf), ("back", "/admin")]).await;
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.text().contains(r#"<a href="/admin">"#), "{}", r.text());
 }
@@ -455,7 +462,7 @@ async fn test_device_limit_and_enrolment_rate() {
     // a revoked device frees its place
     let device = newest_device(&portal, &person.sub).await;
     let csrf = b.csrf().await;
-    b.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
+    b.post(&format!("/wifi/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
     assert_eq!(b.enrol("apple", "three").await.0.status, StatusCode::OK);
     // the rate: at most 10 new devices an hour (revoked ones count)
     let portal = Portal::with(&admin_url, &[("NETPORTAL_MAX_DEVICES", "50")]).await;
@@ -487,7 +494,7 @@ async fn test_certificate_rate() {
     let token = token.expect("token");
     assert_eq!(b.get(&format!("/download/{token}")).await.status, StatusCode::OK); // the 30th
     let csrf = b.csrf().await;
-    let r = b.post(&format!("/devices/{device}/renew"), &[("csrf", &csrf)]).await;
+    let r = b.post(&format!("/wifi/devices/{device}/renew"), &[("csrf", &csrf)]).await;
     let again = common::download_token(&r.text()).expect("a new link");
     let r = b.get(&format!("/download/{again}")).await;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);

@@ -178,7 +178,7 @@
   {%- endfor %}
   </ul>
   {%- if all|length > list|length %}
-  <p class="diag-more"><a href="/devices/{{ d.id }}">{{ (t.diag_more|e).format(n=all|length - list|length) }}</a></p>
+  <p class="diag-more"><a href="/wifi/devices/{{ d.id }}">{{ (t.diag_more|e).format(n=all|length - list|length) }}</a></p>
   {%- endif %}
 {%- elif state_of(d) == "online" and (not dashboard is defined or dashboard.telemetry == "ok") %}
   <p class="all-good">{{ icon("check") }}{{ t.all_good }}</p>
@@ -291,7 +291,7 @@
   <{{ tag }} class="dev-name-text" data-name>{{ d.name }}</{{ tag }}>
   <details class="rename-box">
     <summary class="edit-button" title="{{ t.rename }}">{{ icon("edit") }}<span class="sr" data-name-label>{{ t.rename }}: {{ d.name }}</span></summary>
-    <form method="post" action="/devices/{{ d.id }}/rename" class="rename" data-rename>
+    <form method="post" action="/wifi/devices/{{ d.id }}/rename" class="rename" data-rename>
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input id="name-{{ d.id }}" name="name" value="{{ d.name }}" maxlength="60" aria-label="{{ t.device_name }}" autocomplete="off" required>
       <button class="button small primary">{{ t.save }}</button>

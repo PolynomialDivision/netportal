@@ -143,23 +143,23 @@ class CsrfTests(ContractCase):
     def test_missing_or_wrong_token_is_400(self):
         for data in [{}, {"csrf": ""}, {"csrf": "wrong"}, {"csrf": self.b.csrf() + "x"}]:
             with self.subTest(data=data):
-                r = self.b.post("/devices/%s/rename" % self.dev, data=dict(data, name="changed"))
+                r = self.b.post("/wifi/devices/%s/rename" % self.dev, data=dict(data, name="changed"))
                 self.assertPage(r, 400)
         self.assertEqual(A.reg.device(self.dev)["name"], "csrf device")
 
     def test_token_from_another_session_is_refused(self):
         other = A.browser().logged_in(resident("csrf2"))
-        r = self.b.post("/devices/%s/rename" % self.dev, data={"csrf": other.csrf(), "name": "x"})
+        r = self.b.post("/wifi/devices/%s/rename" % self.dev, data={"csrf": other.csrf(), "name": "x"})
         self.assertPage(r, 400)
 
     def test_token_in_a_header_does_not_count(self):
         """4.2: only the form field is read (no header-based token)."""
-        r = self.b.post("/devices/%s/rename" % self.dev, data={"name": "x"},
+        r = self.b.post("/wifi/devices/%s/rename" % self.dev, data={"name": "x"},
                         headers={"X-CSRF-Token": self.b.csrf(), "X-CSRFToken": self.b.csrf()})
         self.assertPage(r, 400)
 
     def test_script_post_with_wrong_token_is_json_400(self):
-        r = self.b.post("/devices/%s/rename" % self.dev, data={"csrf": "wrong", "name": "x"},
+        r = self.b.post("/wifi/devices/%s/rename" % self.dev, data={"csrf": "wrong", "name": "x"},
                         headers={"Accept": "application/json"})
         self.assertJsonError(r, 400, "bad_request")
 
@@ -170,16 +170,16 @@ class CsrfTests(ContractCase):
         anon = A.browser()
         for data in [{"name": "x"}, {"name": "x", "csrf": "wrong"}, {"name": "x", "csrf": anon.csrf()}]:
             with self.subTest(data=data):
-                r = anon.post("/devices/%s/rename" % self.dev, data=data, headers={"Accept": "application/json"})
+                r = anon.post("/wifi/devices/%s/rename" % self.dev, data=data, headers={"Accept": "application/json"})
                 self.assertJsonError(r, 401, "login_required")
-        self.assertPage(A.browser().post("/devices/%s/rename" % self.dev, data={"name": "x"}), 400)
-        self.assertJsonError(A.browser().post("/enroll", data={"format": "apple"},
+        self.assertPage(A.browser().post("/wifi/devices/%s/rename" % self.dev, data={"name": "x"}), 400)
+        self.assertJsonError(A.browser().post("/wifi/enroll", data={"format": "apple"},
                                               headers={"Accept": "application/json"}), 401, "login_required")
 
     def test_accept_must_prefer_json(self):
         """3.1 wants_json: the best match of Accept must be application/json."""
         anon = A.browser()
-        r = anon.post("/devices/%s/rename" % self.dev, data={"name": "x"},
+        r = anon.post("/wifi/devices/%s/rename" % self.dev, data={"name": "x"},
                       headers={"Accept": "text/html, application/json;q=0.5"})
         self.assertPage(r, 400)
 

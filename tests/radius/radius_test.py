@@ -363,10 +363,98 @@ def main():
     sql("DELETE FROM credential WHERE serial = %s", CERTS["mallory"]["serial"])
     check("... and the tablet itself still connects", connect("carol-tablet") == ("accept", "50"))
     resumption_checks()
+    iot_checks()
 
     telemetry_checks(tablet)
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0
+
+
+# --- MAC authentication on the IoT SSID (house-infra docs/IOT-ACCESS.md 6.3) ---------------------
+
+IOT_CALLED = "AA-BB-CC-00-00-09:Scharni-IoT"     # the IoT SSID (RADIUS_IOT_SSID, the entrypoint's default)
+
+
+def mac_auth(mac, called=IOT_CALLED):
+    """UniFi's RADIUS MAC authentication of the IoT SSID, as radclient (a plain PAP request: the
+    MAC as User-Name and User-Password, radius_macacl_format none_lower; Calling-Station-Id
+    as hostapd sends it): (verdict, {attribute: value} of the reply)."""
+    calling = "-".join(mac.replace(":", "").replace("-", "")[i:i + 2] for i in range(0, 12, 2)).upper()
+    body = ('User-Name = "%s", User-Password = "%s", Called-Station-Id = "%s", Calling-Station-Id = "%s", '
+            'NAS-Port-Type = Wireless-802.11, Service-Type = Call-Check, Message-Authenticator = 0x00\n'
+            % (mac, mac, called, calling))
+    out = subprocess.run(["docker", "exec", "-i", AP, "radclient", "-x", "-t", "4", "%s:1812" % RADIUS_IP, "auth",
+                          SECRET], input=body, capture_output=True, text=True).stdout
+    global LAST_REPLY
+    LAST_REPLY = out
+    verdict = "accept" if "Received Access-Accept" in out else ("reject" if "Received Access-Reject" in out else "none")
+    reply = out.split("Received ", 1)[1] if "Received " in out else ""
+    return verdict, dict(re.findall(r"^\s+([A-Za-z-]+) = (.+?)\s*$", reply, re.M))
+
+
+def iot_checks():
+    """A registered MAC gets in without VLAN attributes and is logged; an unknown one is refused
+    as unknown_mac and noted for the claim; the residents' SSID takes no MAC login; a revoked
+    device's MAC is refused."""
+    mac, mac_hex = "aa:bb:cc:dd:ee:10", "aabbccddee10"
+    device = sql("INSERT INTO device (id, owner, name, kind, platform, policy) VALUES (gen_random_uuid(), 'sub-alice', "
+                 "'Chromecast', 'iot', 'iot', 'residents') RETURNING id::text")[0][0]
+    sql("INSERT INTO iot_device (device_id, class, mac, mac_claimed_at, psk) VALUES (%s, 'cast', %s, now(), %s)",
+        device, mac, "ABCDEFGHIJKLMNOPQRST")
+    sql("INSERT INTO device_mac (device_id, mac, first_seen, last_seen, auth_count, randomized) "
+        "VALUES (%s, %s, now(), now(), 0, false)", device, mac)
+    check("the radius role reads the MAC decision view", radius_role_can("SELECT * FROM radius.iot_mac"))
+    # the form UniFi sends (none_lower), and the separator forms in any case
+    verdict, reply = mac_auth(mac_hex)
+    check("iot: a registered MAC (12 lowercase hex digits) is accepted on the IoT SSID", verdict == "accept",
+          LAST_REPLY[-400:])
+    check("... without VLAN attributes (the key's mapping gives VLAN 40)",
+          not any(k.startswith("Tunnel-") for k in reply), reply)
+    check("... with the Session-Timeout backstop and the accounting interval",
+          reply.get("Session-Timeout") == "43200" and reply.get("Acct-Interim-Interval") == "120", reply)
+    token = reply.get("Class", "")
+    token = bytes.fromhex(token[2:]).decode() if token.startswith("0x") else token
+    check("... and a Class token", bool(re.fullmatch(r"np1:[-_0-9A-Za-z]{22}", token)), reply)
+    logged = sql("SELECT device_id::text, result, reason, mac::text, serial, vlan, ssid FROM radius_auth "
+                 "WHERE class_token = %s", token)
+    check("... logged as an accept of the device (no serial, no VLAN, the IoT SSID)",
+          logged == [(device, "accept", "ok", mac, None, None, "Scharni-IoT")], logged)
+    windows = sql("SELECT auth_count, last_seen > now() - interval '1 minute' FROM device_mac WHERE device_id = %s",
+                  device)
+    check("... and the device's MAC identity is updated (device_mac)", windows == [(1, True)], windows)
+    for form in ("AA:BB:CC:DD:EE:10", "aa-bb-cc-dd-ee-10", "AABBCCDDEE10"):
+        check("iot: the MAC as %s is accepted too" % form, mac_auth(form)[0] == "accept", LAST_REPLY[-300:])
+    # an unknown MAC: refused, logged, noted for the claim
+    verdict, _ = mac_auth("aabbccddee77")
+    check("iot: an unregistered MAC is rejected", verdict == "reject", LAST_REPLY[-300:])
+    check("... logged as unknown_mac", last_reject() == ("unknown_mac", None, None), last_reject())
+    attempts = sql("SELECT mac::text, tries, ssid FROM iot_join_attempt ORDER BY mac")
+    check("... and noted in iot_join_attempt with the SSID", attempts == [("aa:bb:cc:dd:ee:77", 1, "Scharni-IoT")],
+          attempts)
+    mac_auth("aabbccddee77")
+    attempts = sql("SELECT mac::text, tries FROM iot_join_attempt")
+    check("... a second try adds to it", attempts == [("aa:bb:cc:dd:ee:77", 2)], attempts)
+    # the residents' SSID takes no MAC login, registered or not
+    verdict, _ = mac_auth(mac_hex, called=CALLED)
+    check("iot: a registered MAC on the residents' SSID is rejected", verdict == "reject", LAST_REPLY[-300:])
+    check("... logged as not_eap (not a MAC login of the IoT SSID), no join attempt",
+          last_reject() == ("not_eap", None, None)
+          and sql("SELECT count(*) FROM iot_join_attempt WHERE mac = %s", mac) == [(0,)], last_reject())
+    check("iot: a MAC-like name with a password is rejected on the residents' SSID too",
+          mac_auth("aabbccddee77", called=CALLED)[0] == "reject")
+    # a revoked device: refused (the view hides it)
+    sql("UPDATE device SET revoked_at = now() WHERE id = %s", device)
+    verdict, _ = mac_auth(mac_hex)
+    check("iot: a revoked device's MAC is rejected", verdict == "reject", LAST_REPLY[-300:])
+    check("... logged as unknown_mac", last_reject()[0] == "unknown_mac", last_reject())
+    sql("UPDATE device SET revoked_at = NULL WHERE id = %s", device)
+    # an offboarded owner: refused as well
+    sql("UPDATE person SET offboarded_at = now() WHERE sub = 'sub-alice'")
+    check("iot: the MAC of a device whose owner is offboarded is rejected", mac_auth(mac_hex)[0] == "reject")
+    sql("UPDATE person SET offboarded_at = NULL WHERE sub = 'sub-alice'")
+    check("iot: ... and accepted again once the owner is back", mac_auth(mac_hex)[0] == "accept")
+    sql("DELETE FROM device WHERE id = %s", device)
+    sql("DELETE FROM iot_join_attempt")
 
 
 def accounting_order_checks(tablet, mac):

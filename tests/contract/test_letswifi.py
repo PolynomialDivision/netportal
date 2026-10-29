@@ -467,7 +467,7 @@ class EapConfigEndpointTests(ContractCase):
         body = f.tokens()
         f.eap(body["access_token"])
         dev = newest_device(A, f.person.sub)["id"]
-        f.browser.post("/devices/%s/revoke" % dev, data={"csrf": f.browser.csrf()})
+        f.browser.post("/wifi/devices/%s/revoke" % dev, data={"csrf": f.browser.csrf()})
         self.assertJsonError(f.eap(body["access_token"]), 401, "invalid_token")
         self.assertJsonError(f.refresh(body["refresh_token"]), 400, "invalid_grant")
 
@@ -502,7 +502,7 @@ class EapConfigEndpointTests(ContractCase):
         f = Flow(ANDROID)
         f.eap(f.tokens()["access_token"])
         dev = newest_device(A, f.person.sub)["id"]
-        r = f.browser.post("/devices/%s/renew" % dev, data={"csrf": f.browser.csrf()})
+        r = f.browser.post("/wifi/devices/%s/renew" % dev, data={"csrf": f.browser.csrf()})
         self.assertPage(r, 200, "geteduroam")
         self.assertIn(urllib.parse.urlsplit(A.base_url).netloc, r.text)
         self.assertNotIn("/download/", r.text)

@@ -66,13 +66,13 @@ async fn test_admin_can_revoke_others_only_while_admin() {
     registry::set_admin(&mut db, &person.sub, false).await.expect("admin");
     db.commit().await.expect("commit");
     let csrf = ab.csrf().await;
-    let r = ab.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
+    let r = ab.post(&format!("/wifi/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
     assert!(r.to_login(), "{:?}", r.status); // the session ended with the right (L2)
     let mut person = person;
     person.groups = vec!["residents".into()];
     ab.login(&person).await;
     let csrf = ab.csrf().await;
-    let r = ab.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
+    let r = ab.post(&format!("/wifi/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND); // only their own devices now
     let row = registry::device(&mut db, device, None).await.expect("device").expect("row");
     assert!(row.revoked_at.is_none());
@@ -92,7 +92,7 @@ async fn test_offboarded_goes_to_the_login() {
     assert_eq!(b.get("/api/devices").await.error().as_deref(), Some("login_required"));
     // the CSRF token stays: a form sent now goes through the login, not into a CSRF error
     assert_eq!(b.csrf().await, token);
-    assert!(b.post("/enroll", &[("csrf", &token), ("format", "apple")]).await.to_login());
+    assert!(b.post("/wifi/enroll", &[("csrf", &token), ("format", "apple")]).await.to_login());
 }
 
 #[tokio::test]
@@ -174,7 +174,7 @@ async fn test_a_form_sent_after_the_limit_goes_to_the_login() {
     let mut b = portal.browser().logged_in(&resident("res")).await;
     let csrf = b.csrf().await;
     portal.clock.advance(12 * HOUR);
-    assert!(b.post("/enroll", &[("csrf", &csrf), ("format", "apple")]).await.to_login());
+    assert!(b.post("/wifi/enroll", &[("csrf", &csrf), ("format", "apple")]).await.to_login());
 }
 
 #[tokio::test]
@@ -197,10 +197,10 @@ async fn test_a_form_sent_after_the_limit_goes_back_to_a_page_not_to_its_post_ur
     let mut b = portal.browser().logged_in(&person).await;
     let id = "00000000-0000-4000-8000-000000000001";
     for (path, back, want) in [
-        ("/enroll", "", "/"),
-        (&format!("/devices/{id}/revoke") as &str, "/admin", "/admin"),
-        (&format!("/devices/{id}/revoke"), "https://evil.example.org/", "/"),
-        (&format!("/devices/{id}/revoke"), "//evil.example.org/", "/"),
+        ("/wifi/enroll", "", "/"),
+        (&format!("/wifi/devices/{id}/revoke") as &str, "/admin", "/admin"),
+        (&format!("/wifi/devices/{id}/revoke"), "https://evil.example.org/", "/"),
+        (&format!("/wifi/devices/{id}/revoke"), "//evil.example.org/", "/"),
     ] {
         let csrf = b.csrf().await;
         portal.clock.advance(12 * HOUR);
@@ -435,7 +435,7 @@ async fn test_csrf_rules() {
     let mut b = portal.browser().logged_in(&person).await;
     b.enrol("apple", "csrf device").await;
     let device = newest_device(&portal, &person.sub).await;
-    let path = format!("/devices/{device}/rename");
+    let path = format!("/wifi/devices/{device}/rename");
     let csrf = b.csrf().await;
     for sent in ["", "wrong", &format!("{csrf}x")] {
         let r = b.post(&path, &[("csrf", sent), ("name", "changed")]).await;
@@ -462,7 +462,7 @@ async fn test_a_stale_script_post_is_401_before_the_csrf_check() {
     let portal = Portal::new(&admin_url).await;
     let mut anon = portal.browser();
     let csrf = anon.csrf().await;
-    let path = "/devices/00000000-0000-4000-8000-000000000001/rename";
+    let path = "/wifi/devices/00000000-0000-4000-8000-000000000001/rename";
     for fields in [vec![("name", "x")], vec![("name", "x"), ("csrf", "wrong")], vec![("name", "x"), ("csrf", &csrf)]] {
         let r = anon.post_with(path, &fields, &[("accept", "application/json")]).await;
         assert_eq!((r.status, r.error().as_deref()), (StatusCode::UNAUTHORIZED, Some("login_required")));
@@ -544,9 +544,9 @@ async fn test_405_and_404_answers() {
     let r = portal.post_form("/api/eap-config", &[], &[("authorization", "Bearer not-a-token")]).await;
     assert_eq!((r.status, r.error().as_deref()), (StatusCode::UNAUTHORIZED, Some("invalid_token")));
     // device ids only in the canonical form
-    assert_eq!(b.get("/devices/not-a-uuid").await.status, StatusCode::FOUND); // the login first
+    assert_eq!(b.get("/wifi/devices/not-a-uuid").await.status, StatusCode::FOUND); // the login first
     let mut ab = portal.browser().logged_in(&admin("adm")).await;
-    assert_eq!(ab.get("/devices/not-a-uuid").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(ab.get("/wifi/devices/not-a-uuid").await.status, StatusCode::NOT_FOUND);
     assert_eq!(ab.get("/api/devices/1234").await.error().as_deref(), Some("not_found"));
     assert_eq!(ab.get("/devices/0f8e1c2a3b4d4e5f8a9b0c1d2e3f4a5b").await.status, StatusCode::NOT_FOUND);
 }
@@ -559,7 +559,9 @@ async fn test_security_headers() {
     let dashboard = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
     let mut b = portal.browser().logged_in(&resident("hdr")).await;
     for (path, csp, cache) in [
-        ("/", dashboard, "no-store"),
+        ("/", base, "no-store"),
+        ("/wifi", dashboard, "no-store"),
+        ("/home", base, "no-store"),
         ("/welcome", base, "no-store"),
         ("/nope", base, "no-store"),
         ("/api/house", base, "no-store"),

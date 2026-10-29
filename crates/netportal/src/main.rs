@@ -22,7 +22,9 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use clap::{Parser, Subcommand};
-use netportal_core::config::{CollectSettings, InitDbSettings, OffboardSettings, PortalSettings};
+use netportal_core::config::{
+    CollectSettings, DiscoverySettings, InitDbSettings, IotSettings, OffboardSettings, PortalSettings,
+};
 use netportal_core::{Db, registry};
 
 #[derive(Parser)]
@@ -64,6 +66,18 @@ enum Command {
     },
     /// One collector job once (unifi_events, incidents, rollup, prune)
     Job { name: String },
+    /// The IoT controller: UniFi keys, OPNsense aliases, rules and states, once or forever
+    Iot {
+        /// seconds between rounds; 0: one round
+        #[arg(long, default_value_t = 0)]
+        every: u64,
+    },
+    /// The discovery proxy (mDNS/DNS-SD between the residents' and the IoT VLAN)
+    Discovery {
+        /// listen on both legs for 30 s and print what was seen, then exit
+        #[arg(long)]
+        probe: bool,
+    },
     /// The PKI ceremony: root, device CA and RADIUS server certificate as PEM files
     Pki {
         /// directory for the files (created)
@@ -111,6 +125,8 @@ impl Command {
             Command::Offboard { .. } => "offboard",
             Command::Collect { .. } => "collect",
             Command::Job { .. } => "job",
+            Command::Iot { .. } => "iot",
+            Command::Discovery { .. } => "discovery",
             Command::Pki { .. } => "pki",
             Command::Health(_) => "health",
         }
@@ -149,6 +165,14 @@ async fn run(command: &Command) -> anyhow::Result<i32> {
         Command::Job { name } => {
             let settings = CollectSettings::load()?;
             Ok(netportal_collect::scheduler::run_job(&settings, name).await?)
+        }
+        Command::Iot { every } => {
+            let settings = IotSettings::load()?;
+            Ok(netportal_iot::run(&settings, *every).await?)
+        }
+        Command::Discovery { probe } => {
+            let settings = DiscoverySettings::load()?;
+            Ok(netportal_discovery::run(&settings, *probe).await?)
         }
         Command::Pki { out, name, server_name } => Ok(netportal_pki::pki::ceremony(out, name, server_name)?),
         Command::Health(Health::Web { addr, timeout }) => {

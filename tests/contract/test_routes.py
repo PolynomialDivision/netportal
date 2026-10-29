@@ -4,14 +4,18 @@ method handling (HEAD, OPTIONS, 405, the trailing slash) and the error bodies of
 import uuid
 
 from harness import (A, ContractCase, Person, admin_person, allow, enrol, newest_device,
-                     resident)
+                     register_home, resident)
 
 UNKNOWN = str(uuid.uuid4())
 
 # (method, path template, anonymous expectation) for every route of 3.2. {own}: a device of the
 # resident, {other}: someone else's. "login": 302 /login; "login_json": 401 login_required.
 ROUTES = [
-    ("GET", "/devices/{own}", "login"),
+    ("GET", "/wifi", "login"),
+    ("GET", "/wifi/devices/{own}", "login"),
+    ("GET", "/home", "login"),
+    ("GET", "/home/devices/{home}", "login"),
+    ("GET", "/admin/home", "login"),
     ("GET", "/download/not-a-token", "login"),
     ("GET", "/admin", "login"),
     ("GET", "/admin/aps", "login"),
@@ -28,12 +32,18 @@ ROUTES = [
     ("GET", "/api/admin/incidents", "login_json"),
     ("GET", "/api/admin/auth", "login_json"),
     ("GET", "/api/admin/devices/{own}/raw", "login_json"),
+    ("GET", "/api/home/devices", "login_json"),
+    ("GET", "/api/home/devices/{home}", "login_json"),
+    ("GET", "/api/admin/home/devices", "login_json"),
 ]
 # Form POSTs that need a login: with a valid CSRF token an anonymous browser goes to the login.
-LOGIN_POSTS = ["/enroll", "/devices/{own}/renew", "/devices/{own}/rename", "/devices/{own}/revoke"]
-ADMIN_PAGES = ["/admin", "/admin/aps", "/admin/incidents", "/admin/devices/{other}"]
+LOGIN_POSTS = ["/wifi/enroll", "/wifi/devices/{own}/renew", "/wifi/devices/{own}/rename", "/wifi/devices/{own}/revoke",
+               "/home/register", "/home/devices/{home}/claim", "/home/devices/{home}/rotate-key",
+               "/home/devices/{home}/share", "/home/devices/{home}/unshare", "/home/devices/{home}/visibility",
+               "/home/devices/{home}/rename", "/home/devices/{home}/remove"]
+ADMIN_PAGES = ["/admin", "/admin/aps", "/admin/incidents", "/admin/devices/{other}", "/admin/home"]
 ADMIN_APIS = ["/api/admin/devices", "/api/admin/overview", "/api/admin/aps", "/api/admin/incidents",
-              "/api/admin/auth", "/api/admin/devices/{other}/raw"]
+              "/api/admin/auth", "/api/admin/devices/{other}/raw", "/api/admin/home/devices"]
 
 
 class RouteAuthTests(ContractCase):
@@ -48,10 +58,11 @@ class RouteAuthTests(ContractCase):
         ob = A.browser().logged_in(cls.other)
         enrol(ob, "apple", "theirs")
         cls.theirs = str(newest_device(A, cls.other.sub)["id"])
+        cls.home = register_home(cls.rb, "my cast", "cast")
         cls.ab = A.browser().logged_in(cls.adm)
 
     def fill(self, path):
-        return path.format(own=self.own, other=self.theirs)
+        return path.format(own=self.own, other=self.theirs, home=self.home)
 
     def test_anonymous_get_routes(self):
         """3.2 rows 5-25, 27: login pages redirect to /login, the JSON API answers 401
@@ -70,6 +81,13 @@ class RouteAuthTests(ContractCase):
         self.assertToLogin(A.browser().get("/"))
         r = A.browser().get("/welcome")
         self.assertPage(r, 200, "/login")
+
+    def test_old_device_path_redirects_permanently(self):
+        """IOT-ACCESS 6.1: /devices/<id> (the address before the Wi-Fi area moved under /wifi)
+        answers 308 to /wifi/devices/<id>, for anyone, without a session; anything else is 404."""
+        self.assertRedirect(A.browser().get("/devices/" + self.own), "/wifi/devices/" + self.own, status=308)
+        self.assertRedirect(self.rb.get("/devices/" + self.own), "/wifi/devices/" + self.own, status=308)
+        self.assertPage(A.browser().get("/devices/not-a-uuid"), 404)
 
     def test_anonymous_form_posts_go_to_the_login(self):
         """3.2 rows 7, 8, 10, 11 with a valid CSRF token and no login: 302 /login."""
@@ -111,10 +129,11 @@ class RouteAuthTests(ContractCase):
     def test_resident_pages(self):
         """3.2 rows 4-6, 16-19 for a resident; admin pages 403 (page), admin API 403 forbidden
         (4.3)."""
-        for path in ["/", "/welcome", "/devices/{own}"]:
+        for path in ["/", "/welcome", "/wifi", "/wifi/devices/{own}", "/home", "/home/devices/{home}"]:
             with self.subTest(path=path):
                 self.assertPage(self.rb.get(self.fill(path)), 200)
-        for path in ["/api/devices", "/api/devices/{own}", "/api/devices/{own}/history", "/api/house"]:
+        for path in ["/api/devices", "/api/devices/{own}", "/api/devices/{own}/history", "/api/house",
+                     "/api/home/devices", "/api/home/devices/{home}"]:
             with self.subTest(path=path):
                 r = self.rb.get(self.fill(path))
                 self.assertEqual(r.status_code, 200, r.text[:200])
@@ -129,33 +148,40 @@ class RouteAuthTests(ContractCase):
     def test_resident_cannot_see_someone_elses_device(self):
         """4.3: someone else's device is 404 for a resident on every device route."""
         theirs = self.theirs
-        self.assertPage(self.rb.get("/devices/" + theirs), 404)
+        self.assertPage(self.rb.get("/wifi/devices/" + theirs), 404)
         self.assertJsonError(self.rb.get("/api/devices/" + theirs), 404, "not_found")
         self.assertJsonError(self.rb.get("/api/devices/%s/history" % theirs), 404, "not_found")
         csrf = self.rb.csrf()
-        self.assertPage(self.rb.post("/devices/%s/renew" % theirs, data={"csrf": csrf}), 404)
-        self.assertPage(self.rb.post("/devices/%s/revoke" % theirs, data={"csrf": csrf}), 404)
-        self.assertPage(self.rb.post("/devices/%s/rename" % theirs, data={"csrf": csrf, "name": "x"}), 404)
-        r = self.rb.post("/devices/%s/rename" % theirs, data={"csrf": csrf, "name": "x"},
+        self.assertPage(self.rb.post("/wifi/devices/%s/renew" % theirs, data={"csrf": csrf}), 404)
+        self.assertPage(self.rb.post("/wifi/devices/%s/revoke" % theirs, data={"csrf": csrf}), 404)
+        self.assertPage(self.rb.post("/wifi/devices/%s/rename" % theirs, data={"csrf": csrf, "name": "x"}), 404)
+        r = self.rb.post("/wifi/devices/%s/rename" % theirs, data={"csrf": csrf, "name": "x"},
                          headers={"Accept": "application/json"})
         self.assertJsonError(r, 404, "not_found")
         self.assertEqual(A.reg.device(theirs)["name"], "theirs")
+        # a home device's id on the Wi-Fi routes, and a Wi-Fi device's on the home routes: 404
+        self.assertPage(self.rb.get("/wifi/devices/" + self.home), 404)
+        self.assertJsonError(self.rb.get("/api/devices/" + self.home), 404, "not_found")
+        self.assertPage(self.rb.get("/home/devices/" + self.own), 404)
+        self.assertJsonError(self.rb.get("/api/home/devices/" + self.own), 404, "not_found")
 
     def test_unknown_device_ids(self):
         """3 (URL converters): an unknown UUID is 404; a non-UUID never matches (404)."""
-        self.assertPage(self.ab.get("/devices/" + UNKNOWN), 404)
+        self.assertPage(self.ab.get("/wifi/devices/" + UNKNOWN), 404)
         self.assertJsonError(self.ab.get("/api/devices/" + UNKNOWN), 404, "not_found")
         self.assertJsonError(self.ab.get("/api/admin/devices/%s/raw" % UNKNOWN), 404, "not_found")
-        self.assertPage(self.ab.get("/devices/not-a-uuid"), 404)
+        self.assertPage(self.ab.get("/wifi/devices/not-a-uuid"), 404)
         self.assertJsonError(self.ab.get("/api/devices/1234"), 404, "not_found")
-        self.assertPage(self.ab.get("/devices/" + self.own.upper()), 200)      # either case
+        self.assertPage(self.ab.get("/wifi/devices/" + self.own.upper()), 200)      # either case
+        self.assertPage(self.ab.get("/home/devices/" + UNKNOWN), 404)
+        self.assertJsonError(self.ab.get("/api/home/devices/not-a-uuid"), 404, "not_found")
 
     def test_admin_routes(self):
         """3.2 rows 12-25 for an admin; admins see any device (4.3)."""
-        for path in ADMIN_PAGES + ["/devices/{other}"]:
+        for path in ADMIN_PAGES + ["/wifi/devices/{other}", "/home/devices/{home}"]:
             with self.subTest(path=path):
                 self.assertPage(self.ab.get(self.fill(path)), 200)
-        for path in ADMIN_APIS + ["/api/devices/{other}", "/api/devices/{other}/history"]:
+        for path in ADMIN_APIS + ["/api/devices/{other}", "/api/devices/{other}/history", "/api/home/devices/{home}"]:
             with self.subTest(path=path):
                 r = self.ab.get(self.fill(path))
                 self.assertEqual(r.status_code, 200, r.text[:200])
@@ -205,7 +231,8 @@ class MethodTests(ContractCase):
     def test_405_pages(self):
         """3.6, RFC 9110 15.5.6: a wrong method is 405 with an Allow header."""
         b = A.browser()
-        for method, path, methods in [("GET", "/logout", {"POST", "OPTIONS"}), ("GET", "/enroll", {"POST", "OPTIONS"}),
+        for method, path, methods in [("GET", "/logout", {"POST", "OPTIONS"}), ("GET", "/wifi/enroll", {"POST", "OPTIONS"}),
+                                      ("GET", "/home/register", {"POST", "OPTIONS"}),
                                       ("PUT", "/healthz", {"GET", "HEAD", "OPTIONS"}),
                                       ("GET", "/oauth/token", {"POST", "OPTIONS"})]:
             with self.subTest(path=path):
@@ -244,11 +271,11 @@ class ErrorResponseTests(ContractCase):
     def test_bad_request_page_and_json(self):
         person = resident("err")
         b = A.browser().logged_in(person)
-        r = b.post("/enroll", data={"csrf": b.csrf(), "format": "windows"})
+        r = b.post("/wifi/enroll", data={"csrf": b.csrf(), "format": "windows"})
         self.assertPage(r, 400, "Something went wrong.")
         enrol(b, "apple")
         dev = str(newest_device(A, person.sub)["id"])
-        r = b.post("/devices/%s/rename" % dev, data={"csrf": "wrong", "name": "x"},
+        r = b.post("/wifi/devices/%s/rename" % dev, data={"csrf": "wrong", "name": "x"},
                    headers={"Accept": "application/json"})
         self.assertJsonError(r, 400, "bad_request")
 

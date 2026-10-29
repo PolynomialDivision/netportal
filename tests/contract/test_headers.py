@@ -22,8 +22,10 @@ class HeaderTests(ContractCase):
         install, _ = enrol(self.b, "apple")
         anon = A.browser()
         return [
-            ("start page", self.b.get("/"), DASHBOARD, "no-store"),
-            ("device page", self.b.get("/devices/" + self.dev), DASHBOARD, "no-store"),
+            ("start page", self.b.get("/"), BASE, "no-store"),
+            ("wifi page", self.b.get("/wifi"), DASHBOARD, "no-store"),
+            ("home page", self.b.get("/home"), BASE, "no-store"),
+            ("device page", self.b.get("/wifi/devices/" + self.dev), DASHBOARD, "no-store"),
             ("admin", self.ab.get("/admin"), DASHBOARD, "no-store"),
             ("admin aps", self.ab.get("/admin/aps"), DASHBOARD, "no-store"),
             ("admin incidents", self.ab.get("/admin/incidents"), DASHBOARD, "no-store"),

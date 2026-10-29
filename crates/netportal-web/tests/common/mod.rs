@@ -640,13 +640,32 @@ impl Browser<'_> {
         self
     }
 
-    /// POST /enroll: (install page, download token).
+    /// POST /wifi/enroll: (install page, download token).
     pub async fn enrol(&mut self, format: &str, name: &str) -> (Resp, Option<String>) {
         let csrf = self.csrf().await;
-        let page = self.post("/enroll", &[("csrf", &csrf), ("format", format), ("name", name)]).await;
+        let page = self.post("/wifi/enroll", &[("csrf", &csrf), ("format", format), ("name", name)]).await;
         let token = download_token(&page.text());
         (page, token)
     }
+}
+
+/// POST /home/register as this browser's person: the answer (302 to the device page with the
+/// key open), and the new device's id from its Location.
+pub async fn register_home(b: &mut Browser<'_>, name: &str, class: &str, mac: &str) -> (Resp, Option<Uuid>) {
+    let csrf = b.csrf().await;
+    let r = b.post("/home/register", &[("csrf", &csrf), ("name", name), ("class", class), ("mac", mac)]).await;
+    let id = r
+        .location()
+        .and_then(|l| l.strip_prefix("/home/devices/").map(str::to_string))
+        .and_then(|rest| rest.split('?').next().map(str::to_string))
+        .and_then(|id| Uuid::parse_str(&id).ok());
+    (r, id)
+}
+
+/// A MAC nobody else in the test database has (the registry refuses a second device with one).
+pub fn fresh_mac() -> String {
+    let b: [u8; 3] = rand::random();
+    format!("3c:22:fb:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2])
 }
 
 /// The newest device of an owner.

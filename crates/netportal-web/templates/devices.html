@@ -4,7 +4,7 @@
 {% block body_attrs %} class="wide" data-page="devices"{% endblock %}
 {# One enrolment form per format: a POST with the CSRF token, as before. #}
 {% macro enrol_button(profile, label, icon, primary=False) %}
-<form method="post" action="/enroll" class="enrol">
+<form method="post" action="/wifi/enroll" class="enrol">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="format" value="{{ profile }}">
   <button class="button{% if primary %} primary big{% endif %}"><svg class="icon" aria-hidden="true"><use href="#i-{{ icon }}"/></svg>{{ label }}</button>
@@ -32,7 +32,7 @@
   {{ dash.how_connects(d) }}
   {{ dash.findings(d, limit=2) }}
   <div class="dev-foot">
-    <a class="more" href="/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
+    <a class="more" href="/wifi/devices/{{ d.id }}">{{ dash.icon("chart") }}<span>{{ t.details_link }}</span>{{ dash.icon("next") }}</a>
     {% set expires = d.expires if d.expires is defined and d.expires else (row.expires if row else none) %}
     {% set soon = d.expires_soon if d.expires_soon is defined else (expires_soon(row.expires) if row and row.expires else False) %}
     <p class="meta">
@@ -42,14 +42,14 @@
     </p>
     <div class="actions">
       {% if soon %}
-      <form method="post" action="/devices/{{ d.id }}/renew" class="inline">
+      <form method="post" action="/wifi/devices/{{ d.id }}/renew" class="inline">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="button primary">{{ t.renew_action }}</button>
       </form>
       {% endif %}
       <details class="danger">
         <summary>{{ dash.icon("trash") }}{{ t.revoke }}</summary>
-        <form method="post" action="/devices/{{ d.id }}/revoke" class="confirm">
+        <form method="post" action="/wifi/devices/{{ d.id }}/revoke" class="confirm">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <p><strong>{{ t.revoke_title }}: {{ d.name }}</strong><br>{{ t.revoke_note }}</p>
           <button class="button danger">{{ t.revoke }}</button>

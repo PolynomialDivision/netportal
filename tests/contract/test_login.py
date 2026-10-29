@@ -184,8 +184,8 @@ class ReturnToTests(ContractCase):
         b = A.browser().logged_in(p)
         _, token = enrol(b, "apple")
         dev = str(newest_device(A, p.sub)["id"])
-        loc, final = self.after_login(p, lambda b: b.get("/devices/" + dev))
-        self.assertPathQuery(loc, "/devices/" + dev)
+        loc, final = self.after_login(p, lambda b: b.get("/wifi/devices/" + dev))
+        self.assertPathQuery(loc, "/wifi/devices/" + dev)
         self.assertEqual(final.status_code, 200)
         loc, final = self.after_login(p, lambda b: b.get("/download/" + token))
         self.assertPathQuery(loc, "/download/" + token)
@@ -206,7 +206,7 @@ class ReturnToTests(ContractCase):
 
     def test_post_with_back_admin_returns_to_admin(self):
         def first(b):
-            return b.post("/devices/00000000-0000-4000-8000-000000000000/revoke", data={"csrf": b.csrf(), "back": "/admin"})
+            return b.post("/wifi/devices/00000000-0000-4000-8000-000000000000/revoke", data={"csrf": b.csrf(), "back": "/admin"})
         loc, _ = self.after_login(admin_person("rtb"), first)
         self.assertPathQuery(loc, "/admin")
 
@@ -214,7 +214,7 @@ class ReturnToTests(ContractCase):
         for back in ["", "/elsewhere", "//evil.example/"]:
             with self.subTest(back=back):
                 def first(b):
-                    return b.post("/enroll", data={"csrf": b.csrf(), "format": "apple", "back": back})
+                    return b.post("/wifi/enroll", data={"csrf": b.csrf(), "format": "apple", "back": back})
                 loc, _ = self.after_login(resident("rto"), first)
                 self.assertPathQuery(loc, "/")
 
@@ -357,7 +357,7 @@ class RegistryRightsTests(ContractCase):
         self.assertToLogin(b.get("/"))
         self.assertJsonError(b.get("/api/devices"), 401, "login_required")
         self.assertEqual(b.csrf(), token)
-        r = b.post("/enroll", data={"csrf": token, "format": "apple"})
+        r = b.post("/wifi/enroll", data={"csrf": token, "format": "apple"})
         self.assertToLogin(r)
 
     def test_deleted_person_loses_the_session(self):
@@ -374,16 +374,16 @@ class RegistryRightsTests(ContractCase):
         dev = str(newest_device(A, owner.sub)["id"])
         adm = admin_person("pow")
         ab = A.browser().logged_in(adm)
-        self.assertPage(ab.get("/devices/" + dev), 200)
+        self.assertPage(ab.get("/wifi/devices/" + dev), 200)
         self.assertEqual(ab.get("/api/devices/" + dev).json()["device"]["id"], dev)
         self.assertNotIn(dev, [d["id"] for d in ab.get("/api/devices").json()["devices"]])   # own list: own only
         self.assertIn(dev, [d["id"] for d in ab.get("/api/admin/devices").json()["devices"]])
         csrf = ab.csrf()
-        self.assertPage(ab.post("/devices/%s/renew" % dev, data={"csrf": csrf}), 404)
-        r = ab.post("/devices/%s/rename" % dev, data={"csrf": csrf, "name": "renamed by admin"},
+        self.assertPage(ab.post("/wifi/devices/%s/renew" % dev, data={"csrf": csrf}), 404)
+        r = ab.post("/wifi/devices/%s/rename" % dev, data={"csrf": csrf, "name": "renamed by admin"},
                     headers={"Accept": "application/json"})
         self.assertEqual((r.status_code, r.json()), (200, {"ok": True, "name": "renamed by admin"}))
-        r = ab.post("/devices/%s/revoke" % dev, data={"csrf": csrf, "back": "/admin"})
+        r = ab.post("/wifi/devices/%s/revoke" % dev, data={"csrf": csrf, "back": "/admin"})
         self.assertRedirect(r, "/admin")
         self.assertTrue(A.reg.device(dev)["revoked"])
         self.assertIn((adm.sub, "revoke"), A.reg.audit(dev))

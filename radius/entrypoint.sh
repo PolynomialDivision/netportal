@@ -12,6 +12,12 @@ if [ "${#NETPORTAL_ACCT_INTERIM_S}" -gt 5 ] || [ "$NETPORTAL_ACCT_INTERIM_S" -lt
   NETPORTAL_ACCT_INTERIM_S=300
 fi
 export NETPORTAL_ACCT_INTERIM_S
+# The IoT SSID whose MAC logins the registry decides (sites/default: Called-Station-Id ends in
+# ":<SSID>"); the stack sets it from unifi.yml, else the house's name.
+if [ -z "${RADIUS_IOT_SSID:-}" ]; then
+  RADIUS_IOT_SSID="Scharni-IoT"
+fi
+export RADIUS_IOT_SSID
 install -d -o freerad -g freerad -m 0700 /run/netportal
 install -o freerad -g freerad -m 0400 /etc/netportal-secrets/radius-server.key /run/netportal/radius-server.key
 exec freeradius "$@"

@@ -7,6 +7,7 @@ pub mod config;
 pub mod conventions;
 pub mod db;
 pub mod i18n;
+pub mod iot;
 pub mod logging;
 pub mod registry;
 

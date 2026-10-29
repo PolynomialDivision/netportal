@@ -56,7 +56,7 @@ class FileSecretTests(ContractCase):
         b = B.browser().logged_in(p)
         _, cert, dev = download(b, "apple")
         B.reg.radius_session(dev, cert, user_name="anonymous@" + B.realm)
-        b.post("/devices/%s/revoke" % dev, data={"csrf": b.csrf()})
+        b.post("/wifi/devices/%s/revoke" % dev, data={"csrf": b.csrf()})
         packets = B.nas.wait(1)
         self.assertEqual(len(packets), 1)
         self.assertTrue(packets[0]["valid"], packets[0])

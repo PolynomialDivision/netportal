@@ -290,8 +290,9 @@ impl Ctx {
 
     /// Where the login goes back to (Python `return_to`): the page itself for a GET; a consent
     /// sent after the session ended goes back to the consent page (the authorize URL from its
-    /// non-empty fields); a form from the admin page back there; any other form to the start page
-    /// (its POST URL would answer 405, and the form is not sent again).
+    /// non-empty fields); a form from one of the list pages (`back`, one of [`BACK_PAGES`]) back
+    /// there; any other form to the start page (its POST URL would answer 405, and the form is
+    /// not sent again).
     pub fn return_to(&self) -> String {
         if self.method == Method::GET || self.method == Method::HEAD {
             return match &self.query {
@@ -306,11 +307,17 @@ impl Ctx {
                 .collect();
             return with_query("/oauth/authorize", &fields);
         }
-        if self.field("back") == "/admin" {
-            return "/admin".into();
-        }
-        "/".into()
+        back_page(self.field("back")).unwrap_or("/").into()
     }
+}
+
+/// The pages a form may name in its `back` field to be sent back to afterwards (and after a
+/// login that interrupted it): the lists the forms sit on. Anything else is the start page.
+pub const BACK_PAGES: [&str; 4] = ["/admin", "/admin/home", "/wifi", "/home"];
+
+/// `back` as a page of [`BACK_PAGES`], else `None`.
+pub fn back_page(back: &str) -> Option<&'static str> {
+    BACK_PAGES.iter().copied().find(|p| *p == back)
 }
 
 /// [`Ctx::wants_json`] from the request line and `Accept`.
@@ -359,18 +366,24 @@ mod tests {
             ],
         );
         assert_eq!(consent.return_to(), "/oauth/authorize?client_id=app.geteduroam.win&scope=eap-metadata");
-        assert_eq!(ctx(Method::POST, "/devices/x/revoke", None, &[("back", "/admin")]).return_to(), "/admin");
-        for back in ["", "/elsewhere", "//evil.example/", "https://evil.example/"] {
-            assert_eq!(ctx(Method::POST, "/enroll", None, &[("back", back)]).return_to(), "/");
+        assert_eq!(ctx(Method::POST, "/wifi/devices/x/revoke", None, &[("back", "/admin")]).return_to(), "/admin");
+        assert_eq!(ctx(Method::POST, "/home/devices/x/remove", None, &[("back", "/home")]).return_to(), "/home");
+        assert_eq!(
+            ctx(Method::POST, "/home/devices/x/claim", None, &[("back", "/admin/home")]).return_to(),
+            "/admin/home"
+        );
+        for back in ["", "/elsewhere", "//evil.example/", "https://evil.example/", "/admin/", "/home?x=1"] {
+            assert_eq!(ctx(Method::POST, "/wifi/enroll", None, &[("back", back)]).return_to(), "/");
         }
     }
 
     #[test]
     fn test_wants_json() {
         assert!(wants_json(&Method::GET, "/api/devices", ""));
-        assert!(wants_json(&Method::POST, "/devices/x/rename", "application/json"));
-        assert!(!wants_json(&Method::POST, "/devices/x/rename", "text/html, application/json;q=0.5"));
-        assert!(!wants_json(&Method::GET, "/devices/x", "application/json"));
-        assert!(!wants_json(&Method::POST, "/enroll", ""));
+        assert!(wants_json(&Method::GET, "/api/home/devices", ""));
+        assert!(wants_json(&Method::POST, "/wifi/devices/x/rename", "application/json"));
+        assert!(!wants_json(&Method::POST, "/wifi/devices/x/rename", "text/html, application/json;q=0.5"));
+        assert!(!wants_json(&Method::GET, "/wifi/devices/x", "application/json"));
+        assert!(!wants_json(&Method::POST, "/wifi/enroll", ""));
     }
 }

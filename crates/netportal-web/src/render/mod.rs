@@ -24,6 +24,10 @@
 //! | `admin.html` | `devices` (every active registry row), `people` (`{sub: {username, display}}`), `dashboard` (admin DASHBOARD, devices with `owner {username, display}`), `overview` (OVERVIEW) |
 //! | `admin_aps.html` | `aps` (APS payload, or a list of APs) |
 //! | `admin_incidents.html` | `incidents` (INCIDENTS payload), `span` (`{from, to, kind}`; Python's `range`, renamed: it shadowed `range()`; unused by the template), `incident_kinds` |
+//! | `overview.html` | `wifi` (`{count, expiring: [names]}`), `home` (`{own, shared}`) |
+//! | `home.html` | `own`, `shared` (home device JSON, `home::device_json`), `attempts` (join attempts), `unclaimed` (own devices without a MAC), `classes`, `dashboard` (the devices' DASHBOARD, or none) |
+//! | `home_device.html` | `device` (home device JSON; `psk` and `qr` for the owner or an admin), `role` (`owner`, `admin`, `shared`), `shares`, `people` (share candidates), `sync` (`{status, detail}`), `show_key`, `dashboard`, `attempts` |
+//! | `admin_home.html` | `devices` (every home device with `shares`, `sync`), `attempts`, `unclaimed`, `dashboard` |
 //!
 //! The render module provides the rest itself: `t` (the texts of `base.lang`), the JSON of the
 //! texts for `np-texts`, `fmt` (the Format port, [`format`](mod@format) and [`views`]), `platform_label`,
@@ -74,19 +78,24 @@ use netportal_core::i18n::{self, Text};
 use serde::Serialize;
 
 /// The embedded templates, by the names handlers render.
-const TEMPLATES: [(&str, &str); 12] = [
+const TEMPLATES: [(&str, &str); 17] = [
     ("base.html", include_str!("../../templates/base.html")),
     ("message.html", include_str!("../../templates/message.html")),
     ("landing.html", include_str!("../../templates/landing.html")),
+    ("overview.html", include_str!("../../templates/overview.html")),
     ("install.html", include_str!("../../templates/install.html")),
     ("consent.html", include_str!("../../templates/consent.html")),
     ("devices.html", include_str!("../../templates/devices.html")),
     ("device.html", include_str!("../../templates/device.html")),
+    ("home.html", include_str!("../../templates/home.html")),
+    ("home_device.html", include_str!("../../templates/home_device.html")),
     ("admin.html", include_str!("../../templates/admin.html")),
     ("admin_aps.html", include_str!("../../templates/admin_aps.html")),
     ("admin_incidents.html", include_str!("../../templates/admin_incidents.html")),
+    ("admin_home.html", include_str!("../../templates/admin_home.html")),
     ("_dash.html", include_str!("../../templates/_dash.html")),
     ("_admin.html", include_str!("../../templates/_admin.html")),
+    ("_home.html", include_str!("../../templates/_home.html")),
 ];
 
 /// The templates with everything they need, built once at start.
@@ -130,6 +139,8 @@ pub struct SettingsView {
     /// The house's start page (the house bar's link).
     pub home: String,
     pub ssid: String,
+    /// The home devices' network (the keys' QR codes).
+    pub iot_ssid: String,
     pub passpoint: bool,
 }
 

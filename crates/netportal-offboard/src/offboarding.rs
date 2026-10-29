@@ -202,8 +202,15 @@ pub async fn reconcile<D: Disconnector>(
             continue;
         }
         registry::offboard_person(db, sub).await?;
+        // the IoT part (house-infra docs/IOT-ACCESS.md 6.4): every share the person holds or
+        // gave ends with them; their own home devices are revoked with the rest below (no
+        // Disconnect-Request: the IoT controller kicks them and removes their keys)
+        let shares = netportal_core::iot::drop_shares_of(db, sub).await?;
         db.commit().await?;
         report.offboarded += 1;
+        if shares > 0 {
+            tracing::info!(target: LOG, "{sub} is offboarded: {shares} home device share(s) dropped");
+        }
         let devices = registry::devices(db, Some(sub), false).await?;
         db.commit().await?;
         for device in devices {

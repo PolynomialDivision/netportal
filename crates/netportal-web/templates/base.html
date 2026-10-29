@@ -59,13 +59,19 @@
   <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8V6M5 12c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 10.5L12 4l8 6.5V20h-5v-6H9v6H4z"/></symbol>
   <symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M6.5 6.5a8 8 0 0 1 13 6.5c0 2-.3 3.8-.9 5.5M4.3 10.5A8 8 0 0 0 4 13c0 1.7.3 3.2.9 4.6M8 13a4 4 0 0 1 8 0c0 2.6-.6 5-1.7 7M12 13c0 2.8-.8 5.4-2.3 7.5"/></symbol>
+  {# the home devices (IOT-ACCESS 6.6): the classes, sharing, the key's QR code #}
+  <symbol id="i-cast" viewBox="0 0 24 24"><path d="M3 17.5v3M3 13.5a7 7 0 0 1 7 7M3 9.5a11 11 0 0 1 11 11M9 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-1.5"/></symbol>
+  <symbol id="i-printer" viewBox="0 0 24 24"><path d="M7 8.5V4h10v4.5M7 16.5H4.5a1.5 1.5 0 0 1-1.5-1.5v-5a1.5 1.5 0 0 1 1.5-1.5h15A1.5 1.5 0 0 1 21 10v5a1.5 1.5 0 0 1-1.5 1.5H17"/><rect x="7" y="13.5" width="10" height="6.5" rx="1"/><path d="M17.5 11.5h.01"/></symbol>
+  <symbol id="i-tv" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 20.5h8M12 17v3.5"/></symbol>
+  <symbol id="i-speaker" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18" rx="2"/><circle cx="12" cy="14.5" r="3.2"/><path d="M12 7.5h.01"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5.5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="18.5" r="2.5"/><path d="M8.2 10.8l7.6-4.1M8.2 13.2l7.6 4.1"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><path d="M6.5 6.5h1M16.5 6.5h1M6.5 16.5h1M13.5 13.5h3v3M20.5 13.5v3h-3M13.5 20.5h3M20.5 20.5h.01"/></symbol>
 </svg>
 <nav class="h-bar" aria-label="{{ t.house_nav }}"><a href="{{ settings.home }}">⌂ {{ settings.display_name }}</a><span>{{ t.title }}</span></nav>
 {% if user %}
 <header class="top">
   <nav class="session" aria-label="Account">
     <span class="who">{{ user.name }}</span>
-    {% if user.admin %}<a class="pill" href="/admin"><svg class="icon" aria-hidden="true"><use href="#i-people"/></svg>{{ t.admin }}</a>{% endif %}
     <form method="post" action="/logout" class="inline">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="pill">{{ t.logout }}</button>
@@ -77,6 +83,17 @@
     </form>
   </nav>
 </header>
+{# the portal's areas (IOT-ACCESS 6.1): the overview, the Wi-Fi devices, the home devices, and
+   the admin pages for admins; the current one is marked from the request's path #}
+<nav class="main-nav" aria-label="{{ t.nav_label }}">
+  {%- set here = request.path %}
+  {%- for key, href, ic in (("overview", "/", "home"), ("wifi", "/wifi", "wifi"), ("home", "/home", "cast")) %}
+  <a href="{{ href }}"{% if here == href or (href != "/" and here is startingwith(href ~ "/")) %} aria-current="page"{% endif %}><svg class="icon" aria-hidden="true"><use href="#i-{{ ic }}"/></svg><span>{{ t["nav_" ~ key] }}</span></a>
+  {%- endfor %}
+  {%- if user.admin %}
+  <a href="/admin"{% if here == "/admin" or here is startingwith("/admin/") %} aria-current="page"{% endif %}><svg class="icon" aria-hidden="true"><use href="#i-people"/></svg><span>{{ t.nav_admin }}</span></a>
+  {%- endif %}
+</nav>
 {% endif %}
 <main>
   {% block body %}{% endblock %}

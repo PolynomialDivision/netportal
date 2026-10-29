@@ -749,3 +749,80 @@ tr.job-error td { color: var(--danger); font-size: .78rem; padding-top: 0; }
 @media (prefers-reduced-motion: reduce) {
   .button, .pill { transition: none; }
 }
+
+/* --- the portal's areas (IOT-ACCESS 6.1): the overview, the Wi-Fi devices, the home devices ----
+   The nav under the header, the overview's two cards, the home device cards, the key with its
+   QR code (black on white whatever the scheme: a camera needs the contrast), the sharing list. */
+.main-nav { max-width: 38rem; margin: 0 auto; padding: 0 1rem; display: flex; gap: .25rem; border-bottom: 1px solid var(--line);
+            overflow-x: auto; scrollbar-width: none; }
+.wide .main-nav { max-width: 72rem; width: 100%; }
+.main-nav::-webkit-scrollbar { display: none; }
+.main-nav a { display: inline-flex; align-items: center; gap: .4rem; min-height: 44px; padding: 0 .8rem; color: var(--muted);
+              font-weight: 600; font-size: .95rem; text-decoration: none; white-space: nowrap; border-bottom: 3px solid transparent;
+              margin-bottom: -1px; }
+.main-nav a:hover { color: var(--accent); }
+.main-nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+.main-nav .icon { width: 1.1rem; height: 1.1rem; }
+@media (max-width: 30rem) { .main-nav a { padding: 0 .55rem; gap: .3rem; font-size: .88rem; } }
+main > .overview { margin-top: .5rem; }
+.ov-cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.ov-card { margin: 0; display: flex; flex-direction: column; }
+.ov-card-head { display: flex; align-items: center; gap: .75rem; margin-bottom: .5rem; }
+.ov-card-head .hero-mark { margin: 0; }
+.ov-card-head h2 { margin: 0; font-size: 1.25rem; }
+.ov-number { display: flex; align-items: baseline; gap: .5rem; margin: .25rem 0; }
+.ov-number strong { font-size: 2.4rem; line-height: 1; font-weight: 700; letter-spacing: -.02em; }
+.ov-sub-number { display: flex; align-items: baseline; gap: .5rem; margin: 0 0 .5rem; color: var(--muted); }
+.ov-sub-number strong { font-size: 1.4rem; line-height: 1; }
+.ov-card .cta { margin-top: auto; }
+.ov-card .warn { display: flex; gap: .4rem; align-items: flex-start; }
+.ov-card .warn .icon { margin-top: .2em; }
+@media (min-width: 40rem) { .ov-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* home device cards and the device page */
+.home-kind { margin: 0 0 .15rem; font-size: .9rem; color: var(--muted); }
+.home-dev .meta span { display: inline-flex; align-items: center; gap: .3rem; }
+.home-dev .meta .icon { width: 1rem; height: 1rem; }
+.sync-line { display: flex; align-items: flex-start; gap: .4rem; margin: .25rem 0 .5rem; font-size: .9rem; }
+.sync-line .icon { margin-top: .2em; }
+.sync-targets { list-style: none; margin: 0; padding: 0; display: grid; gap: .2rem; }
+.sync-targets li { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.key-card .key-box > summary { list-style: none; display: inline-flex; }
+.key-card .key-box > summary::-webkit-details-marker { display: none; }
+.key-reveal { margin-top: 1rem; display: grid; gap: 1rem; align-items: start; }
+.key-values { margin: 0; }
+.psk { display: inline-block; font-family: var(--mono); font-size: 1.35rem; letter-spacing: .08em; font-weight: 600;
+       padding: .35rem .6rem; border-radius: 10px; background: var(--bg-2); color: var(--text); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+.qr-figure { margin: 0; }
+.qr-host { display: inline-block; padding: .5rem; background: #fff; border-radius: 12px; border: 1px solid var(--line); line-height: 0; }
+.qr { width: 11rem; max-width: 100%; height: auto; display: block; }
+.share-list { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: .35rem; }
+.share-list li { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .35rem 0; border-bottom: 1px solid var(--line); }
+.share-list li > span { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600; }
+.share-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .75rem; margin-bottom: 1rem; }
+.share-form .field { flex: 1 1 14rem; margin: 0; }
+.field select { display: block; width: 100%; min-height: 44px; margin: .35rem 0; padding: .5rem .75rem; font: inherit;
+                border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); }
+.field select:focus { border-color: var(--accent); outline: none; }
+fieldset.field { border: 0; padding: 0; min-width: 0; }
+fieldset.field legend { padding: 0; font-weight: 600; }
+.classes { display: grid; gap: .35rem; }
+.choice { display: flex; align-items: flex-start; gap: .6rem; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 12px; font-weight: 400; cursor: pointer; }
+.choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.choice input { margin: .35rem 0 0; width: 1.1rem; height: 1.1rem; flex: none; accent-color: var(--accent); }
+.choice-text { display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .4rem; }
+.choice-text .icon { color: var(--muted); }
+.choice-text .small { flex-basis: 100%; }
+.mac-hints { margin: .5rem 0 1rem; font-size: .92rem; }
+.mac-hints > summary { cursor: pointer; display: inline-flex; align-items: center; gap: .35rem; min-height: 44px; color: var(--muted); }
+.attempts { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.attempt { padding: .6rem .75rem; border-radius: 12px; background: var(--bg-2); }
+.attempt p { margin: 0 0 .35rem; display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; }
+.attempt .actions { gap: .4rem; }
+.home-claim-none { display: flex; gap: .4rem; align-items: flex-start; margin: 0 0 1rem; }
+.card.notes p:last-child { margin-bottom: 0; }
+.claim .field { margin-bottom: .5rem; }
+@media (min-width: 40rem) {
+  .key-reveal { grid-template-columns: minmax(0, 1fr) auto; }
+  .classes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

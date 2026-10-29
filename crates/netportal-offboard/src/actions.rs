@@ -49,15 +49,23 @@ fn labels(results: &[DisconnectResult]) -> String {
 /// Revoke the device (effective for every new authentication: committed first), then cut its
 /// running sessions with Disconnect-Requests (effective now) and audit `disconnect:<result>` for
 /// each. Audits `revoke` by `actor` (a sub, `offboarding`, `letswifi`). Returns the results (at
-/// least one).
+/// least one), except for a home device (platform `iot`, house-infra docs/IOT-ACCESS.md): it
+/// has no RADIUS session a Disconnect-Request could end (PPSK, MAC authentication), the IoT
+/// controller kicks and blocks it through UniFi on its next round, so none is sent and the
+/// results are empty.
 pub async fn revoke_now<D: Disconnector>(
     db: &mut Db,
     device_id: Uuid,
     actor: &str,
     disconnector: &D,
 ) -> Result<Vec<DisconnectResult>, RegistryError> {
+    let home_device = registry::device(db, device_id, None).await?.is_some_and(|d| d.platform == "iot");
     let sessions = registry::revoke(db, device_id, actor, "revoke").await?;
     db.commit().await?;
+    if home_device {
+        tracing::info!(target: LOG, "revoked home device {device_id} by {actor}; the IoT controller cuts it");
+        return Ok(Vec::new());
+    }
     let results = disconnect_all(&sessions, disconnector).await;
     audit_results(db, actor, device_id, &results).await?;
     tracing::info!(target: LOG, "revoked device {device_id} by {actor}; disconnect: {}", labels(&results));

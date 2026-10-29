@@ -116,6 +116,8 @@ docker build -q -t netportal-it-client "$root/tests/integration/client" >/dev/nu
 # see the checks catch it; tests/README.md)
 radius_image=${RT_RADIUS_IMAGE:-netportal-radius:rust-rt}
 [ -n "${RT_RADIUS_IMAGE:-}" ] || docker build -q -t "$radius_image" -f "$root/radius/Dockerfile" "$root" >/dev/null
+# RADIUS_IOT_SSID is left unset on purpose: the IoT checks (radius_test.py iot_checks) use the
+# entrypoint's default, Scharni-IoT.
 docker run -d --name "$RADIUS" --network "$NET" --ip 10.198.0.10 \
   -e RADIUS_DB_HOST=10.198.0.5 -e RADIUS_DB_NAME=netportal -e RADIUS_DB_PASSWORD="$RADIUS_DB_PASS" \
   -e RADIUS_STATUS_SECRET="$STATUS_SECRET" -e DEVICE_CA_DN="/CN=Test Device CA" -e RADIUS_SESSION_TIMEOUT=43200 \

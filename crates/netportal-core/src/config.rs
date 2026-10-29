@@ -345,6 +345,9 @@ pub struct PortalSettings {
     pub radius_server_name: String,
     /// `NETPORTAL_DISPLAY_NAME` (`Wi-Fi`): what residents see
     pub display_name: String,
+    /// `NETPORTAL_IOT_SSID` (`<NETPORTAL_SSID>-IoT`): the home devices' PPSK network, as the key
+    /// pages and the QR codes name it (the controller keys it: `NETPORTAL_UNIFI_IOT_SSID`)
+    pub iot_ssid: String,
     /// `NETPORTAL_DATABASE_URL` / `_FILE`
     pub database_url: Secret<String>,
     /// `NETPORTAL_SESSION_SECRET` / `_FILE`: the cookie key material, at least 32 bytes
@@ -426,11 +429,13 @@ impl PortalSettings {
         if session_secret.expose().len() < 32 {
             return err("NETPORTAL_SESSION_SECRET: at least 32 bytes");
         }
+        let ssid = required(env, "NETPORTAL_SSID")?;
         Ok(PortalSettings {
             base_url: required_http_url(env, "NETPORTAL_BASE_URL")?,
-            ssid: required(env, "NETPORTAL_SSID")?,
+            ssid: ssid.clone(),
             radius_server_name: required(env, "NETPORTAL_RADIUS_SERVER_NAME")?,
             display_name: or_default(env, "NETPORTAL_DISPLAY_NAME", "Wi-Fi"),
+            iot_ssid: or_default(env, "NETPORTAL_IOT_SSID", &format!("{ssid}-IoT")),
             database_url: required_secret(env, "NETPORTAL_DATABASE_URL")?,
             session_secret,
             oidc_issuer: required(env, "NETPORTAL_OIDC_ISSUER")?,
@@ -630,6 +635,186 @@ impl CollectSettings {
     }
 }
 
+// --- the IoT controller ----------------------------------------------------------------------------
+
+/// Everything `netportal iot` needs (house-infra docs/IOT-ACCESS.md): the registry (the jobs'
+/// role), UniFi's legacy API (the IoT SSID's keys, kicks and blocks, the client list) and
+/// OPNsense's API (aliases, rules, states, DHCP leases). No web, OIDC, CA or DAE secrets.
+#[derive(Debug, Clone)]
+pub struct IotSettings {
+    pub database_url: Secret<String>,
+    /// `NETPORTAL_HEARTBEAT` (`/tmp/netportal-iot.heartbeat`): touched after every round
+    pub heartbeat: PathBuf,
+    /// `NETPORTAL_UNIFI_URL` (`https://unifi.<domain>`): the controller's web UI (its legacy API)
+    pub unifi_url: Option<String>,
+    /// `NETPORTAL_UNIFI_SITE` (`default`)
+    pub unifi_site: String,
+    /// `NETPORTAL_UNIFI_USER`, `NETPORTAL_UNIFI_PASSWORD` / `_FILE`: a site admin of its own
+    pub unifi_user: Option<String>,
+    pub unifi_password: Option<Secret<String>>,
+    /// `NETPORTAL_UNIFI_VERIFY_TLS` (true)
+    pub unifi_verify_tls: bool,
+    /// `NETPORTAL_UNIFI_IOT_SSID`: the PPSK SSID whose keys the controller owns
+    pub unifi_iot_ssid: String,
+    /// `NETPORTAL_UNIFI_IOT_NETWORK`: the UniFi network (VLAN 40) every key maps to
+    pub unifi_iot_network: String,
+    /// `NETPORTAL_IOT_MAX_KEYS` (200, 1..=2000): keys the controller puts into the SSID at most
+    pub max_keys: usize,
+    /// `NETPORTAL_OPNSENSE_URL` (`https://opnsense.internal`)
+    pub opnsense_url: Option<String>,
+    /// `NETPORTAL_OPNSENSE_API_KEY`, `NETPORTAL_OPNSENSE_API_SECRET` / `_FILE`: the controller's own
+    /// API user (aliases, the filter, diagnostics)
+    pub opnsense_api_key: Option<String>,
+    pub opnsense_api_secret: Option<Secret<String>>,
+    /// `NETPORTAL_OPNSENSE_CA`: the PEM file of the API's certificate (its CA); unset: the system roots
+    pub opnsense_ca: Option<PathBuf>,
+    /// `NETPORTAL_RESIDENTS_CIDR` (`10.0.30.0/24`), `NETPORTAL_RESIDENTS_GATEWAY` (`10.0.30.1`): the
+    /// residents' VLAN (the rules' interface is found by the gateway address)
+    pub residents_cidr: String,
+    pub residents_gateway: String,
+    /// `NETPORTAL_IOT_CIDR` (`10.0.40.0/24`), `NETPORTAL_IOT_GATEWAY` (`10.0.40.1`)
+    pub iot_cidr: String,
+    pub iot_gateway: String,
+    /// `NETPORTAL_IOT_PREFIX` (`np_iot`): the aliases' and rules' name prefix
+    pub prefix: String,
+    /// `NETPORTAL_IOT_REVERSE_RULES` (false): also a rule per person from their devices back to them
+    pub reverse_rules: bool,
+    /// `NETPORTAL_IOT_READBACK_S` (900, 60..=86400): how often UniFi and OPNsense are read back whole
+    pub readback: Duration,
+    /// `NETPORTAL_IOT_API_TIMEOUT` (15 s, at most 120): per UniFi or OPNsense request
+    pub api_timeout: Duration,
+}
+
+impl IotSettings {
+    pub fn load() -> Result<Self> {
+        Self::from_env(&ProcessEnv)
+    }
+
+    pub fn from_env(env: &dyn Env) -> Result<Self> {
+        let prefix = or_default(env, "NETPORTAL_IOT_PREFIX", "np_iot");
+        if !prefix.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') || prefix.len() > 16 {
+            return err(format!("NETPORTAL_IOT_PREFIX: {prefix:?} must be [a-z0-9_], at most 16 characters"));
+        }
+        Ok(IotSettings {
+            database_url: required_secret(env, "NETPORTAL_DATABASE_URL")?,
+            heartbeat: PathBuf::from(or_default(env, "NETPORTAL_HEARTBEAT", "/tmp/netportal-iot.heartbeat")),
+            unifi_url: http_url(env, "NETPORTAL_UNIFI_URL")?,
+            unifi_site: or_default(env, "NETPORTAL_UNIFI_SITE", "default"),
+            unifi_user: value(env, "NETPORTAL_UNIFI_USER"),
+            unifi_password: secret(env, "NETPORTAL_UNIFI_PASSWORD")?,
+            unifi_verify_tls: boolean(env, "NETPORTAL_UNIFI_VERIFY_TLS", true)?,
+            unifi_iot_ssid: or_default(env, "NETPORTAL_UNIFI_IOT_SSID", "Scharni-IoT"),
+            unifi_iot_network: or_default(env, "NETPORTAL_UNIFI_IOT_NETWORK", "IoT"),
+            max_keys: integer(env, "NETPORTAL_IOT_MAX_KEYS", 200usize, 1..=2000)?,
+            opnsense_url: http_url(env, "NETPORTAL_OPNSENSE_URL")?,
+            opnsense_api_key: value(env, "NETPORTAL_OPNSENSE_API_KEY"),
+            opnsense_api_secret: secret(env, "NETPORTAL_OPNSENSE_API_SECRET")?,
+            opnsense_ca: value(env, "NETPORTAL_OPNSENSE_CA").map(PathBuf::from),
+            residents_cidr: cidr(env, "NETPORTAL_RESIDENTS_CIDR", "10.0.30.0/24")?,
+            residents_gateway: ipv4(env, "NETPORTAL_RESIDENTS_GATEWAY", "10.0.30.1")?,
+            iot_cidr: cidr(env, "NETPORTAL_IOT_CIDR", "10.0.40.0/24")?,
+            iot_gateway: ipv4(env, "NETPORTAL_IOT_GATEWAY", "10.0.40.1")?,
+            prefix,
+            reverse_rules: boolean(env, "NETPORTAL_IOT_REVERSE_RULES", false)?,
+            readback: Duration::from_secs(integer(env, "NETPORTAL_IOT_READBACK_S", 900u64, 60..=86400)?),
+            api_timeout: seconds(env, "NETPORTAL_IOT_API_TIMEOUT", 15.0, 120.0)?,
+        })
+    }
+
+    /// Whether UniFi can be driven (URL, user and password set).
+    pub fn unifi_enabled(&self) -> bool {
+        self.unifi_url.is_some() && self.unifi_user.is_some() && self.unifi_password.is_some()
+    }
+
+    /// Whether OPNsense can be driven (URL, key and secret set).
+    pub fn opnsense_enabled(&self) -> bool {
+        self.opnsense_url.is_some() && self.opnsense_api_key.is_some() && self.opnsense_api_secret.is_some()
+    }
+}
+
+fn ipv4(env: &dyn Env, name: &str, default: &str) -> Result<String> {
+    let text = or_default(env, name, default);
+    if text.parse::<std::net::Ipv4Addr>().is_err() {
+        return err(format!("{name}: {text:?} is not an IPv4 address"));
+    }
+    Ok(text)
+}
+
+fn cidr(env: &dyn Env, name: &str, default: &str) -> Result<String> {
+    let text = or_default(env, name, default);
+    let valid = text
+        .split_once('/')
+        .and_then(|(a, l)| Some((a.parse::<std::net::Ipv4Addr>().ok()?, l.parse::<u8>().ok()?)))
+        .is_some_and(|(_, l)| l <= 32);
+    if !valid {
+        return err(format!("{name}: {text:?} is not an IPv4 network (a.b.c.d/len)"));
+    }
+    Ok(text)
+}
+
+// --- the discovery proxy -------------------------------------------------------------------------
+
+/// Everything `netportal discovery` needs: the registry through the read-only role and the two
+/// network legs. No credentials of any kind.
+#[derive(Debug, Clone)]
+pub struct DiscoverySettings {
+    pub database_url: Secret<String>,
+    /// `NETPORTAL_HEARTBEAT` (`/tmp/netportal-discovery.heartbeat`)
+    pub heartbeat: PathBuf,
+    /// `NETPORTAL_DISCOVERY_RESIDENTS_IFACE` (`eth1`): the leg in the residents' VLAN (queries arrive, answers leave)
+    pub residents_iface: String,
+    /// `NETPORTAL_DISCOVERY_IOT_IFACE` (`eth2`): the leg in the IoT VLAN (the devices' records are learned)
+    pub iot_iface: String,
+    /// `NETPORTAL_DISCOVERY_REFRESH_S` (10, 2..=300): how often the registry is read again
+    pub refresh: Duration,
+    /// `NETPORTAL_DISCOVERY_STALE_S` (600, 60..=86400): without the registry this long, only house-visible devices are answered
+    pub stale_after: Duration,
+    /// `NETPORTAL_DISCOVERY_TTL` (120, 10..=4500): the records' TTL in the answers
+    pub ttl: u32,
+    /// `NETPORTAL_DISCOVERY_SERVICES`: extra service types to browse (comma-separated, `_x._tcp`)
+    pub extra_services: Vec<String>,
+}
+
+impl DiscoverySettings {
+    pub fn load() -> Result<Self> {
+        Self::from_env(&ProcessEnv)
+    }
+
+    pub fn from_env(env: &dyn Env) -> Result<Self> {
+        let iface = |name: &str, default: &str| -> Result<String> {
+            let text = or_default(env, name, default);
+            let ok = !text.is_empty()
+                && text.len() <= 15
+                && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+            if !ok {
+                return err(format!("{name}: {text:?} is not an interface name"));
+            }
+            Ok(text)
+        };
+        let extra_services: Vec<String> = or_default(env, "NETPORTAL_DISCOVERY_SERVICES", "")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        for s in &extra_services {
+            if !(s.starts_with('_') && (s.ends_with("._tcp") || s.ends_with("._udp"))) {
+                return err(format!("NETPORTAL_DISCOVERY_SERVICES: {s:?} is not a service type (_name._tcp)"));
+            }
+        }
+        Ok(DiscoverySettings {
+            database_url: required_secret(env, "NETPORTAL_DATABASE_URL")?,
+            heartbeat: PathBuf::from(or_default(env, "NETPORTAL_HEARTBEAT", "/tmp/netportal-discovery.heartbeat")),
+            residents_iface: iface("NETPORTAL_DISCOVERY_RESIDENTS_IFACE", "eth1")?,
+            iot_iface: iface("NETPORTAL_DISCOVERY_IOT_IFACE", "eth2")?,
+            refresh: Duration::from_secs(integer(env, "NETPORTAL_DISCOVERY_REFRESH_S", 10u64, 2..=300)?),
+            stale_after: Duration::from_secs(integer(env, "NETPORTAL_DISCOVERY_STALE_S", 600u64, 60..=86400)?),
+            ttl: integer(env, "NETPORTAL_DISCOVERY_TTL", 120u32, 10..=4500)?,
+            extra_services,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +875,7 @@ mod tests {
         assert_eq!(s.base_url, "https://wifi.example.org");
         assert!(s.is_https());
         assert_eq!(s.display_name, "Wi-Fi");
+        assert_eq!(s.iot_ssid, "Example-IoT");
         assert_eq!(s.home_url, "https://example.org/");
         assert_eq!(s.cert_days, 365);
         assert_eq!(s.renew_overlap_days, 2);
@@ -1070,5 +1256,58 @@ mod tests {
         let mut e = env.clone();
         e.remove("NETPORTAL_SSID");
         assert_eq!(CollectSettings::from_env(&e).err().map(|e| e.0), Some("missing setting NETPORTAL_SSID".into()));
+    }
+
+    #[test]
+    fn test_iot_settings() {
+        let env: HashMap<String, String> = [("NETPORTAL_DATABASE_URL", "postgresql://u:p@db/netportal")]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let s = IotSettings::from_env(&env).unwrap();
+        assert!(!s.unifi_enabled() && !s.opnsense_enabled());
+        assert_eq!(
+            (s.prefix.as_str(), s.residents_cidr.as_str(), s.iot_gateway.as_str()),
+            ("np_iot", "10.0.30.0/24", "10.0.40.1")
+        );
+        let mut e = env.clone();
+        e.insert("NETPORTAL_IOT_CIDR".into(), "10.0.40.0".into());
+        assert!(IotSettings::from_env(&e).unwrap_err().0.starts_with("NETPORTAL_IOT_CIDR"));
+        let mut e = env.clone();
+        e.insert("NETPORTAL_IOT_PREFIX".into(), "Np-Iot".into());
+        assert!(IotSettings::from_env(&e).unwrap_err().0.starts_with("NETPORTAL_IOT_PREFIX"));
+        let mut e = env.clone();
+        for (k, v) in [
+            ("NETPORTAL_UNIFI_URL", "https://unifi.example"),
+            ("NETPORTAL_UNIFI_USER", "netportal-iot"),
+            ("NETPORTAL_UNIFI_PASSWORD", "x"),
+            ("NETPORTAL_OPNSENSE_URL", "https://opnsense.internal"),
+            ("NETPORTAL_OPNSENSE_API_KEY", "k"),
+            ("NETPORTAL_OPNSENSE_API_SECRET", "s"),
+        ] {
+            e.insert(k.into(), v.into());
+        }
+        let s = IotSettings::from_env(&e).unwrap();
+        assert!(s.unifi_enabled() && s.opnsense_enabled());
+    }
+
+    #[test]
+    fn test_discovery_settings() {
+        let env: HashMap<String, String> = [
+            ("NETPORTAL_DATABASE_URL", "postgresql://u:p@db/netportal"),
+            ("NETPORTAL_DISCOVERY_SERVICES", "_sonos._tcp, _hap._tcp"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        let s = DiscoverySettings::from_env(&env).unwrap();
+        assert_eq!((s.residents_iface.as_str(), s.iot_iface.as_str(), s.ttl), ("eth1", "eth2", 120));
+        assert_eq!(s.extra_services, vec!["_sonos._tcp", "_hap._tcp"]);
+        let mut e = env.clone();
+        e.insert("NETPORTAL_DISCOVERY_SERVICES".into(), "sonos".into());
+        assert!(DiscoverySettings::from_env(&e).unwrap_err().0.starts_with("NETPORTAL_DISCOVERY_SERVICES"));
+        let mut e = env.clone();
+        e.insert("NETPORTAL_DISCOVERY_IOT_IFACE".into(), "eth 2".into());
+        assert!(DiscoverySettings::from_env(&e).is_err());
     }
 }

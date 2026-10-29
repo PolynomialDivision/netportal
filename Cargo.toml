@@ -7,6 +7,8 @@ members = [
     "crates/netportal-collect",
     "crates/netportal-offboard",
     "crates/netportal-web",
+    "crates/netportal-iot",
+    "crates/netportal-discovery",
     "crates/netportal",
 ]
 
@@ -26,6 +28,8 @@ netportal-telemetry = { path = "crates/netportal-telemetry" }
 netportal-collect = { path = "crates/netportal-collect" }
 netportal-offboard = { path = "crates/netportal-offboard" }
 netportal-web = { path = "crates/netportal-web" }
+netportal-iot = { path = "crates/netportal-iot" }
+netportal-discovery = { path = "crates/netportal-discovery" }
 
 # HTTP server
 axum = { version = "0.8", features = ["macros"] }
@@ -57,8 +61,18 @@ openssl = "0.10"
 plist = "1"
 quick-xml = "0.42"
 
+# the home devices' Wi-Fi keys as QR codes (inline SVG; no image features)
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
 # HTTP client (Authentik, Prometheus, Loki)
 reqwest = { version = "0.13", features = ["json", "query", "form"] }
+
+# the discovery proxy: mDNS/DNS-SD on the wire (parsing and serialising only, no resolver), raw
+# sockets (AF_PACKET with a BPF filter, SO_BINDTODEVICE, multicast by interface index) and the
+# kernel constants the filter is built from
+hickory-proto = { version = "0.26", default-features = false, features = ["std", "mdns"] }
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
 
 # metrics
 prometheus-client = "0.25"

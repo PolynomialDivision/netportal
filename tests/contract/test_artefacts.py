@@ -220,7 +220,7 @@ class AppleTests(ContractCase):
         b, body, _, device_id = Downloads.get(A, "apple")
         first = mobileconfig(body)["PayloadIdentifier"]
         self.assertIn(device_id, first)
-        r = b.post("/devices/%s/renew" % device_id, data={"csrf": b.csrf()})
+        r = b.post("/wifi/devices/%s/renew" % device_id, data={"csrf": b.csrf()})
         token = re.search(r'href="/download/([^"]+)"', r.text).group(1)
         again = mobileconfig(b.get("/download/" + token).content)
         self.assertEqual(again["PayloadIdentifier"], first)
@@ -289,7 +289,7 @@ class PasspointTests(ContractCase):
     def test_renewal_keeps_the_fqdn(self):
         """Android replaces a Passpoint profile with the same HomeSP FQDN; a renewal keeps it."""
         b, _, _, device_id = Downloads.get(A, "android")
-        r = b.post("/devices/%s/renew" % device_id, data={"csrf": b.csrf()})
+        r = b.post("/wifi/devices/%s/renew" % device_id, data={"csrf": b.csrf()})
         token = re.search(r'href="/download/([^"]+)"', r.text).group(1)
         body = b.get("/download/" + token).content
         self.assertIn(b"<Value>%s</Value>" % A.realm.encode(),

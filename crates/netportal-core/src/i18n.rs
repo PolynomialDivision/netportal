@@ -225,7 +225,7 @@ mod tests {
     fn test_every_language_has_every_text() {
         assert_eq!(languages(), ["en", "de", "uk"]);
         let en = texts("en");
-        assert_eq!(en.len(), 769);
+        assert_eq!(en.len(), 869);
         for lang in languages() {
             let other = texts(lang);
             let mut a: Vec<_> = en.keys().collect();

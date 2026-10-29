@@ -72,7 +72,7 @@ use crate::oidc::Oidc;
 use crate::render::{self, Base, RequestView, SettingsView, Templates};
 use crate::rights::AdminCheck;
 use crate::session::{CookieConfig, cookie_key};
-use crate::{dashboard, devices, letswifi, login, ops, pipeline, server, static_files};
+use crate::{dashboard, devices, home, letswifi, login, ops, pipeline, server, static_files};
 
 const LOG: &str = "netportal.web";
 /// Request bodies (forms) larger than this are refused (413).
@@ -121,6 +121,8 @@ pub struct AppInner {
     pub zone: jiff::tz::TimeZone,
     /// the netloc of `NETPORTAL_BASE_URL` (install steps, the app's server name)
     pub host: String,
+    /// the home devices' SSID (`NETPORTAL_IOT_SSID`; the PPSK network the controller keys)
+    pub iot_ssid: String,
     /// the registry pool (one per process)
     pub pool: Pool,
     /// the requests handled now ([`pipeline::shed`])
@@ -206,6 +208,7 @@ impl App {
         )
         .map_err(|e| anyhow::anyhow!("NETPORTAL_DATABASE_URL: {}", crate::errors::db_kind(&e)))?;
         let requests = Arc::new(tokio::sync::Semaphore::new(settings.max_requests));
+        let iot_ssid = settings.iot_ssid.clone();
         Ok(App(Arc::new(AppInner {
             settings,
             cookies,
@@ -219,6 +222,7 @@ impl App {
             clock,
             zone,
             host,
+            iot_ssid,
             pool,
             requests,
             health: tokio::sync::Mutex::new(None),
@@ -298,6 +302,7 @@ impl App {
             display_name: self.settings.display_name.clone(),
             home: self.settings.home_url.clone(),
             ssid: self.settings.ssid.clone(),
+            iot_ssid: self.iot_ssid.clone(),
             passpoint: self.settings.passpoint,
         }
     }
@@ -390,7 +395,8 @@ pub enum Gate {
     AdminWidens,
 }
 
-/// The routes (INVENTORY 3.2) with their gates and handlers.
+/// The routes (INVENTORY 3.2; the Wi-Fi area under `/wifi` and the home devices under `/home`
+/// since house-infra docs/IOT-ACCESS.md 6.1) with their gates and handlers.
 fn table() -> Vec<(&'static str, Gate, MethodRouter<App>)> {
     use Gate::{Admin, AdminWidens, Anyone, Login, Machine};
     vec![
@@ -399,31 +405,50 @@ fn table() -> Vec<(&'static str, Gate, MethodRouter<App>)> {
         ("/auth/callback", Anyone, get(login::callback)),
         ("/logout", Anyone, post(login::logout)),
         ("/logout/all", Anyone, post(login::logout_all)),
-        // the resident's pages and actions (rows 4-11)
+        // the landing page and the overview (rows 4, 5)
         ("/welcome", Anyone, get(dashboard::welcome)),
         ("/", Anyone, get(dashboard::index)),
-        ("/devices/{id}", AdminWidens, get(dashboard::device_page)),
-        ("/enroll", Login, post(devices::enrol)),
-        ("/devices/{id}/renew", Login, post(devices::renew)),
+        // the Wi-Fi area: the resident's certificate devices and actions (rows 6-11)
+        ("/wifi", Login, get(dashboard::wifi)),
+        ("/wifi/devices/{id}", AdminWidens, get(dashboard::device_page)),
+        ("/wifi/enroll", Login, post(devices::enrol)),
+        ("/wifi/devices/{id}/renew", Login, post(devices::renew)),
         ("/download/{token}", Login, get(devices::download)),
-        ("/devices/{id}/rename", AdminWidens, post(devices::rename)),
-        ("/devices/{id}/revoke", AdminWidens, post(devices::revoke)),
-        // admin pages (rows 12-15)
+        ("/wifi/devices/{id}/rename", AdminWidens, post(devices::rename)),
+        ("/wifi/devices/{id}/revoke", AdminWidens, post(devices::revoke)),
+        // the old address of a device page (links in mails and bookmarks): permanent redirect
+        ("/devices/{id}", Machine, get(dashboard::old_device_path)),
+        // the home devices (IOT-ACCESS 6.6)
+        ("/home", Login, get(home::page)),
+        ("/home/register", Login, post(home::register)),
+        ("/home/devices/{id}", AdminWidens, get(home::device_page)),
+        ("/home/devices/{id}/claim", AdminWidens, post(home::claim)),
+        ("/home/devices/{id}/rotate-key", AdminWidens, post(home::rotate_key)),
+        ("/home/devices/{id}/share", AdminWidens, post(home::share)),
+        ("/home/devices/{id}/unshare", AdminWidens, post(home::unshare)),
+        ("/home/devices/{id}/visibility", AdminWidens, post(home::visibility)),
+        ("/home/devices/{id}/rename", AdminWidens, post(home::rename)),
+        ("/home/devices/{id}/remove", AdminWidens, post(home::remove)),
+        // admin pages (rows 12-15, and the home devices)
         ("/admin", Admin, get(dashboard::admin)),
         ("/admin/aps", Admin, get(dashboard::admin_aps)),
         ("/admin/incidents", Admin, get(dashboard::admin_incidents)),
         ("/admin/devices/{id}", Admin, get(dashboard::admin_device)),
-        // the dashboard's JSON API (rows 16-25)
+        ("/admin/home", Admin, get(home::admin_page)),
+        // the dashboard's JSON API (rows 16-25) and the home devices'
         ("/api/devices", Login, get(dashboard::api_devices)),
         ("/api/devices/{id}", AdminWidens, get(dashboard::api_device)),
         ("/api/devices/{id}/history", AdminWidens, get(dashboard::api_history)),
         ("/api/house", Login, get(dashboard::api_house)),
+        ("/api/home/devices", Login, get(home::api_devices)),
+        ("/api/home/devices/{id}", AdminWidens, get(home::api_device)),
         ("/api/admin/devices", Admin, get(dashboard::api_admin_devices)),
         ("/api/admin/overview", Admin, get(dashboard::api_admin_overview)),
         ("/api/admin/aps", Admin, get(dashboard::api_admin_aps)),
         ("/api/admin/incidents", Admin, get(dashboard::api_admin_incidents)),
         ("/api/admin/auth", Admin, get(dashboard::api_admin_auth)),
         ("/api/admin/devices/{id}/raw", Admin, get(dashboard::api_admin_device_raw)),
+        ("/api/admin/home/devices", Admin, get(home::api_admin_devices)),
         // Let's Wi-Fi (rows 26-29)
         ("/.well-known/letswifi.json", Machine, get(letswifi::well_known)),
         ("/oauth/authorize", Login, get(letswifi::authorize).post(letswifi::authorize)),

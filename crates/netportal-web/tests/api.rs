@@ -40,7 +40,7 @@ async fn test_ownership() {
     for path in [format!("/api/devices/{theirs}"), format!("/api/devices/{theirs}/history")] {
         assert_eq!(b.get(&path).await.error().as_deref(), Some("not_found"), "{path}");
     }
-    let r = b.get(&format!("/devices/{theirs}")).await;
+    let r = b.get(&format!("/wifi/devices/{theirs}")).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     assert!(r.is_page());
     // one device: exactly these keys
@@ -57,18 +57,18 @@ async fn test_ownership() {
         assert_eq!((r.status, r.error().as_deref()), (StatusCode::BAD_REQUEST, Some("bad_range")), "{bad:?}");
     }
     // the page with an unknown range: 24h
-    assert_eq!(b.get(&format!("/devices/{mine}?range=2y")).await.status, StatusCode::OK);
+    assert_eq!(b.get(&format!("/wifi/devices/{mine}?range=2y")).await.status, StatusCode::OK);
     // an admin reads any device, with its owner
     let mut ab = portal.browser().logged_in(&admin("adm")).await;
     let one = ab.get(&format!("/api/devices/{theirs}")).await.json();
     assert_eq!(one["device"]["owner"]["username"], other.username.as_str());
-    assert_eq!(ab.get(&format!("/devices/{theirs}")).await.status, StatusCode::OK);
+    assert_eq!(ab.get(&format!("/wifi/devices/{theirs}")).await.status, StatusCode::OK);
     assert_eq!(ab.get(&format!("/admin/devices/{theirs}")).await.status, StatusCode::OK);
     let own_list = ab.get("/api/devices").await.json();
     assert_eq!(own_list["devices"].as_array().map(Vec::len), Some(0));
     // a revoked device is gone from the pages and device APIs, not from raw
     let csrf = ob.csrf().await;
-    ob.post(&format!("/devices/{theirs}/revoke"), &[("csrf", &csrf)]).await;
+    ob.post(&format!("/wifi/devices/{theirs}/revoke"), &[("csrf", &csrf)]).await;
     assert_eq!(ab.get(&format!("/api/devices/{theirs}")).await.error().as_deref(), Some("not_found"));
     assert_eq!(ab.get(&format!("/admin/devices/{theirs}")).await.status, StatusCode::NOT_FOUND);
     let raw = ab.get(&format!("/api/admin/devices/{theirs}/raw")).await;
@@ -233,7 +233,7 @@ async fn test_polled_api() {
     assert_eq!(r.error().as_deref(), Some("login_required"));
     // another name, another tag
     let csrf = b.csrf().await;
-    b.post(&format!("/devices/{device}/rename"), &[("csrf", &csrf), ("name", "renamed")]).await;
+    b.post(&format!("/wifi/devices/{device}/rename"), &[("csrf", &csrf), ("name", "renamed")]).await;
     let r = b.get_with("/api/devices", &[("if-none-match", &tag)]).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_ne!(r.header("etag").as_deref(), Some(tag.as_str()));
@@ -254,11 +254,11 @@ async fn test_pages_and_telemetry_states() {
     b.enrol("apple", "phone").await;
     let device = newest_device(&portal, &person.sub).await;
     // Prometheus down: no error page, the API says unavailable
-    let r = b.get("/").await;
+    let r = b.get("/wifi").await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.header("content-security-policy").as_deref(), Some(DASHBOARD_CSP));
     assert_eq!(b.get("/api/devices").await.json()["telemetry"], "unavailable");
-    assert_eq!(b.get(&format!("/devices/{device}")).await.status, StatusCode::OK);
+    assert_eq!(b.get(&format!("/wifi/devices/{device}")).await.status, StatusCode::OK);
     let house = b.get("/api/house").await.json();
     assert!(house.get("internet").is_some() && house.get("wifi_data_at").is_some());
     // no CSP for scripts outside the dashboard pages

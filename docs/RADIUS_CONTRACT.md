@@ -2,7 +2,8 @@
 
 What FreeRADIUS (`radius/`, a copy of `radius/` for the Rust registry; the role
 `radius`) may use in the Rust version's database, and nothing else. Defined by
-`migrations/0002_radius_contract.sql` (`radius.login` replaced by `0005_sessions_and_rechecks.sql`)
+`migrations/0002_radius_contract.sql` (`radius.login` replaced by `0005_sessions_and_rechecks.sql`,
+the view `radius.iot_mac` and the reason `unknown_mac` added by `0006_iot.sql`)
 and `sql/radius_grants.sql`; tested by
 `crates/netportal-core/tests/registry_db.rs` (`test_contract_objects`,
 `test_radius_role_rights`, `test_public_cannot_execute`,
@@ -16,6 +17,7 @@ the names moved into one schema.
 | Object | Kind | Replaces (Python schema) | Called from (`radius/`) |
 |---|---|---|---|
 | `radius.valid_cert(serial text, device_id text, vlan integer)` | view, `security_barrier` (migration 0004) | `radius_cert` | `sites/check-eap-tls` (the access decision) |
+| `radius.iot_mac(mac macaddr, device_id text)` | view, `security_barrier` (migration 0006) | (new: house-infra docs/IOT-ACCESS.md 6.3) | `sites/default` authorize (the MAC authentication decision of the IoT SSID) |
 | `radius.cert_status(p_serial text) RETURNS text` | function | `radius_cert_status` | (used by `radius.reject`; callable for diagnostics) |
 | `radius.login(p_device_id, p_serial, p_calling, p_called, p_nas_ip, p_acct_session_id, p_user_name DEFAULT NULL, p_vlan DEFAULT NULL) RETURNS text` | function, 8 text (migration 0005: `p_vlan`, the Accept's VLAN; 7-argument calls still work) | `radius_login` | `sites/default` post-auth (Accept) |
 | `radius.reject(p_serial, p_calling, p_called, p_nas_ip, p_reason_hint) RETURNS void` | function, 5 text | `radius_reject` | `sites/default` Post-Auth-Type REJECT |
@@ -43,7 +45,7 @@ Applied after every migration run (`registry::migrate`), declaratively: everythi
 then exactly this is granted.
 
 - `USAGE` on schema `radius`; no `CREATE`.
-- `SELECT` on every view of `radius` (today: `valid_cert`).
+- `SELECT` on every view of `radius` (today: `valid_cert`, `iot_mac`).
 - `EXECUTE` on every function of `radius` (today: four).
 - Nothing in `public`: no table, sequence, view or function (the logging functions are
   `SECURITY DEFINER`: they write as the schema owner).
@@ -76,6 +78,23 @@ None of the logging functions is part of the access decision.
   serials; `radius.cert_status` tells the reason on purpose, nothing more).
 - **`radius.cert_status(serial)`**: `valid`, `unknown_cert`, `revoked`, `retired`, `expired`
   (serial compared as `lower(btrim())`).
+- **Decision, MAC authentication** (`radius.iot_mac`, migration 0006; house-infra
+  docs/IOT-ACCESS.md 6.3): the registered MAC of every home device (`device.kind = 'iot'`) that
+  is not revoked and whose owner is not offboarded, with the device's UUID as text. The IoT
+  SSID (`RADIUS_IOT_SSID`, `radius/entrypoint.sh`, default `Scharni-IoT`) uses UniFi's RADIUS
+  MAC authentication next to its per-device keys: a request without `EAP-Message` whose
+  `User-Name` is a MAC (12 hex digits, with or without `:`/`-` separators, any case; UniFi's
+  `radius_macacl_format none_lower` sends `aabbccddeeff`) and whose `Called-Station-Id` ends in
+  `:<RADIUS_IOT_SSID>` is decided by this view alone, the MAC normalised to `aa:bb:cc:dd:ee:ff`
+  and cast to `macaddr`; the password is not checked (the key authenticated the association).
+  Written positively like the certificate path: no row, an empty answer, a database error or a
+  `User-Name` that is not a MAC rejects. The Accept carries `Session-Timeout`,
+  `Acct-Interim-Interval` and the `Class` token, no `Tunnel-*` attributes (the key's network
+  mapping in UniFi gives the VLAN). A MAC login on any other SSID is rejected (`not_eap`),
+  whether the MAC is registered or not. Tested by `tests/radius/run.sh` (`iot_checks`).
+- **`radius.login` for a MAC login**: called with the device id of the view, an empty serial,
+  the MAC as `User-Name` and an empty VLAN (`radius_auth.serial` and `vlan` NULL); `device_mac`
+  and `radius_session` fill as for a certificate login.
 - **`radius.login`** (Accept): the device id must be a UUID of an existing device, else NULL.
   Returns a fresh Class token `np1:` + 22 base64url characters (FreeRADIUS matches
   `^np1:[-_0-9A-Za-z]{22}$` and puts it in `reply:Class`). Logs the decision in `radius_auth`
@@ -90,7 +109,11 @@ None of the logging functions is part of the access decision.
 - **`radius.reject`** (Reject): the reason from the registry when a serial is given
   (`unknown_cert`, `revoked`, `retired`, `expired`; a serial the registry would accept was
   refused by the TLS layer: `bad_chain`, not attributed to the device), else the hint
-  (`no_cert`, `not_eap`, `bad_chain`, `db_error`; anything else `other`). Repeats of the same
+  (`no_cert`, `not_eap`, `bad_chain`, `db_error`, `unknown_mac`; anything else `other`).
+  `unknown_mac` (migration 0006) is the hint of a MAC login on the IoT SSID the view refused;
+  the function then also notes the MAC in `iot_join_attempt` (first/last seen, tries, the
+  SSID), which the portal offers for a one-click claim within 15 minutes and the IoT controller
+  prunes after a day. Repeats of the same
   MAC, reason, serial, NAS, BSSID and SSID within 60 s of a row's latest try add to it (`tries`,
   `last_at`); a row spans at most an hour; a row being updated elsewhere is skipped.
 - **`radius.accounting`**: Start / Interim-Update / Stop (names or 1/2/3) upsert the session

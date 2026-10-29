@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% import "_dash.html" as dash %}
+{% import "_home.html" as home %}
+{% import "_admin.html" as adm %}
+{% block body_attrs %} class="wide" data-page="home-device"{% endblock %}
+{# One home device (IOT-ACCESS 6.6). Context: device (home device JSON; for the owner and an
+   admin with psk and qr), role (owner, admin, shared), shares, people (share candidates), show_key,
+   attempts (join attempts while the device has no address), dashboard, back (from the admin page).
+   A sharee gets the device, its owner and its status: no key, no forms. #}
+{% set d = device %}
+{% set mine = role in ("owner", "admin") %}
+{% set from_admin = (back and role == "admin")|bool %}
+{% set list = "/admin/home" if from_admin else "/home" %}
+{% block body %}
+{% if from_admin %}{{ adm.tabs("home") }}{% endif %}
+<p class="backlink"><a href="{{ list }}">{{ dash.icon("back") }}{{ t.adm_tab_home if from_admin else t.home_back }}</a></p>
+
+<article class="card dev dev-detail home-dev" id="device-{{ d.id }}" data-device="{{ d.id }}">
+  <div class="dev-head">
+    {{ home.class_icon_of(d) }}
+    <div class="dev-title">
+      {% if mine %}
+      <div class="dev-name">
+        <h1 class="dev-name-text">{{ d.name }}</h1>
+        <details class="rename-box">
+          <summary class="edit-button" title="{{ t.rename }}">{{ dash.icon("edit") }}<span class="sr">{{ t.rename }}: {{ d.name }}</span></summary>
+          <form method="post" action="/home/devices/{{ d.id }}/rename" class="rename">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input id="name-{{ d.id }}" name="name" value="{{ d.name }}" maxlength="60" aria-label="{{ t.device_name }}" autocomplete="off" required>
+            <button class="button small primary">{{ t.save }}</button>
+          </form>
+        </details>
+      </div>
+      {% else %}
+      <h1 class="dev-name-text">{{ d.name }}</h1>
+      {% endif %}
+      <p class="home-kind">{{ t["cls_" ~ d.class] }} · {{ t.dt_owner }}: {{ d.owner.display }}</p>
+      {{ home.state_line(d) }}
+    </div>
+  </div>
+  {{ dash.banners(dashboard if dashboard is defined else none) }}
+  {{ home.visibility_line(d) }}
+  {{ home.sync_line(d) }}
+  {% if mine %}{{ dash.live(d) }}{% endif %}
+  <dl class="kv">
+    <div><dt>{{ t.added }}</dt><dd>{{ dash.x("date", d.created) }}</dd></div>
+    {% if d.last_seen %}<div><dt>{{ t.last_seen }}</dt><dd>{{ dash.time(d.last_seen, "ago") }}</dd></div>{% endif %}
+    {% if mine %}
+    <div><dt>{{ t.dt_mac }}</dt><dd>{% if d.mac %}<span class="mono">{{ d.mac }}</span>{% else %}<span class="muted">{{ t.home_mac_none }}</span>{% endif %}</dd></div>
+    {% if d.ip %}<div><dt>{{ t.dt_ip }}</dt><dd class="mono">{{ d.ip }}</dd></div>{% endif %}
+    {% endif %}
+  </dl>
+</article>
+
+{% if mine %}
+<section class="card key-card" aria-labelledby="key-h">
+  <h2 id="key-h">{{ dash.icon("key") }}{{ t.home_key_title }}</h2>
+  <p class="muted">{{ (t.home_key_help|e).format(ssid=('<strong>' ~ (settings.iot_ssid|e) ~ '</strong>')|safe) }}</p>
+  <details class="key-box"{% if show_key %} open{% endif %}>
+    <summary class="button">{{ dash.icon("qr") }}{{ t.home_show_key }}</summary>
+    <div class="key-reveal">
+      <dl class="kv key-values">
+        <div><dt>{{ t.home_key_network }}</dt><dd class="mono">{{ settings.iot_ssid }}</dd></div>
+        <div><dt>{{ t.home_key_title }}</dt><dd><code class="psk">{{ d.psk }}</code></dd></div>
+      </dl>
+      {% if d.qr %}<figure class="qr-figure"><div class="qr-host">{{ d.qr|safe }}</div><figcaption class="muted small">{{ t.home_qr_caption }}</figcaption></figure>{% endif %}
+    </div>
+  </details>
+  <p class="muted small">{{ t.home_key_since.format(when=dash.x("date", d.key_rotated)) }}</p>
+  <details class="danger">
+    <summary>{{ dash.icon("refresh") }}{{ t.home_rotate }}</summary>
+    <form method="post" action="/home/devices/{{ d.id }}/rotate-key" class="confirm">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p>{{ t.home_rotate_note }}</p>
+      <button class="button danger">{{ t.home_rotate }}</button>
+    </form>
+  </details>
+</section>
+
+{% if not d.mac %}
+<section class="card attempts-card" aria-labelledby="claim-h">
+  <h2 id="claim-h">{{ dash.icon("fingerprint") }}{{ t.home_claim_title }}</h2>
+  {% if attempts %}
+  {{ home.attempts_list(attempts, [{"id": d.id, "name": d.name}], none) }}
+  {% else %}
+  <p class="muted">{{ t.home_claim_none.format(ssid=settings.iot_ssid) }}</p>
+  {% endif %}
+  <form method="post" action="/home/devices/{{ d.id }}/claim" class="claim">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="field">{{ t.home_form_mac_typed }}
+      <input name="mac" class="mono" maxlength="20" autocomplete="off" spellcheck="false" placeholder="3C:22:FB:12:34:56" required>
+      <span class="small muted">{{ t["mac_hint_" ~ d.class] }}</span>
+    </label>
+    <button class="button">{{ dash.icon("check") }}{{ t.home_claim_typed }}</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="card share-card" aria-labelledby="share-h">
+  <h2 id="share-h">{{ dash.icon("share") }}{{ t.home_share_title }}</h2>
+  {% if shares %}
+  <ul class="share-list">
+    {% for s in shares %}
+    <li><span>{{ dash.icon("people") }}{{ s.display }}</span>
+      <form method="post" action="/home/devices/{{ d.id }}/unshare" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="grantee" value="{{ s.sub }}">
+        <button class="pill">{{ t.home_unshare }}</button>
+      </form></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">{{ t.home_share_none }}</p>{% endif %}
+  {% if people %}
+  <form method="post" action="/home/devices/{{ d.id }}/share" class="share-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="field">{{ t.home_share_with }}
+      <select name="grantee">{% for p in people %}<option value="{{ p.sub }}">{{ p.display }}{% if p.username != p.display %} ({{ p.username }}){% endif %}</option>{% endfor %}</select>
+    </label>
+    <button class="button primary">{{ dash.icon("share") }}{{ t.home_share_action }}</button>
+  </form>
+  {% else %}<p class="muted small">{{ t.home_share_nobody }}</p>{% endif %}
+  <h3 class="h-sub">{{ t.home_visibility_title }}</h3>
+  <p class="muted small">{{ t.home_house_note }}</p>
+  <form method="post" action="/home/devices/{{ d.id }}/visibility" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% if d.visibility == "house" %}
+    <input type="hidden" name="visibility" value="private">
+    <button class="button">{{ dash.icon("share") }}{{ t.home_make_private }}</button>
+    {% else %}
+    <input type="hidden" name="visibility" value="house">
+    <button class="button">{{ dash.icon("globe") }}{{ t.home_make_house }}</button>
+    {% endif %}
+  </form>
+  <p class="muted small">{{ t.home_visibility_note }}</p>
+  <p class="small"><strong>{{ t.home_firewall_note }}</strong></p>
+</section>
+
+<section class="card" aria-labelledby="remove-h">
+  <h2 id="remove-h" class="sr">{{ t.home_remove }}</h2>
+  <details class="danger">
+    <summary>{{ dash.icon("trash") }}{{ t.home_remove }}</summary>
+    <form method="post" action="/home/devices/{{ d.id }}/remove" class="confirm">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="back" value="{{ list }}">
+      <p><strong>{{ t.home_remove }}: {{ d.name }}</strong><br>{{ t.home_remove_note }}</p>
+      <button class="button danger">{{ t.revoke }}</button>
+    </form>
+  </details>
+</section>
+{% else %}
+<section class="card notes">
+  <p>{{ t.home_shared_view_note.format(name=d.owner.display) }}</p>
+  <p class="small"><strong>{{ t.home_firewall_note }}</strong></p>
+</section>
+{% endif %}
+{% endblock %}

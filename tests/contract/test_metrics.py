@@ -16,6 +16,12 @@ FAMILIES = {
     "netportal_registry_up": "gauge",
     "netportal_disconnect_rechecks_total": "counter",
     "netportal_locked_sessions_live": "gauge",
+    "netportal_iot_devices": "gauge",
+    "netportal_iot_shares": "gauge",
+    "netportal_iot_sync": "gauge",
+    "netportal_iot_address_conflicts": "gauge",
+    "netportal_iot_backend_ok": "gauge",
+    "netportal_iot_join_attempts": "gauge",
 }
 
 
@@ -66,7 +72,7 @@ class MetricsTests(ContractCase):
                          - sample(before, "netportal_devices", state="active"), 1)
         self.assertEqual(sample(mid, "netportal_certificates", state="valid")
                          - sample(before, "netportal_certificates", state="valid"), 1)
-        b.post("/devices/%s/revoke" % dev, data={"csrf": b.csrf()})
+        b.post("/wifi/devices/%s/revoke" % dev, data={"csrf": b.csrf()})
         _, after = A.metrics()
         self.assertEqual(sample(after, "netportal_devices", state="active")
                          - sample(mid, "netportal_devices", state="active"), -1)
