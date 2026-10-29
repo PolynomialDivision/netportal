@@ -4,7 +4,8 @@
 //!   the address defaults to `NETPORTAL_LISTEN`, else `0.0.0.0:8080`)
 //! - `init-db`               create or upgrade the schema and seed the policies
 //! - `offboard [--every N] [--allow-mass]`  reconcile with Authentik once, or every N seconds
-//!   (the sidecar); `--allow-mass`: one round past the mass-removal hold
+//!   (the sidecar, with the Disconnect reconciliation every `NETPORTAL_DISCONNECT_RECHECK_S`);
+//!   `--allow-mass`: one round past the mass-removal hold
 //! - `collect [--once] [--jobs a,b]`  the collector, forever or every selected job once
 //! - `job NAME`              one collector job once (unifi_events, incidents, rollup, prune)
 //! - `pki --out DIR [--name NAME] --server-name FQDN`  the CA ceremony (on an admin's machine)
@@ -41,7 +42,8 @@ enum Command {
     },
     /// Create or upgrade the schema, apply the radius role's rights, seed the policies
     InitDb,
-    /// Reconcile the registry with Authentik once, or forever
+    /// Reconcile the registry with Authentik once, or forever (then also the Disconnect
+    /// reconciliation)
     Offboard {
         /// seconds between rounds; 0: one round
         #[arg(long, default_value_t = 0)]

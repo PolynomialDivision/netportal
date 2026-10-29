@@ -11,13 +11,16 @@ use axum::response::{Html, IntoResponse, Response};
 use axum_extra::extract::cookie::CookieJar;
 use indexmap::IndexMap;
 use minijinja::context;
+use netportal_core::registry;
 
 use crate::ctx::{CookieFate, Ctx, Inner, User, wants_json};
 use crate::errors::{Reject, Rejected, Sparse, json_error, left_out, status_code_name};
 use crate::http::parse_pairs;
 use crate::render::{Base, RequestView};
 use crate::session::{Session, same_token};
-use crate::web::{App, BODY_LIMIT};
+use crate::web::{App, BODY_LIMIT, BODY_READ_TIMEOUT};
+
+const LOG: &str = "netportal.web";
 
 /// What a page needs in its Content-Security-Policy beyond the default (a response extension
 /// the handler sets).
@@ -136,6 +139,41 @@ pub async fn shed(State(app): State<App>, req: Request, next: Next) -> Response 
     }
 }
 
+/// Every request body is read whole before routing's handlers see it: within
+/// [`BODY_READ_TIMEOUT`] (a client sending its body slowly gets 408 and the connection's slot
+/// back) and [`BODY_LIMIT`] (413).
+pub async fn read_body(req: Request, next: Next) -> Response {
+    read_body_within(BODY_READ_TIMEOUT, req, next).await
+}
+
+/// [`read_body`] with another deadline (the server's tests).
+pub async fn read_body_within(deadline: std::time::Duration, req: Request, next: Next) -> Response {
+    let (parts, body) = req.into_parts();
+    match tokio::time::timeout(deadline, axum::body::to_bytes(body, BODY_LIMIT)).await {
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+        Ok(Err(_)) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Ok(Ok(bytes)) => next.run(Request::from_parts(parts, Body::from(bytes))).await,
+    }
+}
+
+/// The gate of the admin routes (`web::Gate::Admin`, inside [`browser`]): the login and the admin
+/// right checked live with Authentik ([`Ctx::gate_admin`]: as [`Ctx::need_admin`], or
+/// [`Ctx::api_admin`] for the JSON routes) before the handler runs; the handler takes the
+/// [`crate::ctx::Admin`] it leaves in the request. A refusal is rendered by [`browser`] (403, 503,
+/// or the login).
+pub async fn admin_gate(State(app): State<App>, mut req: Request, next: Next) -> Response {
+    let Some(ctx) = req.extensions().get::<Ctx>().cloned() else {
+        return Reject::Internal.into_response();
+    };
+    match ctx.gate_admin(&app).await {
+        Ok(admin) => {
+            req.extensions_mut().insert(admin);
+            next.run(req).await
+        }
+        Err(reject) => reject.into_response(),
+    }
+}
+
 /// Outermost: OPTIONS, routing's own 404/405 (and the timeout's and the load shedding's 503) as
 /// pages or JSON with their `Allow`, `Retry-After` on a 503, the security headers.
 pub async fn outer(State(app): State<App>, req: Request, next: Next) -> Response {
@@ -146,7 +184,7 @@ pub async fn outer(State(app): State<App>, req: Request, next: Next) -> Response
     let mut response = next.run(req).await;
     let bare = !response.headers().contains_key(header::CONTENT_TYPE)
         && response.extensions().get::<Rejected>().is_none()
-        && matches!(response.status().as_u16(), 400 | 404 | 405 | 413 | 503);
+        && matches!(response.status().as_u16(), 400 | 404 | 405 | 408 | 413 | 503);
     if method == Method::OPTIONS && response.status() == StatusCode::METHOD_NOT_ALLOWED {
         // OPTIONS changes nothing: the route's methods
         let allow = response.headers().get(header::ALLOW).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
@@ -179,6 +217,20 @@ pub async fn outer(State(app): State<App>, req: Request, next: Next) -> Response
     response
 }
 
+/// The server row of a login whose cookie passed its limit.
+async fn end_expired_session(app: &App, sid: &str) {
+    let ended = match app.registry().await {
+        Ok(mut db) => match registry::end_session(&mut db, sid).await {
+            Ok(_) => db.commit().await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        },
+        Err(_) => Err("registry unavailable".to_string()),
+    };
+    if let Err(e) = ended {
+        tracing::warn!(target: LOG, "an expired portal session was not ended on the server: {e}");
+    }
+}
+
 fn is_form(headers: &HeaderMap) -> bool {
     header_str(headers, header::CONTENT_TYPE)
         .split(';')
@@ -199,12 +251,20 @@ pub async fn browser(State(app): State<App>, req: Request, next: Next) -> Respon
             login.seen_at = now_s;
         } else {
             session.end_login();
+            // the idle (or absolute) limit is the cookie's: its row ends on the server too, so
+            // a copy of the cookie kept fresh elsewhere stops with it (once: the cookie written
+            // back has no login any more); not waited for, a failure leaves the 12 h limit
+            if let Some(sid) = session.ended_sid.clone() {
+                let app = app.clone();
+                tokio::spawn(async move { end_expired_session(&app, &sid).await });
+            }
         }
     }
     let method = parts.method.clone();
     let mut too_large = false;
     let mut form = IndexMap::new();
     if method == Method::POST {
+        // read by [`read_body`] already: no wait here
         match axum::body::to_bytes(body, BODY_LIMIT).await {
             Ok(bytes) if is_form(&parts.headers) => form = parse_pairs(&bytes),
             Ok(_) => {}
@@ -267,7 +327,7 @@ fn finish(app: &App, ctx: &Ctx, original: Option<Session>, mut response: Respons
             );
         }
         let login = ctx.session().login.clone();
-        let user = login.map(|l| User { sub: l.sub, username: l.username, name: l.name, admin: false });
+        let user = login.map(|l| User { sub: l.sub, username: l.username, name: l.name, listed_admin: false });
         let base = app.base(ctx, user.as_ref());
         response = render(app, &base, ctx.wants_json(), &reject);
     }

@@ -81,10 +81,12 @@ server default {
 			# device is revoked; without NAS-IP-Address the packet's source is the access point;
 			# first_seen kept while the MAC stays). The returned token goes into Class, which
 			# the access point echoes in accounting (radius_acct link "class"). Only after the
-			# decision, and only into the test of an "if" (see the top).
-			# radius.login: 7 arguments.
+			# decision, and only into the test of an "if" (see the top). The VLAN of this Accept is
+			# logged too: netportal's Disconnect reconciliation cuts a session whose VLAN is no
+			# longer its device's policy's.
+			# radius.login: 8 arguments.
 			if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
-				if ("%{sql_log:SELECT radius.login('%{control:Tmp-String-2}', '%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
+				if ("%{sql_log:SELECT radius.login('%{control:Tmp-String-2}', '%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}', '%{control:Tmp-String-0}')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
 					update reply {
 						&Class := "%{1}"
 					}

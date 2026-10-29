@@ -1,6 +1,10 @@
 //! Enrolment, one-time downloads, renewal, rename and revocation (INVENTORY 3.2 rows 7-11, 4.6,
-//! 6.2, 7.1). Every action is audited; a revocation is committed before its Disconnect-Requests.
-//! A new device and every certificate stay within the person's limits ([`crate::limits`]).
+//! 6.2, 7.1). Every action is audited; a revocation is committed before its Disconnect-Requests,
+//! and the page says so when the access point did not confirm the Disconnect (the device cannot
+//! connect again, but its running session may last until the reconciliation or the RADIUS
+//! Session-Timeout ends it). A new device and every certificate stay within the person's limits
+//! ([`crate::limits`]). Another person's device needs an admin right checked live
+//! ([`Ctx::admin_for`]).
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
@@ -13,7 +17,7 @@ use netportal_pki::enroll::{Artefact, Format};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::ctx::{Ctx, User};
+use crate::ctx::{Admin, Ctx, User};
 use crate::errors::{Reject, internal};
 use crate::http::device_id;
 use crate::limits;
@@ -78,7 +82,7 @@ fn install_page(app: &App, ctx: &Ctx, user: &User, format: &str, token: &str, na
 /// `POST /enroll`: a new device of this format, its 10-minute one-time download link (within
 /// the person's device limit and rate).
 pub async fn enrol(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, false).await?;
+    let user = ctx.need_user(&mut reg).await?;
     let format = ctx.field("format");
     if !FORMATS.contains(&format) || (format == "android" && !app.settings.passpoint) {
         return Err(Reject::bad_request());
@@ -96,22 +100,41 @@ pub async fn enrol(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Res
     install_page(&app, &ctx, &user, format, &token, &name)
 }
 
-/// The device of this URL if this person may act on it: their own (any for an admin when
-/// `admin_any`), not revoked; else 404.
-async fn own_device(db: &mut Db, id: &str, user: &User, admin_any: bool) -> Result<registry::DeviceRow, Reject> {
+/// The device of this URL if this person may act on it, not revoked; else 404: their own, or
+/// (`admin_any`) another person's with the admin right checked live (refused when Authentik no
+/// longer confirms it, 503 when it cannot be asked). The [`Admin`] when the device is someone
+/// else's.
+async fn own_device(
+    app: &App,
+    ctx: &Ctx,
+    db: &mut Db,
+    id: &str,
+    user: &User,
+    admin_any: bool,
+) -> Result<(registry::DeviceRow, Option<Admin>), Reject> {
     let id = device_id(id).ok_or_else(Reject::not_found)?;
-    let owner = if admin_any && user.admin { None } else { Some(user.sub.as_str()) };
-    match registry::device(db, id, owner).await? {
-        Some(dev) if dev.revoked_at.is_none() => Ok(dev),
-        _ => Err(Reject::not_found()),
+    let dev = match registry::device(db, id, None).await? {
+        Some(dev) if dev.revoked_at.is_none() => dev,
+        _ => return Err(Reject::not_found()),
+    };
+    if dev.owner == user.sub {
+        return Ok((dev, None));
+    }
+    if !admin_any || !user.listed_admin {
+        return Err(Reject::not_found());
+    }
+    let admin = ctx.admin_for(app, db, user, true).await?;
+    match admin {
+        Some(admin) => Ok((dev, Some(admin))),
+        None => Err(Reject::not_found()),
     }
 }
 
 /// `POST /devices/<id>/renew`: a new download link for the device (own devices only, also for
 /// admins); an app's device is renewed by the app.
 pub async fn renew(State(app): State<App>, ctx: Ctx, mut reg: Reg, Path(id): Path<String>) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, false).await?;
-    let dev = own_device(&mut reg, &id, &user, false).await?;
+    let user = ctx.need_user(&mut reg).await?;
+    let (dev, _) = own_device(&app, &ctx, &mut reg, &id, &user, false).await?;
     if dev.platform == "letswifi" {
         let text = netportal_core::i18n::text(ctx.lang, "install_app").unwrap_or("");
         let message = netportal_core::i18n::fill(text, &[("host", &app.host)]);
@@ -135,7 +158,7 @@ pub async fn download(
     mut reg: Reg,
     Path(token): Path<String>,
 ) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, false).await?;
+    let user = ctx.need_user(&mut reg).await?;
     if let Some(over) = limits::new_certificate(&mut reg, &user.sub).await? {
         return limits::page(&app, &ctx, &user, over);
     }
@@ -157,10 +180,9 @@ pub async fn rename(
     mut reg: Reg,
     Path(id): Path<String>,
 ) -> Result<Response, Reject> {
-    let _ = app;
     let as_json = ctx.wants_json();
-    let user = if as_json { ctx.api_user(&mut reg, false).await? } else { ctx.need_user(&mut reg, false).await? };
-    let dev = own_device(&mut reg, &id, &user, true).await?;
+    let user = if as_json { ctx.api_user(&mut reg).await? } else { ctx.need_user(&mut reg).await? };
+    let (dev, _) = own_device(&app, &ctx, &mut reg, &id, &user, true).await?;
     let name = cut_name(ctx.field("name"));
     if let Some(name) = &name {
         registry::rename(&mut reg, dev.id, name).await?;
@@ -175,17 +197,28 @@ pub async fn rename(
 }
 
 /// `POST /devices/<id>/revoke`: revoked in the registry (every new authentication fails), then
-/// every running session cut with a Disconnect-Request; back to `/admin` only from there.
+/// every running session cut with a Disconnect-Request; back to `/admin` only from there. When
+/// an access point did not confirm its Disconnect (timeout, NAK, not sent), the page says so
+/// instead: the device may stay connected until the reconciliation (`netportal offboard
+/// --every`) or the RADIUS Session-Timeout cuts it.
 pub async fn revoke(
     State(app): State<App>,
     ctx: Ctx,
     mut reg: Reg,
     Path(id): Path<String>,
 ) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, false).await?;
-    let dev = own_device(&mut reg, &id, &user, true).await?;
-    for result in actions::revoke_now(&mut reg, dev.id, &user.sub, &app.disconnector).await? {
+    let user = ctx.need_user(&mut reg).await?;
+    let (dev, admin) = own_device(&app, &ctx, &mut reg, &id, &user, true).await?;
+    let actor = admin.as_ref().map(Admin::sub).unwrap_or(&user.sub);
+    let results = actions::revoke_now(&mut reg, dev.id, actor, &app.disconnector).await?;
+    for result in &results {
         app.metrics.disconnected(result.as_str());
     }
-    Ok(redirect(if ctx.field("back") == "/admin" { "/admin" } else { "/" }))
+    let back = if ctx.field("back") == "/admin" { "/admin" } else { "/" };
+    if results.iter().all(|r| r.confirmed()) {
+        return Ok(redirect(back));
+    }
+    let text = netportal_core::i18n::text(ctx.lang, "revoke_unconfirmed").unwrap_or("");
+    let message = netportal_core::i18n::fill(text, &[("name", &dev.name)]);
+    app.page(&ctx, Some(&user), "message.html", context! { message => message, back => back })
 }

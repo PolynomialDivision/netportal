@@ -1,6 +1,8 @@
 //! Shared test pieces: a fake Authentik OIDC provider (a real HTTP server on 127.0.0.1: discovery,
 //! JWKS, authorize, token with client authentication and PKCE, RS256 ID tokens with nonce and
-//! groups, claims that can be left out), a PKI made by the ceremony, a fresh registry database per
+//! groups, claims that can be left out; and the users API the portal checks admin rights with:
+//! everyone who logged in, with the groups of their latest login unless a test changes them), a
+//! PKI made by the ceremony, a fresh registry database per
 //! test (`NETPORTAL_TEST_DATABASE_URL`, `tools/test-db.sh`), the portal built around them with
 //! a test clock, and a browser that sends requests through the router (`tower::ServiceExt::oneshot`)
 //! with its own cookie jar.
@@ -37,6 +39,8 @@ pub const CLIENT_ID: &str = "netportal";
 pub const CLIENT_SECRET: &str = "idp-client-secret";
 pub const BASE_URL: &str = "http://wifi.test";
 pub const LOGOUT_URL: &str = "https://login.test/if/flow/house-logout/";
+/// The users API's token (NETPORTAL_AUTHENTIK_TOKEN).
+pub const API_TOKEN: &str = "idp-api-token";
 
 fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
@@ -89,6 +93,12 @@ struct IdpState {
     jwk: Value,
     user: Option<Person>,
     codes: HashMap<String, Code>,
+    /// the users API: sub -> (active, groups)
+    directory: BTreeMap<String, (bool, Vec<String>)>,
+    /// the users API answers this status instead
+    api_fails: Option<u16>,
+    /// users API requests so far
+    api_calls: usize,
 }
 
 pub struct FakeIdp {
@@ -184,6 +194,30 @@ async fn token(
         .into_response()
 }
 
+/// `GET /api/v3/core/users/`: Authentik's paged list (one page) of the directory.
+async fn users(State(st): State<Arc<Mutex<IdpState>>>, headers: HeaderMap) -> Response {
+    let mut st = st.lock().expect("idp");
+    st.api_calls += 1;
+    if let Some(status) = st.api_fails {
+        return StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+    }
+    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    if auth != Some(&format!("Bearer {API_TOKEN}")) {
+        return (StatusCode::FORBIDDEN, axum::Json(json!({"detail": "no"}))).into_response();
+    }
+    let results: Vec<Value> = st
+        .directory
+        .iter()
+        .map(|(sub, (active, groups))| {
+            json!({"uid": sub, "username": sub, "is_active": active,
+                   "groups_obj": groups.iter().map(|g| json!({"name": g})).collect::<Vec<_>>()})
+        })
+        .collect();
+    let body = json!({"pagination": {"next": 0, "current": 1, "count": results.len(), "total_pages": 1},
+                      "results": results});
+    axum::Json(body).into_response()
+}
+
 impl FakeIdp {
     pub async fn start() -> FakeIdp {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -201,12 +235,16 @@ impl FakeIdp {
             jwk,
             user: None,
             codes: HashMap::new(),
+            directory: BTreeMap::new(),
+            api_fails: None,
+            api_calls: 0,
         }));
         let app = Router::new()
             .route("/application/o/netportal/.well-known/openid-configuration", get(discovery))
             .route("/application/o/netportal/jwks/", get(jwks))
             .route("/application/o/authorize/", get(authorize))
             .route("/application/o/token/", post(token))
+            .route("/api/v3/core/users/", get(users))
             .with_state(state.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -214,9 +252,35 @@ impl FakeIdp {
         FakeIdp { base, issuer, state }
     }
 
-    /// The person who logs in next.
+    /// The person who logs in next (and is in the directory with these groups from now on).
     pub fn log_in_as(&self, person: &Person) {
-        self.state.lock().expect("idp").user = Some(person.clone());
+        let mut st = self.state.lock().expect("idp");
+        st.user = Some(person.clone());
+        st.directory.insert(person.sub.clone(), (true, person.groups.clone()));
+    }
+
+    /// The person's groups in the users API only (the next ID token keeps the login's).
+    pub fn set_groups(&self, sub: &str, groups: &[&str]) {
+        let mut st = self.state.lock().expect("idp");
+        let active = st.directory.get(sub).map(|(a, _)| *a).unwrap_or(true);
+        st.directory.insert(sub.to_string(), (active, groups.iter().map(|g| g.to_string()).collect()));
+    }
+
+    /// The person deactivated (`false`) or active again in the users API.
+    pub fn set_active(&self, sub: &str, active: bool) {
+        if let Some(entry) = self.state.lock().expect("idp").directory.get_mut(sub) {
+            entry.0 = active;
+        }
+    }
+
+    /// The users API answers this HTTP status (`None`: works again).
+    pub fn fail_api(&self, status: Option<u16>) {
+        self.state.lock().expect("idp").api_fails = status;
+    }
+
+    /// Users API requests so far.
+    pub fn api_calls(&self) -> usize {
+        self.state.lock().expect("idp").api_calls
     }
 }
 
@@ -293,6 +357,8 @@ pub fn env(db_url: &str, idp: &FakeIdp, base_url: &str) -> HashMap<String, Strin
         ("NETPORTAL_DEVICE_CA_KEY", path("device-ca.key")),
         ("NETPORTAL_PASSPOINT", "true".into()),
         ("NETPORTAL_LOGOUT_URL", LOGOUT_URL.into()),
+        ("NETPORTAL_AUTHENTIK_API", format!("{}/api/v3", idp.base)),
+        ("NETPORTAL_AUTHENTIK_TOKEN", API_TOKEN.into()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

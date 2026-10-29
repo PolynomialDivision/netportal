@@ -8,9 +8,9 @@ Authentik and, for certificates the portal would never issue, the small Rust too
 
 | Suite | What it is | Command |
 |---|---|---|
-| `contract/` | 189 black-box tests (about 725 assertion call sites, many inside loops and subtests) over HTTP, the mock IdP, a fake access point (UDP Disconnect) and the CLI, against two portal instances | `tests/contract/run.sh` |
-| `integration/` | the whole path, 117 checks: login through the mock Authentik, enrolment per platform, EAP-TLS with eapol_test through FreeRADIUS (`radius/`), revocation with a Disconnect-Request to a fake access point, renewal, the Let's Wi-Fi flow, offboarding, admin, metrics, accounting, presence, the radius role's rights, fail-closed | `tests/integration/run.sh` |
-| `radius/` | FreeRADIUS (`radius/`) against a database migrated by the binary, no portal, 72 checks: the RADIUS cases of `integration/e2e.py` (decisions, logged reasons, Class, sessions, accounting, the radius role, the pools, logging blocked or revoked, database down), the certificate-identity binding and no TLS session resumption | `tests/radius/run.sh` |
+| `contract/` | 194 black-box tests (about 760 assertion call sites, many inside loops and subtests) over HTTP, the mock IdP, a fake access point (UDP Disconnect) and the CLI, against two portal instances | `tests/contract/run.sh` |
+| `integration/` | the whole path, 127 checks: login through the mock Authentik, enrolment per platform, EAP-TLS with eapol_test through FreeRADIUS (`radius/`), revocation with a Disconnect-Request to a fake access point, renewal, the Let's Wi-Fi flow, offboarding, admin, metrics, accounting, presence, the radius role's rights, fail-closed, the Disconnect reconciliation (a lost Disconnect cut later by the sidecar, a stale record settled by a NAK 503) | `tests/integration/run.sh` |
+| `radius/` | FreeRADIUS (`radius/`) against a database migrated by the binary, no portal, 73 checks: the RADIUS cases of `integration/e2e.py` (decisions, logged reasons, Class, the Accept's VLAN, sessions, accounting, the radius role, the pools, logging blocked or revoked, database down), the certificate-identity binding and no TLS session resumption | `tests/radius/run.sh` |
 | `js/` | the dashboard's ES modules (`crates/netportal-web/static/`) under Node's test runner, partly against the server's implementation as an oracle | `node --test tests/js/` |
 
 ## Running
@@ -48,15 +48,30 @@ To tear it down, stop the two `netportal serve` processes on 28080/28081 and `mo
 
 Results on 2026-10-29 (debug build, one suite at a time):
 
-* contract: `Ran 189 tests in 40.9s, OK`, about 46 s wall time;
-* integration: 117 `ok` lines, `0 failure(s)`, about 90 s;
-* radius: 72 `ok` lines, `0 failure(s)`, about 70 s;
+* contract: `Ran 194 tests in 42.1s, OK`, about 53 s wall time;
+* integration: 127 `ok` lines, `0 failure(s)`, about 120 s (the reconciliation case waits about
+  30 s for the sidecar);
+* radius: 73 `ok` lines, `0 failure(s)`, about 73 s;
 * `selftest_registry_adapter.py`: 3 tests OK, about 4 s.
 
 Requirements: Docker; `cargo`; `python3` with `requests`, `psycopg` (3), `cryptography`; `lxml`
 (optional, for the eap-config XSD check); the `openssl` CLI (3.x); `ss` (iproute2) and `curl`;
-Node for `js/`. The XSD is read from `poc/runs/eap-metadata.xsd` (GÉANT CAT,
-`devices/eap_config/eap-metadata.xsd`); without it that one test is skipped.
+Node for `js/`. The XSD is read from `target/eap-metadata.xsd` (GÉANT CAT,
+`devices/eap_config/eap-metadata.xsd`, downloaded by `check.sh`); without it that one test is
+skipped.
+
+### Ignored tests
+
+`./check.sh` reports `2 ignored`. Both are in `crates/netportal-pki/tests` and are meant to be
+run by hand; neither is a check that a normal run could make:
+
+| Test | Why ignored | What covers it in every run | By hand |
+|---|---|---|---|
+| `disconnect.rs::live_dae_server` | sends a real Disconnect-Request to a real access point (its address and the RADIUS secret needed; it names a made-up MAC, 02:00:00:00:aa:42, so it cuts nothing: an ACK or NAK shows that the access point answers and the reply passed every check) | the packet and reply checks against fake access points (`disconnect.rs`), the contract suite's independent RFC 5176/3579 implementation (`test_devices.RevokeTests`), hostapd in `integration/` | `NETPORTAL_PKI_LIVE_DAE=<ap>:3799:<secret> cargo test -p netportal-pki --test disconnect -- --ignored live --nocapture` (prints the outcome; the UniFi check in `docs/CUTOVER.md`) |
+| `tls.rs::export_for_eapol_test` | a tool, not a check: writes a CA, server and client keys and a PKCS#12 into a directory for a manual eapol_test run | `integration/` and `radius/` (EAP-TLS with eapol_test through FreeRADIUS, every platform's artefact) | `NETPORTAL_PKI_EXPORT=<empty dir> cargo test -p netportal-pki --test tls -- --ignored export` (delete the directory afterwards: test keys) |
+
+Run without their setting they fail (they used to pass without doing anything). Last run by
+hand 2026-10-29: the export wrote its files; the live test needs the hardware test.
 
 ## `contract/`
 
@@ -167,14 +182,14 @@ Section numbers refer to `docs/INVENTORY.md`; "security review" items to the rev
 | `test_session.CsrfTests` (8) | 4.2, 3.1 | missing, wrong or foreign token gives 400 (page and JSON); header tokens do not count; a stale script POST gets 401 before the CSRF check; the `Accept` rule; exempt endpoints; logout |
 | `test_login.LoginTests` (12) | 4.4, 4.3 | authorization request (code, PKCE S256, state, nonce, scopes, redirect URI); person recorded; policy and admin from the groups; instance B's single policy and default admin group; refused without a policy or groups; missing `sub` (a 4xx, never a 500); claim fallbacks; replayed, cancelled and wrong-state callbacks give 400; a foreign callback keeps the session; a new login clears `offboarded` |
 | `test_login.ReturnToTests` (6) | 4.4 return-to | GET with its query, device page, download, consent POST rebuilt as the authorize URL, `back=/admin`, other POSTs go to `/`, and `/` sets no target |
-| `test_login.LogoutTests` (3) | 3.2 row 3, 4.4 | to `NETPORTAL_LOGOUT_URL` or `/`; the session ends |
-| `test_login.RegistryRightsTests` (5) | 4.3 | admin granted or taken in the registry between requests; offboarded or deleted person ends the session at the next request (the CSRF token survives); admin powers over other people's devices |
+| `test_login.LogoutTests` (5) | 3.2 row 3, 4.4, owner's review 2026-10-29 | to `NETPORTAL_LOGOUT_URL` or `/`; the session ends, only this one (a copy of its cookie too, the person's other sessions stay); `POST /logout/all` ends every session of the person (CSRF), nobody else's |
+| `test_login.RegistryRightsTests` (7) | 4.3, owner's review 2026-10-29 | the registry's admin flag alone grants nothing (Authentik's users API is asked live; the flag is cleared and the session ends when it says no), granted with both, taken in the registry; out of the admin group in Authentik: the next admin page and the next direct admin API call refused, flag cleared, every session ended; Authentik failing: admin requests 503, resident pages fine; offboarded or deleted person ends the session at the next request (the CSRF token survives); admin powers over other people's devices |
 | `test_devices.EnrolTests` (5) | 3.2 row 7, 4.6 | each format; token ≥ 256 bits, about 10 minutes; default names; name stripped and cut to 60; bad formats 400; Passpoint off; recommended format per User-Agent |
 | `test_devices.DownloadTests` (8) | 4.6, 6.4 | Content-Type, file names (ASCII, default `Wi-Fi`), Passpoint framing, no-store; one-time; someone else's token refused and not used up; expired; revoked device; a new certificate per download, known to the registry |
 | `test_devices.RenewTests` (2) | 3.2 row 8, 6.2 | same device, new serial, overlap `NETPORTAL_RENEW_OVERLAP_DAYS` (2 and 5); revoked or foreign gives 404 |
 | `test_devices.RenameTests` (2) | 3.2 row 10 | form and JSON variants, empty name, 60-character cut |
 | `test_devices.LimitTests` (1) | security review L5 | the 11th new device within an hour is a 429 |
-| `test_devices.RevokeTests` (7) | 3.2 row 11, 7.1 | Disconnect-Request checked by an independent RFC 5176/3579 implementation (authenticators, User-Name, Calling-Station-Id, NAS-IP-Address, Event-Timestamp); ack, nak, no-session and timeout (retransmissions with the same identifier); RADIUS status revoked; metrics; `back` |
+| `test_devices.RevokeTests` (7) | 3.2 row 11, 7.1 | Disconnect-Request checked by an independent RFC 5176/3579 implementation (authenticators, User-Name, Calling-Station-Id, NAS-IP-Address, Event-Timestamp); ack, nak (Error-Cause 503: nothing left to cut, the redirect), no-session and timeout (retransmissions with the same identifier; the page says the cut is not confirmed); RADIUS status revoked; metrics; `back` |
 | `test_artefacts.CertificateTests` (3) | 6.1, 6.2 | device certificates of every format and both instances (see the table above) |
 | `test_artefacts.AppleTests` (5) | 6.3, 6.5 | profile structure (iOS, macOS, non-ASCII SSID); server anchor inside `EAPClientConfiguration`; PKCS#12 readable by Apple; identifier stable; reverse DNS of the realm |
 | `test_artefacts.PasspointTests` (3) | 6.3, 6.6 | installer layout, PPS MO values and fingerprint, FQDN kept on renewal |
@@ -187,7 +202,8 @@ Section numbers refer to `docs/INVENTORY.md`; "security review" items to the rev
 | `test_api.PayloadTests` (3) | 9.12 | DASHBOARD, DEVICE, HOUSE and HISTORY field names, types, enums, RFC 3339 times, order; `bad_range` |
 | `test_api.AdminApiTests` (5) | 3.2 rows 20-25 | owner block, `q` and `state` filters, counts of all devices; incidents, auth (including `²` and `٣`) and raw parameter errors; raw shows revoked devices |
 | `test_headers.HeaderTests` (4) | 3.1, 3.4, 4.8, 3.2 row 32 | CSP per response as a directive set (scripts only on dashboard pages, `'self'`); nosniff; Referrer-Policy; Cache-Control; consent `form-action`; downloads; JavaScript MIME type for the ES modules; path traversal |
-| `test_metrics.MetricsTests` (4) | 10, 3.2 row 31 | family names and types the alert rules use; label sets; values follow enrolment and revocation; 404 with `X-Forwarded-For` |
+| `test_metrics.MetricsTests` (4) | 10, 3.2 row 31 | family names and types the alert rules use (with the reconciliation's `netportal_disconnect_rechecks_total` and `netportal_locked_sessions_live`); label sets; values follow enrolment and revocation; 404 with `X-Forwarded-For` |
+| `test_metrics.MetricsTokenTests` (1) | owner's review 2026-10-29 | instance B's `NETPORTAL_METRICS_TOKEN_FILE` (a read-only file): 401 with `WWW-Authenticate: Bearer` without, with a wrong or another scheme's token; 200 with it; 404 through the proxy whatever the token |
 | `test_offboarding.OffboardingTests` (14) | 8.1-8.3, 7.1 | inactive, group lost or deleted: offboarded, devices revoked with a Disconnect, app tokens stopped, session ended; two rounds before a removal; a mass removal is held back (exit ≠ 0, nothing changed); moved out (guests VLAN, Disconnect); admin follows the groups, and losing it ends the sessions; pagination and `include_groups`; strangers ignored; API 500, wrong token, empty directory and unreachable API change nothing (exit ≠ 0, heartbeat still touched); off switch; `--every` |
 | `test_config.FileSecretTests` (4) | 2.1, 2.2 | secrets from `*_FILE` (database URL, session secret, OIDC client secret, DAE secret checked by the fake NAS, Authentik token); device CA key from a file |
 | `test_config.StartupTests` (6) | 2.1, 2.2, 6.1 | missing or invalid settings, a secret set both as `NAME` and `NAME_FILE`, a device CA key in the environment (`NETPORTAL_DEVICE_CA_KEY_B64`) and a mismatched device CA key stop `serve` (exit ≠ 0); `init-db` checks its settings (it reads only the registry's) |
@@ -210,14 +226,19 @@ Section numbers refer to `docs/INVENTORY.md`; "security review" items to the rev
 * FreeRADIUS at 10.199.0.10, built from `radius/Dockerfile` (the production configuration);
 * the fake access point at 10.199.0.11: stock FreeRADIUS with `integration/fake-nas` as the
   Disconnect receiver (RFC 5176, an independent check of the portal's packets; it signs its
-  replies with a Message-Authenticator, as hostapd does) and radclient for accounting;
-  eapol_test runs in throwaway containers (`integration/client/Dockerfile`) at 10.199.0.20.
+  replies with a Message-Authenticator, as hostapd does, and answers a NAK with Error-Cause 503
+  for an `Acct-Session-Id` starting with `gone-`) and radclient for accounting; eapol_test runs
+  in throwaway containers (`integration/client/Dockerfile`) at 10.199.0.20.
 
 `integration/e2e.py <run dir>` then plays residents, apps and admins. It reaches the registry
 through the schema of `migrations/` (and `radius.*`, `docs/RADIUS_CONTRACT.md`), runs
 `$NETPORTAL_BIN offboard` and `init-db`, reads a Passpoint download the way Android's installer
 does (a port of AOSP's `ConfigParser`), and builds the forged Disconnect-Request (wrong secret,
-which the access point must drop) itself. The foreign and root-signed traps are registered for
+which the access point must drop) itself. The reconciliation case pauses the fake access point
+(`docker pause`) during a revocation, so its Disconnect is lost, then runs the sidecar
+(`$NETPORTAL_BIN offboard --every 3600` with `NETPORTAL_DISCONNECT_RECHECK_S=2`, the offboarding
+itself off) until it has cut the session, and reads the access point's log for the requests it
+got. The foreign and root-signed traps are registered for
 the device ids their CNs name, so only the issuer checks stand in their way (logged as
 `bad_chain`).
 

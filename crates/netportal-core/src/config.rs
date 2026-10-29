@@ -394,6 +394,25 @@ pub struct PortalSettings {
     pub metrics_listen: Option<String>,
     /// `NETPORTAL_MAX_DEVICES` (20, 1..=1000): active devices per person
     pub max_devices: u32,
+    /// `NETPORTAL_METRICS_TOKEN` / `_FILE` (at least 32 bytes; unset: none): `/metrics` answers
+    /// 401 without `Authorization: Bearer <token>`
+    pub metrics_token: Option<Secret<String>>,
+    /// `NETPORTAL_AUTHENTIK_API` (`https://login.<domain>/api/v3`): where every request that uses
+    /// admin rights checks them live; `None` (or no token): admin requests are refused
+    pub authentik_api: Option<String>,
+    /// `NETPORTAL_AUTHENTIK_TOKEN` / `_FILE`: the read-only users API token
+    pub authentik_token: Option<Secret<String>>,
+}
+
+/// The shortest `NETPORTAL_METRICS_TOKEN` (bytes).
+pub const METRICS_TOKEN_MIN: usize = 32;
+
+fn metrics_token(env: &dyn Env) -> Result<Option<Secret<String>>> {
+    let token = secret(env, "NETPORTAL_METRICS_TOKEN")?;
+    if token.as_ref().is_some_and(|t| t.expose().len() < METRICS_TOKEN_MIN) {
+        return err(format!("NETPORTAL_METRICS_TOKEN: at least {METRICS_TOKEN_MIN} bytes"));
+    }
+    Ok(token)
 }
 
 impl PortalSettings {
@@ -436,12 +455,20 @@ impl PortalSettings {
             max_requests: integer(env, "NETPORTAL_MAX_REQUESTS", 128, 1..=10000)?,
             metrics_listen: socket_address(env, "NETPORTAL_METRICS_LISTEN")?,
             max_devices: integer(env, "NETPORTAL_MAX_DEVICES", 20, 1..=1000)?,
+            metrics_token: metrics_token(env)?,
+            authentik_api: http_url(env, "NETPORTAL_AUTHENTIK_API")?,
+            authentik_token: secret(env, "NETPORTAL_AUTHENTIK_TOKEN")?,
         })
     }
 
     /// The URL scheme decides the cookie: `https://` gives a `__Host-` cookie with `Secure`.
     pub fn is_https(&self) -> bool {
         self.base_url.starts_with("https://")
+    }
+
+    /// Whether admin rights can be checked live (API URL and token set).
+    pub fn admin_check_enabled(&self) -> bool {
+        self.authentik_api.is_some() && self.authentik_token.is_some()
     }
 }
 
@@ -461,6 +488,12 @@ pub struct OffboardSettings {
     pub heartbeat: PathBuf,
     /// When a round holds back (changes nothing, fails): see [`MassRemoval`]
     pub mass: MassRemoval,
+    /// `NETPORTAL_ACCT_INTERIM_S` (300, 30..=86400): the accounting interval (a session without a
+    /// Start or Interim-Update for two of them is no longer live)
+    pub acct_interim_s: u32,
+    /// `NETPORTAL_DISCONNECT_RECHECK_S` (30, 0..=3600; 0: off): with `--every`, how often the
+    /// Disconnect reconciliation looks for live sessions of locked devices
+    pub disconnect_recheck: Duration,
 }
 
 /// The offboarding's hold on mass removals (house-infra vault-orgs' rule, `MASS_REMOVAL_MIN`
@@ -508,6 +541,8 @@ impl OffboardSettings {
                 percent: integer(env, "NETPORTAL_OFFBOARD_MASS_PERCENT", 50, 0..=100)?,
                 allow: boolean(env, "NETPORTAL_OFFBOARD_ALLOW_MASS", false)?,
             },
+            acct_interim_s: integer(env, "NETPORTAL_ACCT_INTERIM_S", 300, 30..=86400)?,
+            disconnect_recheck: Duration::from_secs(integer(env, "NETPORTAL_DISCONNECT_RECHECK_S", 30u64, 0..=3600)?),
         })
     }
 
@@ -669,7 +704,47 @@ mod tests {
         assert_eq!(s.policies.admin_groups, BTreeSet::from(["it-admins".to_string()]));
         assert_eq!((s.db_pool_size, s.max_requests, s.max_devices), (10, 128, 20));
         assert_eq!(s.metrics_listen, None);
+        assert!(s.metrics_token.is_none());
+        assert_eq!((s.authentik_api.as_deref(), s.authentik_token.is_some()), (None, false));
+        assert!(!s.admin_check_enabled());
         assert_eq!(s.oidc_issuer, "https://login.example.org/application/o/netportal/");
+    }
+
+    #[test]
+    fn test_metrics_token_and_admin_check() {
+        let token = "m".repeat(METRICS_TOKEN_MIN);
+        let s = PortalSettings::from_env(&with(
+            portal_env(),
+            &[
+                ("NETPORTAL_METRICS_TOKEN", &token),
+                ("NETPORTAL_AUTHENTIK_API", "https://login.example.org/api/v3/"),
+                ("NETPORTAL_AUTHENTIK_TOKEN", "reader"),
+            ],
+        ))
+        .expect("settings");
+        assert_eq!(s.metrics_token.as_ref().map(|t| t.expose().as_str()), Some(token.as_str()));
+        assert_eq!(s.authentik_api.as_deref(), Some("https://login.example.org/api/v3"));
+        assert!(s.admin_check_enabled());
+        assert_eq!(
+            portal_err(&[("NETPORTAL_METRICS_TOKEN", &"m".repeat(METRICS_TOKEN_MIN - 1))]),
+            "NETPORTAL_METRICS_TOKEN: at least 32 bytes"
+        );
+        assert!(portal_err(&[("NETPORTAL_AUTHENTIK_API", "login:9000")]).starts_with("NETPORTAL_AUTHENTIK_API"));
+        // from a file mounted read-only for the container's user (house-infra: mode 0400, uid 10001)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("metrics-token");
+        std::fs::write(&path, format!("{token}\n")).expect("write");
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o400);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        let file = path.to_string_lossy().to_string();
+        let s = PortalSettings::from_env(&with(portal_env(), &[("NETPORTAL_METRICS_TOKEN_FILE", &file)]))
+            .expect("settings");
+        assert_eq!(s.metrics_token.as_ref().map(|t| t.expose().as_str()), Some(token.as_str()));
+        let e = portal_err(&[("NETPORTAL_METRICS_TOKEN", &token), ("NETPORTAL_METRICS_TOKEN_FILE", &file)]);
+        assert!(e.contains("both set"), "{e}");
+        let text = format!("{s:?}");
+        assert!(!text.contains(&token), "{text}");
     }
 
     #[test]
@@ -855,6 +930,7 @@ mod tests {
         let s = OffboardSettings::from_env(&env).expect("settings");
         assert_eq!(s.mass, MassRemoval { min: 3, percent: 50, allow: false });
         assert_eq!(s.dae, DaeSettings::new(3799, None));
+        assert_eq!((s.acct_interim_s, s.disconnect_recheck), (300, Duration::from_secs(30)));
         // vault-orgs' rule: at least 3, and more than half
         assert!(!s.mass.holds(2, 2));
         assert!(!s.mass.holds(3, 6));
@@ -869,6 +945,16 @@ mod tests {
         assert_eq!(s.mass, MassRemoval { min: 1, percent: 0, allow: true });
         env.insert("NETPORTAL_OFFBOARD_MASS_PERCENT", "101");
         assert!(OffboardSettings::from_env(&env).is_err());
+        env.insert("NETPORTAL_OFFBOARD_MASS_PERCENT", "50");
+        env.insert("NETPORTAL_DISCONNECT_RECHECK_S", "0");
+        env.insert("NETPORTAL_ACCT_INTERIM_S", "120");
+        let s = OffboardSettings::from_env(&env).expect("settings");
+        assert_eq!((s.acct_interim_s, s.disconnect_recheck), (120, Duration::ZERO));
+        for (name, bad) in [("NETPORTAL_DISCONNECT_RECHECK_S", "3601"), ("NETPORTAL_ACCT_INTERIM_S", "29")] {
+            let mut e = env.clone();
+            e.insert(name, bad);
+            assert!(OffboardSettings::from_env(&e).err().is_some_and(|e| e.0.starts_with(name)), "{name}={bad}");
+        }
     }
 
     #[test]

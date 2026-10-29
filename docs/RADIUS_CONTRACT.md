@@ -2,7 +2,8 @@
 
 What FreeRADIUS (`radius/`, a copy of `radius/` for the Rust registry; the role
 `radius`) may use in the Rust version's database, and nothing else. Defined by
-`migrations/0002_radius_contract.sql` and `sql/radius_grants.sql`; tested by
+`migrations/0002_radius_contract.sql` (`radius.login` replaced by `0005_sessions_and_rechecks.sql`)
+and `sql/radius_grants.sql`; tested by
 `crates/netportal-core/tests/registry_db.rs` (`test_contract_objects`,
 `test_radius_role_rights`, `test_public_cannot_execute`,
 `test_functions_are_definer_with_search_path` and the login, reject and accounting tests) and,
@@ -16,12 +17,13 @@ the names moved into one schema.
 |---|---|---|---|
 | `radius.valid_cert(serial text, device_id text, vlan integer)` | view, `security_barrier` (migration 0004) | `radius_cert` | `sites/check-eap-tls` (the access decision) |
 | `radius.cert_status(p_serial text) RETURNS text` | function | `radius_cert_status` | (used by `radius.reject`; callable for diagnostics) |
-| `radius.login(p_device_id, p_serial, p_calling, p_called, p_nas_ip, p_acct_session_id, p_user_name DEFAULT NULL) RETURNS text` | function, 7 text | `radius_login` | `sites/default` post-auth (Accept) |
+| `radius.login(p_device_id, p_serial, p_calling, p_called, p_nas_ip, p_acct_session_id, p_user_name DEFAULT NULL, p_vlan DEFAULT NULL) RETURNS text` | function, 8 text (migration 0005: `p_vlan`, the Accept's VLAN; 7-argument calls still work) | `radius_login` | `sites/default` post-auth (Accept) |
 | `radius.reject(p_serial, p_calling, p_called, p_nas_ip, p_reason_hint) RETURNS void` | function, 5 text | `radius_reject` | `sites/default` Post-Auth-Type REJECT |
 | `radius.accounting(p_status, p_acct_session_id, p_class, p_calling, p_called, p_nas_ip, p_framed_ip, p_session_time, p_in_octets, p_out_octets, p_in_gigawords, p_out_gigawords, p_terminate_cause, p_event_ts) RETURNS void` | function, 14 text | `radius_accounting` | `sites/default` accounting |
 
-The argument lists and their order are unchanged, so adapting `radius/` is renaming (done in
-`radius/`; tested through FreeRADIUS by `tests/radius/run.sh`):
+The argument lists and their order are unchanged (`radius.login` got an 8th argument at the
+end in migration 0005), so adapting `radius/` is renaming (done in `radius/`; tested through
+FreeRADIUS by `tests/radius/run.sh`):
 
 | In `radius/` today | Rust registry |
 |---|---|
@@ -81,7 +83,10 @@ None of the logging functions is part of the access decision.
   Acct-Session-Id cut to 253), upserts the MAC identity (`device_mac`: first/last seen, login
   count, locally administered bit) and the latest session (`radius_session`: NAS, the MAC as
   sent, the outer User-Name; `first_seen` restarts when the MAC changes). Each write in its
-  own sub-block; a failed decision log returns NULL (no Class).
+  own sub-block; a failed decision log returns NULL (no Class). `p_vlan`
+  (`%{control:Tmp-String-0}`, the VLAN check-eap-tls decided and the Accept carries) is logged
+  as `radius_auth.vlan` when it is 1-4094 (else NULL): the portal's Disconnect reconciliation
+  cuts a session whose login's VLAN is no longer its device's policy's.
 - **`radius.reject`** (Reject): the reason from the registry when a serial is given
   (`unknown_cert`, `revoked`, `retired`, `expired`; a serial the registry would accept was
   refused by the TLS layer: `bad_chain`, not attributed to the device), else the hint
@@ -96,6 +101,27 @@ None of the logging functions is part of the access decision.
   again; the device comes from the Class token (link `class`), else the MAC window (link
   `mac_window`), else none; the MAC window grows with the packet. The measured interval
   (`interim_s`, per session and per NAS) is the smallest Interim gap of 30 s .. 1 day.
+
+## Disconnect-Requests (the portal and the offboarding sidecar to the access points)
+
+Not part of the database contract, but of the RADIUS one: `netportal_pki::disconnect` sends RFC
+5176 Disconnect-Requests to the access point of a session (`NETPORTAL_DAE_PORT`, the secret
+`NETPORTAL_DAE_SECRET`). A reply counts only when it comes from the access point's address and
+port (a connected UDP socket: the kernel drops anything else), has the request's identifier, a
+valid Response Authenticator (MD5 over the reply with the request's authenticator and the
+secret) and, when it carries one, exactly one valid Message-Authenticator (HMAC-MD5). No setting
+changes any of these checks. `NETPORTAL_DAE_REQUIRE_REPLY_MESSAGE_AUTHENTICATOR` (default true)
+decides only whether a reply WITHOUT Message-Authenticator is accepted; hostapd (UniFi) signs
+every ACK/NAK, so it is turned off only after the test with the real UniFi access points
+(CUTOVER.md, "Real devices") shows that they do not, and then every accepted unsigned reply is
+logged as a warning. What a forged ACK could still do (the device keeps its association) is
+bounded by the reconciliation (`netportal offboard --every`, `NETPORTAL_DISCONNECT_RECHECK_S`):
+a locked device's session that the accounting still shows live is disconnected again, by its
+`Acct-Session-Id`; a NAK with Error-Cause 503 Session-Context-Not-Found settles it for good.
+
+A revoked certificate stops new authentications at once (the decision view, no TLS resumption),
+but the access point keeps an association it already has until a Disconnect-Request (or the
+RADIUS Session-Timeout) ends it.
 
 ## TLS
 

@@ -70,6 +70,11 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="pill">{{ t.logout }}</button>
     </form>
+    {# every portal session of the person ends, on every device (copies of the cookie too) #}
+    <form method="post" action="/logout/all" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="pill" title="{{ t.logout_all_title }}">{{ t.logout_all }}</button>
+    </form>
   </nav>
 </header>
 {% endif %}

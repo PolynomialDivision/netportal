@@ -368,9 +368,9 @@ async fn test_empty_database_then_idempotent() {
     let mut db = Db::connect(&url).await.expect("connect");
     let _ddl = ROLE_DDL.lock().await;
     let first = registry::migrate(&mut db).await.expect("migrate");
-    assert_eq!((first.applied.as_slice(), first.version, first.radius_role), (&[1, 2, 3, 4][..], Some(4), true));
+    assert_eq!((first.applied.as_slice(), first.version, first.radius_role), (&[1, 2, 3, 4, 5][..], Some(5), true));
     let second = registry::migrate(&mut db).await.expect("migrate");
-    assert_eq!((second.applied.as_slice(), second.version, second.unknown.as_slice()), (&[][..], Some(4), &[][..]));
+    assert_eq!((second.applied.as_slice(), second.version, second.unknown.as_slice()), (&[][..], Some(5), &[][..]));
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_schema || '.' || table_name FROM information_schema.tables
          WHERE table_schema IN ('public', 'radius') ORDER BY 1",
@@ -397,6 +397,8 @@ async fn test_empty_database_then_idempotent() {
         "public.device_day",
         "public.ap_day",
         "public.incident",
+        "public.web_session",
+        "public.disconnect_recheck",
         "public._sqlx_migrations",
         "public.device_mac_window",
         "radius.valid_cert",
@@ -496,7 +498,7 @@ async fn test_upgrade_from_an_older_release() {
     db.commit().await.expect("commit");
     let _ddl = ROLE_DDL.lock().await;
     let report = registry::migrate(&mut db).await.expect("migrate");
-    assert_eq!((report.applied, report.version), (vec![2, 3, 4], Some(4)));
+    assert_eq!((report.applied, report.version), (vec![2, 3, 4, 5], Some(5)));
     let people = registry::people(&mut db).await.expect("people");
     assert_eq!(people.keys().collect::<Vec<_>>(), ["a"]);
 }
@@ -542,7 +544,7 @@ async fn test_concurrent_migrate() {
         results.push(t.await.expect("join").expect("migrate"));
     }
     results.sort();
-    assert_eq!(results, [vec![], vec![], vec![1, 2, 3, 4]]);
+    assert_eq!(results, [vec![], vec![], vec![1, 2, 3, 4, 5]]);
 }
 
 // --- the FreeRADIUS contract -----------------------------------------------------------------------
@@ -642,7 +644,7 @@ async fn test_contract_objects() {
              p_in_gigawords text, p_out_gigawords text, p_terminate_cause text, p_event_ts text)",
             "cert_status(p_serial text)",
             "login(p_device_id text, p_serial text, p_calling text, p_called text, p_nas_ip text, \
-             p_acct_session_id text, p_user_name text)",
+             p_acct_session_id text, p_user_name text, p_vlan text)",
             "reject(p_serial text, p_calling text, p_called text, p_nas_ip text, p_reason_hint text)",
             "valid_cert:v",
         ]
@@ -1285,6 +1287,35 @@ async fn test_a_reused_session_id_opens_again() {
     case.accounting(Acct { time: "60", event_ts: &s1000, ..acct("Interim-Update", "RU") }).await; // well after
     let row = case.session("RU", "10.0.0.2").await.expect("session");
     assert_eq!((row.stopped, row.started), (None, Some(ts(t + 940))));
+}
+
+#[tokio::test]
+async fn test_a_reopened_session_is_judged_anew() {
+    // review 2026-10-29: a reused Acct-Session-Id is a new session; its login is found from now
+    // (opened_at) and an old reconciliation state ("not_found" is never asked again) is gone
+    let admin = need_db!();
+    let _role = RADIUS_ROLE.read().await;
+    let mut case = Case::new(&admin).await;
+    let (dev, _) = case.device(None, None, true).await;
+    let t = now_s() - 3000;
+    let (s0, s100, s500) = ((t).to_string(), (t + 100).to_string(), (t + 500).to_string());
+    case.accounting(Acct { event_ts: &s0, ..acct("Start", "RO") }).await;
+    case.exec(&format!(
+        "UPDATE radius_acct SET opened_at = now() - interval '1 day' WHERE acct_session_id = 'RO';
+         INSERT INTO disconnect_recheck (nas_ip, acct_session_id, device_id, reason, tries, last_result, settled,
+                                         settled_at)
+         VALUES ('10.0.0.2', 'RO', '{dev}', 'revoked', 1, 'not_found', 'not_found', now())"
+    ))
+    .await;
+    case.accounting(Acct { cause: "User-Request", event_ts: &s100, ..acct("Stop", "RO") }).await;
+    // a Stop (no reopen) changes neither
+    assert_eq!(case.i64("SELECT count(*) FROM disconnect_recheck WHERE acct_session_id = 'RO'").await, Some(1));
+    let old = "SELECT count(*) FROM radius_acct WHERE acct_session_id = 'RO' AND opened_at < now() - interval '1 hour'";
+    assert_eq!(case.i64(old).await, Some(1));
+    case.accounting(Acct { event_ts: &s500, ..acct("Start", "RO") }).await;
+    assert!(case.session("RO", "10.0.0.2").await.is_some_and(|r| r.stopped.is_none()));
+    assert_eq!(case.i64(old).await, Some(0));
+    assert_eq!(case.i64("SELECT count(*) FROM disconnect_recheck WHERE acct_session_id = 'RO'").await, Some(0));
 }
 
 #[tokio::test]
@@ -1994,7 +2025,8 @@ async fn test_prune() {
             ("device_mac", 1),
             ("audit", 1),
             ("download", 0),
-            ("oauth_token", 0)
+            ("oauth_token", 0),
+            ("web_session", 0)
         ]
     );
     let left = case.i64(&format!("SELECT count(*) FROM device_mac WHERE device_id IN ('{dev}', '{revoked}')")).await;
@@ -2020,8 +2052,8 @@ async fn test_prune_in_batches() {
     let deleted = registry::prune(&mut case.db, None, registry::AUDIT_DAYS, 3, true).await.expect("prune");
     assert_eq!(deleted["radius_auth"], 7);
     assert_eq!(case.i64("SELECT count(*) FROM radius_auth").await, Some(1));
-    // 3 + 3 + 1 for radius_auth, at least one for each of the 6 other tables
-    assert!(case.db.commits() - commits >= 3 + 6, "{}", case.db.commits() - commits);
+    // 3 + 3 + 1 for radius_auth, at least one for each of the 7 other tables
+    assert!(case.db.commits() - commits >= 3 + 7, "{}", case.db.commits() - commits);
 }
 
 #[tokio::test]
@@ -2038,12 +2070,12 @@ async fn test_stats() {
     registry::audit(&mut case.db, "x", "disconnect:timeout", Some(d)).await.expect("audit");
     registry::audit(&mut case.db, "x", "disconnect:timeout", Some(d)).await.expect("audit");
     let s = registry::stats(&mut case.db).await.expect("stats");
-    assert_eq!((s.radius_role, s.schema_version), (true, Some(4)));
+    assert_eq!((s.radius_role, s.schema_version), (true, Some(5)));
     assert_eq!((s.active, s.revoked, s.valid_certificates, s.expiring_30d, s.expired), (4, 1, 3, 3, 1));
     assert!(s.offboarding_last_success.is_some());
     assert_eq!(
         s.disconnects_1h,
-        [("ack", 1), ("no-session", 0), ("skipped", 0), ("timeout", 2), ("nak", 0), ("error", 0)]
+        [("ack", 1), ("no-session", 0), ("skipped", 0), ("timeout", 2), ("nak", 0), ("not-found", 0), ("error", 0)]
     );
 }
 
@@ -2058,14 +2090,15 @@ async fn test_people_admin_and_policy() {
     registry::upsert_person(db, "a", "alice", "Alice", true).await.expect("person");
     assert_eq!(registry::person_state(db, "a").await.expect("state").map(|s| s.is_admin), Some(true));
     // losing the admin right ends the person's portal sessions (security review L2), once
+    let sid = registry::start_session(db, "a").await.expect("session");
     assert!(registry::set_admin(db, "a", false).await.expect("admin"));
-    let state = registry::person_state(db, "a").await.expect("state");
-    assert_eq!(state.map(|s| (s.is_admin, s.session_epoch)), Some((false, 1)));
+    assert_eq!(registry::person_state(db, "a").await.expect("state").map(|s| s.is_admin), Some(false));
+    assert_eq!(registry::session_rights(db, &sid, "a").await.expect("rights"), None);
     assert!(!registry::set_admin(db, "a", false).await.expect("admin"));
+    let sid = registry::start_session(db, "a").await.expect("session");
     assert!(!registry::set_admin(db, "a", true).await.expect("admin")); // gaining it ends nothing
-    assert_eq!(registry::person_state(db, "a").await.expect("state").map(|s| s.session_epoch), Some(1));
+    assert!(registry::session_rights(db, &sid, "a").await.expect("rights").is_some_and(|s| s.is_admin));
     registry::set_admin(db, "a", false).await.expect("admin");
-    db.tx().await.expect("tx").execute("UPDATE person SET session_epoch = 0 WHERE sub = 'a'").await.expect("reset");
     assert_eq!(registry::person_policy(db, "a").await.expect("policy"), None);
     assert_eq!(registry::person_policy(db, "nobody").await.expect("policy"), None);
     let d1 = registry::create_device(db, "a", "phone", "apple", "residents").await.expect("device");
@@ -2101,12 +2134,286 @@ async fn test_people_admin_and_policy() {
     // still checked: the owner of active devices
     assert!(registry::subjects_to_check(&mut case.db).await.expect("subjects").contains("a"));
     registry::upsert_person(&mut case.db, "a", "alice", "Alice", false).await.expect("login");
-    let state = registry::person_state(&mut case.db, "a").await.expect("state");
-    // the sessions from before the offboarding stay ended after the new login; a logout ends the new ones
-    assert_eq!(state.map(|s| s.session_epoch), Some(1));
-    registry::end_sessions(&mut case.db, "a").await.expect("logout");
-    assert_eq!(registry::person_state(&mut case.db, "a").await.expect("state").map(|s| s.session_epoch), Some(2));
+    assert!(registry::person_state(&mut case.db, "a").await.expect("state").is_some());
     let _ = d2;
+}
+
+/// The person's admin flag while this portal session lives.
+async fn rights(db: &mut Db, sid: &str, sub: &str) -> Option<bool> {
+    registry::session_rights(db, sid, sub).await.expect("rights").map(|s| s.is_admin)
+}
+
+/// Portal sessions on the server (owner's review 2026-10-29): a logout ends one, the person's
+/// other sessions stay; "log out everywhere", an offboarding and the loss of the admin right end
+/// all; 12 h after the login a session is no login; the prune and the next login remove the
+/// dead rows.
+#[tokio::test]
+async fn test_portal_sessions() {
+    let admin = need_db!();
+    let _role = RADIUS_ROLE.read().await;
+    let mut case = Case::new(&admin).await;
+    let db = &mut case.db;
+    registry::upsert_person(db, "a", "alice", "Alice", true).await.expect("person");
+    registry::upsert_person(db, "b", "bob", "Bob", false).await.expect("person");
+    let phone = registry::start_session(db, "a").await.expect("session");
+    let laptop = registry::start_session(db, "a").await.expect("session");
+    let bob = registry::start_session(db, "b").await.expect("session");
+    assert_eq!(phone.len(), 43);
+    assert_ne!(phone, laptop);
+    let stored: Vec<String> = sqlx::query_scalar("SELECT id_hash FROM web_session ORDER BY id_hash")
+        .fetch_all(db.tx().await.expect("tx"))
+        .await
+        .expect("rows");
+    assert!(!stored.contains(&phone), "only the hash is stored");
+    assert!(stored.contains(&registry::token_hash(&phone)));
+    assert_eq!(rights(db, &phone, "a").await, Some(true));
+    assert_eq!(rights(db, &phone, "b").await, None, "another person's session id");
+    assert_eq!(rights(db, &"x".repeat(43), "a").await, None);
+    // a logout ends this session only
+    assert!(registry::end_session(db, &phone).await.expect("logout"));
+    assert!(!registry::end_session(db, &phone).await.expect("logout"));
+    assert_eq!(rights(db, &phone, "a").await, None);
+    assert_eq!(rights(db, &laptop, "a").await, Some(true));
+    // log out everywhere: every session of the person, nobody else's
+    let tablet = registry::start_session(db, "a").await.expect("session");
+    assert_eq!(registry::end_sessions(db, "a").await.expect("everywhere"), 2);
+    assert_eq!((rights(db, &laptop, "a").await, rights(db, &tablet, "a").await), (None, None));
+    assert_eq!(rights(db, &bob, "b").await, Some(false));
+    // the offboarding ends them for good: a later login starts new ones, the old stay ended
+    let before = registry::start_session(db, "b").await.expect("session");
+    registry::offboard_person(db, "b").await.expect("offboard");
+    assert_eq!((rights(db, &bob, "b").await, rights(db, &before, "b").await), (None, None));
+    registry::upsert_person(db, "b", "bob", "Bob", false).await.expect("login");
+    let after = registry::start_session(db, "b").await.expect("session");
+    assert_eq!((rights(db, &before, "b").await, rights(db, &after, "b").await), (None, Some(false)));
+    // an offboarded person's live-looking row is no login either
+    db.tx().await.expect("tx").execute("UPDATE person SET offboarded_at = now() WHERE sub = 'b'").await.expect("off");
+    assert_eq!(rights(db, &after, "b").await, None);
+    db.tx().await.expect("tx").execute("UPDATE person SET offboarded_at = NULL WHERE sub = 'b'").await.expect("on");
+    // 12 h after the login, however busy
+    let fresh = registry::start_session(db, "a").await.expect("session");
+    sqlx::query("UPDATE web_session SET created_at = now() - interval '12 hours 1 second' WHERE id_hash = $1")
+        .bind(registry::token_hash(&fresh))
+        .execute(db.tx().await.expect("tx"))
+        .await
+        .expect("age");
+    assert_eq!(rights(db, &fresh, "a").await, None);
+    db.commit().await.expect("commit");
+    // a login removes the person's dead rows (the ended ones went with the later logins, the
+    // expired one now); the prune everybody's
+    assert_eq!(case.i64("SELECT count(*) FROM web_session WHERE sub = 'a'").await, Some(1));
+    let current = registry::start_session(&mut case.db, "a").await.expect("session");
+    assert_eq!(case.i64("SELECT count(*) FROM web_session WHERE sub = 'a'").await, Some(1));
+    registry::upsert_person(&mut case.db, "c", "carol", "Carol", false).await.expect("person");
+    let carol = registry::start_session(&mut case.db, "c").await.expect("session");
+    registry::end_session(&mut case.db, &carol).await.expect("logout");
+    case.commit().await;
+    let deleted =
+        registry::prune(&mut case.db, None, registry::AUDIT_DAYS, registry::PRUNE_BATCH, true).await.expect("prune");
+    assert_eq!(deleted["web_session"], 1, "carol's ended row");
+    let left: Vec<String> = sqlx::query_scalar("SELECT id_hash FROM web_session ORDER BY created_at")
+        .fetch_all(case.db.tx().await.expect("tx"))
+        .await
+        .expect("rows");
+    assert_eq!(left.len(), 2);
+    assert!(left.contains(&registry::token_hash(&current)) && left.contains(&registry::token_hash(&after)));
+    // the rows go with the person
+    case.exec("DELETE FROM person WHERE sub = 'a'").await;
+    assert_eq!(case.i64("SELECT count(*) FROM web_session WHERE sub = 'a'").await, Some(0));
+}
+
+/// radius.login with the Accept's VLAN (FreeRADIUS's 8th argument, migration 0005).
+async fn login_with_vlan(
+    case: &mut Case,
+    dev: Uuid,
+    serial: &str,
+    mac: &str,
+    nas: &str,
+    sid: &str,
+    vlan: &str,
+) -> String {
+    let token: Option<String> =
+        sqlx::query_scalar("SELECT radius.login($1, $2, $3, 'AA-BB-CC-00-00-01:Scharni', $4, $5, 'anonymous@x', $6)")
+            .bind(dev.to_string())
+            .bind(serial)
+            .bind(mac)
+            .bind(nas)
+            .bind(sid)
+            .bind(vlan)
+            .fetch_one(case.db.tx().await.expect("tx"))
+            .await
+            .expect("radius.login");
+    case.commit().await;
+    token.unwrap_or_default()
+}
+
+#[tokio::test]
+async fn test_the_login_records_the_vlan() {
+    let admin = need_db!();
+    let _role = RADIUS_ROLE.read().await;
+    let mut case = Case::new(&admin).await;
+    let (dev, serial) = case.device(None, None, false).await;
+    for (vlan, stored) in [("30", Some(30)), (" 50 ", Some(50)), ("", None), ("4095", None), ("0", None), ("3x", None)]
+    {
+        let token = login_with_vlan(&mut case, dev, &serial, "AA-BB-CC-DD-EE-01", "10.0.0.2", "", vlan).await;
+        assert!(regex_token(&token), "{vlan:?}: {token}");
+        let got: Option<i32> = sqlx::query_scalar("SELECT vlan FROM radius_auth WHERE class_token = $1")
+            .bind(&token)
+            .fetch_one(case.db.tx().await.expect("tx"))
+            .await
+            .expect("vlan");
+        assert_eq!(got, stored, "{vlan:?}");
+    }
+    // the 7-argument call of older configurations still works (no VLAN)
+    let token = case.login(dev, &serial, "AA-BB-CC-DD-EE-01", "10.0.0.2").await.unwrap_or_default();
+    assert!(regex_token(&token));
+    // a reject never has one
+    let e = sqlx::query("INSERT INTO radius_auth (result, reason, vlan) VALUES ('reject', 'other', 30)")
+        .execute(case.db.tx().await.expect("tx"))
+        .await
+        .err();
+    assert!(e.is_some());
+}
+
+/// The reconciliation's view of the accounting (owner's review 2026-10-29): only live sessions
+/// (no Stop, an update within 2 x interval + 60 s) of locked devices (revoked, the certificate no
+/// longer valid, another VLAN), locks past the grace; the entries per session settle as the
+/// round records them.
+const NAS7: &str = "10.0.0.7";
+
+/// A login with this VLAN and its accounting Start (Class echoed) at NAS7: session `s<n>` of
+/// MAC `AA-BB-CC-DD-EE-<n>`.
+async fn start(case: &mut Case, dev: Uuid, serial: &str, n: u8, vlan: &str) -> String {
+    let mac = format!("AA-BB-CC-DD-EE-{n:02X}");
+    let sid = format!("s{n}");
+    let class = login_with_vlan(case, dev, serial, &mac, NAS7, &sid, vlan).await;
+    case.accounting(Acct { class: &class, mac: &mac, nas: NAS7, ..acct("Start", &sid) }).await;
+    case.commit().await;
+    sid
+}
+
+#[tokio::test]
+async fn test_locked_live_sessions() {
+    let admin = need_db!();
+    let _role = RADIUS_ROLE.read().await;
+    let mut case = Case::new(&admin).await;
+    let nas = NAS7;
+    let (active, s0) = case.device(None, None, false).await;
+    let (revoked, s1) = case.device(None, None, false).await;
+    let (retired, s2) = case.device(None, None, false).await;
+    let (moved, s3) = case.device(None, None, false).await;
+    let (moved_unknown, s4) = case.device(None, None, false).await;
+    let (stopped, s5) = case.device(None, None, false).await;
+    let (quiet, s6) = case.device(None, None, false).await;
+    let (fresh, s7) = case.device(None, None, false).await;
+    start(&mut case, active, &s0, 0, "30").await;
+    let r = start(&mut case, revoked, &s1, 1, "30").await;
+    let c = start(&mut case, retired, &s2, 2, "30").await;
+    let v = start(&mut case, moved, &s3, 3, "30").await;
+    start(&mut case, moved_unknown, &s4, 4, "").await;
+    let st = start(&mut case, stopped, &s5, 5, "30").await;
+    start(&mut case, quiet, &s6, 6, "30").await;
+    start(&mut case, fresh, &s7, 7, "30").await;
+    let minute_ago = "now() - interval '1 minute'";
+    case.exec(&format!(
+        "UPDATE device SET created_at = now() - interval '1 day';
+         UPDATE device SET revoked_at = {minute_ago} WHERE id IN ('{revoked}', '{stopped}', '{quiet}');
+         UPDATE device SET revoked_at = now() WHERE id = '{fresh}';
+         UPDATE credential SET retired_at = {minute_ago} WHERE device_id = '{retired}';
+         UPDATE device SET policy = 'guests' WHERE id IN ('{moved}', '{moved_unknown}');
+         INSERT INTO audit (at, actor, action, device_id) VALUES
+             ({minute_ago}, 'x', 'policy:guests', '{moved}'), ({minute_ago}, 'x', 'policy:guests', '{moved_unknown}');
+         UPDATE radius_acct SET opened_at = now() - interval '5 minutes' WHERE acct_session_id = 's4';
+         UPDATE radius_acct SET updated = now() - interval '661 seconds' WHERE acct_session_id = 's6';"
+    ))
+    .await;
+    case.accounting(Acct { mac: "AA-BB-CC-DD-EE-05", nas, ..acct("Stop", &st) }).await;
+    case.commit().await;
+    let live = registry::locked_live_sessions(&mut case.db, 300, registry::RECHECK_GRACE).await.expect("live");
+    let mut got: Vec<(Uuid, &str, &str)> =
+        live.iter().map(|s| (s.device_id, s.reason.as_str(), s.acct_session_id.as_str())).collect();
+    got.sort();
+    let mut want = vec![
+        (revoked, "revoked", "s1"),
+        (retired, "credential", "s2"),
+        (moved, "vlan", "s3"),
+        (moved_unknown, "vlan", "s4"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+    // a lock younger than the grace is the locker's own Disconnect's business; the quiet session
+    // (no update for 2 x 300 + 60 s) is no longer live, with a longer interval it is
+    let all = registry::locked_live_sessions(&mut case.db, 400, time::Duration::ZERO).await.expect("live");
+    let ids: Vec<&str> = all.iter().map(|s| s.acct_session_id.as_str()).collect();
+    assert!(ids.contains(&"s7") && ids.contains(&"s6") && !ids.contains(&"s5") && !ids.contains(&"s0"), "{ids:?}");
+    // the target names that one session
+    let one = live.iter().find(|s| s.acct_session_id == r).expect("revoked");
+    let target = one.target();
+    assert_eq!(
+        (target.nas_ip.as_str(), target.calling_station.as_str(), target.acct_session_id.as_str()),
+        (nas, "AA-BB-CC-DD-EE-01", "s1")
+    );
+    let now = OffsetDateTime::now_utc();
+    assert!(live.iter().all(|s| s.due(now, 8) && s.still_live()));
+    assert_eq!(
+        registry::locked_live_counts(&mut case.db, 300).await.expect("counts"),
+        [("revoked", 1), ("credential", 1), ("vlan", 2)]
+    );
+    // results: an ACK settles, a NAK 503 settles for good, a timeout is due again later
+    let by_sid = |sid: &str| live.iter().find(|s| s.acct_session_id == sid).expect("session").clone();
+    registry::record_recheck(&mut case.db, &by_sid(&r), "ack", Some("ack"), time::Duration::seconds(30))
+        .await
+        .expect("record");
+    registry::record_recheck(&mut case.db, &by_sid(&c), "not_found", Some("not_found"), time::Duration::seconds(30))
+        .await
+        .expect("record");
+    registry::record_recheck(&mut case.db, &by_sid(&v), "timeout", None, time::Duration::seconds(30))
+        .await
+        .expect("record");
+    case.commit().await;
+    let live = registry::locked_live_sessions(&mut case.db, 300, registry::RECHECK_GRACE).await.expect("live");
+    let state = |sid: &str| live.iter().find(|s| s.acct_session_id == sid).expect("session").clone();
+    let (acked, gone, waiting) = (state(&r), state(&c), state(&v));
+    assert_eq!((acked.tries, acked.settled.as_deref()), (1, Some("ack")));
+    assert!(!acked.due(now, 8) && !acked.still_live());
+    assert!(!gone.due(now, 8) && !gone.still_live());
+    assert_eq!((waiting.tries, waiting.settled.as_deref()), (1, None));
+    assert!(
+        !waiting.due(OffsetDateTime::now_utc(), 8)
+            && waiting.due(OffsetDateTime::now_utc() + time::Duration::seconds(31), 8)
+    );
+    assert!(waiting.still_live());
+    assert_eq!(
+        registry::locked_live_counts(&mut case.db, 300).await.expect("counts"),
+        [("revoked", 0), ("credential", 0), ("vlan", 2)]
+    );
+    // the access point reports a settled session again: due again (an ACK'd one, within the
+    // cap), and live; a NAK 503 one never again
+    case.exec("UPDATE disconnect_recheck SET settled_at = now() - interval '2 minutes' WHERE settled IS NOT NULL")
+        .await;
+    case.commit().await;
+    let live = registry::locked_live_sessions(&mut case.db, 300, registry::RECHECK_GRACE).await.expect("live");
+    let state = |sid: &str| live.iter().find(|s| s.acct_session_id == sid).expect("session").clone();
+    assert!(state(&r).due(now, 8) && state(&r).still_live() && !state(&r).due(now, 1));
+    assert!(!state(&c).due(now, 8) && state(&c).still_live());
+    // a session that stops being live settles as stale; settled rows of gone sessions go after a day
+    case.accounting(Acct { mac: "AA-BB-CC-DD-EE-03", nas, ..acct("Stop", &v) }).await;
+    case.commit().await;
+    let live = registry::locked_live_sessions(&mut case.db, 300, registry::RECHECK_GRACE).await.expect("live");
+    assert_eq!(registry::settle_rechecks(&mut case.db, &live).await.expect("settle"), 1);
+    case.commit().await;
+    let settled =
+        case.i64("SELECT count(*) FROM disconnect_recheck WHERE settled = 'stale' AND acct_session_id = 's3'").await;
+    assert_eq!(settled, Some(1));
+    case.exec("UPDATE disconnect_recheck SET settled_at = now() - interval '25 hours' WHERE acct_session_id = 's3'")
+        .await;
+    case.commit().await;
+    assert_eq!(registry::settle_rechecks(&mut case.db, &live).await.expect("settle"), 0);
+    case.commit().await;
+    assert_eq!(case.i64("SELECT count(*) FROM disconnect_recheck").await, Some(2));
+    // the entries go with their accounting session
+    case.exec("DELETE FROM radius_acct WHERE acct_session_id = 's1'").await;
+    assert_eq!(case.i64("SELECT count(*) FROM disconnect_recheck").await, Some(1));
 }
 
 #[tokio::test]

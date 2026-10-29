@@ -240,7 +240,7 @@ def main():
     android_id = create_device("alice-android", "sub-alice", "residents", "android")
     apple_id = create_device("alice-apple", "sub-alice", "residents", "apple")
     eap_id = create_device("alice-eap-config", "sub-alice", "residents")
-    create_device("fia", "sub-fia", "guests")
+    fia_id = create_device("fia", "sub-fia", "guests")
     tablet = create_device("carol-tablet", "sub-carol", "guests")
 
     # --- access and what an Accept carries
@@ -267,6 +267,10 @@ def main():
           (android_class, logged))
     serial = sql("SELECT serial FROM radius_auth WHERE class_token = %s", android_class or "")
     check("... with the certificate's serial (lowercase hex)", serial == [(CERTS["alice-android"]["serial"],)], serial)
+    latest_vlan = "SELECT vlan FROM radius_auth WHERE result = 'accept' AND device_id = %s ORDER BY at DESC LIMIT 1"
+    vlans = sql(latest_vlan, android_id) + sql(latest_vlan, fia_id)
+    check("... and with the VLAN the Accept assigned (30 for alice, 50 for fia's guests' device)",
+          vlans == [(30,), (50,)], vlans)
     rows = sql("SELECT host(nas_ip), calling_station, user_name FROM radius_session WHERE device_id = %s", android_id)
     check("RADIUS records the latest session (for Disconnect)", len(rows) == 1 and rows[0][2] == "anonymous@scharni.org",
           rows)
@@ -502,7 +506,7 @@ def telemetry_checks(tablet):
         blocker.close()
 
     # --- fail open for logging, fail closed for access
-    sql("REVOKE EXECUTE ON FUNCTION radius.login(text, text, text, text, text, text, text), "
+    sql("REVOKE EXECUTE ON FUNCTION radius.login(text, text, text, text, text, text, text, text), "
         "radius.reject(text, text, text, text, text), radius.accounting(" + ", ".join(["text"] * 14) + ") FROM radius")
     before = sql("SELECT count(*) FROM radius_auth")[0][0]
     verdict = connect("carol-tablet", mac=mac)

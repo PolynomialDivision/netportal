@@ -12,10 +12,10 @@ Everything here that changes production is done by the owner, not by an agent.
 
 | Who | What |
 |---|---|
-| Residents | Every device loses the house Wi-Fi at the cutover until it is enrolled again (the Rust registry starts empty: RADIUS rejects the old certificates as `unknown_cert`). The portal asks for the (automatic) Authentik login once (new cookie format). Apple: the old profile must be removed by hand, the new one has another identifier (PARITY.md, PKI). geteduroam apps (Android, Windows, Linux, iOS): log in once more (the old grants are in the Python database). Android Passpoint: download again |
+| Residents | "Log out" ends the portal session of this browser only; "Log out everywhere" (next to it) ends all of theirs. Every device loses the house Wi-Fi at the cutover until it is enrolled again (the Rust registry starts empty: RADIUS rejects the old certificates as `unknown_cert`). The portal asks for the (automatic) Authentik login once (new cookie format). Apple: the old profile must be removed by hand, the new one has another identifier (PARITY.md, PKI). geteduroam apps (Android, Windows, Linux, iOS): log in once more (the old grants are in the Python database). Android Passpoint: download again |
 | FreeRADIUS | `radius/` against the database `netportal_rust` (schema `radius`, RADIUS_CONTRACT.md); same role `radius`, same ports, same `clients.conf`, same server certificate |
 | The PKI | unchanged: the Rust portal issues from the Python ceremony's device CA (without name constraints it serves every realm; `tests/pki.rs::test_a_device_ca_without_name_constraints_serves_every_realm`). A new ceremony is a separate decision (it would need every device enrolled again anyway, so the cutover is the cheapest moment, see "Optional: a new PKI") |
-| Monitoring | the same metric names, alert rules and dashboards (house-infra `stacks/monitoring`); new: `netportal_job_up{job="offboarding"}` and its attempt/duration gauges (the offboarding is now a recorded job); `/metrics` answers OpenMetrics to Prometheus |
+| Monitoring | the same metric names, alert rules and dashboards (house-infra `stacks/monitoring`); new: `netportal_job_up{job="offboarding"}` and its attempt/duration gauges (the offboarding is now a recorded job), the Disconnect reconciliation's `netportal_disconnect_rechecks_total{result}`, `netportal_locked_sessions_live{reason}` and `netportal_job_*{job="disconnect_recheck"}` (alert rules: PARITY.md, offboard); `/metrics` answers OpenMetrics to Prometheus, with a bearer token when `NETPORTAL_METRICS_TOKEN_FILE` is set |
 | Backups | none: `pg_dumpall` of `netaccess-db` holds both databases |
 
 ## Before the day
@@ -41,7 +41,18 @@ Everything here that changes production is done by the owner, not by an agent.
    `netaccess.implementation: rust` (`inventories/production/group_vars/all/netaccess.yml`),
    `make validate` (it also renders the `netaccess-rust` scenario), review, commit.
 5. `make secrets-init`, then `make secrets-status`: `vault_netaccess_rust_db_password`,
-   `vault_netaccess_rust_jobs_db_password`, `vault_netaccess_rust_session_secret` are set.
+   `vault_netaccess_rust_jobs_db_password`, `vault_netaccess_rust_session_secret`,
+   `vault_netaccess_rust_metrics_token` (the `/metrics` bearer token, 32 bytes or more) and
+   `vault_authentik_api_token_netportal_web` (the web app's own Authentik reader,
+   `netportal-web-reader`, view users only) are set. Deploy `authentik` first (its blueprint
+   makes that account and its token), then `monitoring` (it makes the network
+   `metrics-netportal` and gives Prometheus the bearer token), then netaccess on the day.
+   What house-infra's render gives the containers (PARITY.md, Settings): the portal
+   `NETPORTAL_AUTHENTIK_API` and `NETPORTAL_AUTHENTIK_TOKEN` (without them every admin request is
+   refused), `NETPORTAL_METRICS_LISTEN` on its fixed address in `metrics-netportal` and
+   `NETPORTAL_METRICS_TOKEN`; the offboarding sidecar `NETPORTAL_ACCT_INTERIM_S` (the same value
+   as FreeRADIUS; `NETPORTAL_DISCONNECT_RECHECK_S` stays at its 30 s). Caddy is unchanged: it
+   notices connections the portal closed after its 10 s idle limit.
 6. **Announce it** (house chat, start page), a few days ahead, with the time. Text to adapt:
 
    > On <day> at <time> the house Wi-Fi gets its new portal. Afterwards every device has to be
@@ -66,7 +77,7 @@ Everything here that changes production is done by the owner, not by an agent.
 3. `make deploy STACK=netaccess`. It builds both Rust images on the host, restarts `netaccess-db`
    once (`reserved_connections=5`), runs the one-shots `netaccess-db-init` (roles
    `netportal_rust`, `netportal_rust_jobs`, database `netportal_rust`), `netportal-init-db`
-   (`schema ready (version 3)`), `netportal-ca-key` (the CA key file), then starts `netportal`,
+   (`schema ready (version 5)`), `netportal-ca-key` (the CA key file), then starts `netportal`,
    `netportal-offboard`, `netportal-collect` and `netaccess-radius` under their old names, and
    waits for their healthchecks.
 4. The checks below, in order. Then tell the residents to enrol.
@@ -79,8 +90,9 @@ On the host unless said otherwise. `psql` as the superuser:
 1. **Containers.** `docker ps --filter label=house-infra.stack=netaccess --format '{{.Names}} {{.Status}}'`:
    the four services `healthy` (and `netaccess-db`); the one-shots exited 0
    (`docker ps -a --filter name=netaccess-db-init --filter name=netportal-init-db --filter name=netportal-ca-key --format '{{.Names}} {{.Status}}'`:
-   `Exited (0)`). `docker logs netportal-init-db`: `schema ready (version 3)`, no warning.
-   `docker logs netportal`: `listening on 0.0.0.0:8080`.
+   `Exited (0)`). `docker logs netportal-init-db`: `schema ready (version 5)`, no warning.
+   `docker logs netportal`: `listening on 0.0.0.0:8080`, `serving /metrics on ... (bearer token
+   required)`, and no `admin rights cannot be checked` warning.
 2. **Database layout.** `SELECT rolname, rolconnlimit, rolsuper FROM pg_roles WHERE rolname LIKE 'netportal%' OR rolname = 'radius';`
    (`netportal_rust` 20, `netportal_rust_jobs` 6, both `f`); `SHOW reserved_connections;` (5);
    the Python database still answers: `docker exec netaccess-db psql -U netportal -d netportal -c 'SELECT count(*) FROM device'`
@@ -92,7 +104,9 @@ On the host unless said otherwise. `psql` as the superuser:
    the Wi-Fi tiles (registry up, active devices) show values.
 4. **Portal login.** `https://wifi.<base_domain>` from the house network: the Authentik login,
    back to "My devices" (empty). As an it-admin: `/admin` opens. Log out: back to the house
-   logout page.
+   logout page. With a test admin account logged in on two browsers: "Log out everywhere" ends
+   both. Take the test account out of `it-admins` in Authentik: within 30 s `/admin` answers 403
+   and the account's portal sessions end (no offboarding round needed).
 5. **RADIUS reject.** A device still on its Python certificate tries the SSID and fails; the
    admin page "Authentication" (or
    `SELECT reason, tries FROM radius_auth ORDER BY at DESC LIMIT 5;`) shows `unknown_cert`.
@@ -106,9 +120,12 @@ On the host unless said otherwise. `psql` as the superuser:
 8. **Disconnect.** Enrol a test device, connect it, revoke it in the portal: it drops within
    seconds and cannot reconnect; `SELECT action FROM audit ORDER BY at DESC LIMIT 3;` shows
    `revoke` and `disconnect:ack`; `netportal_disconnects_last_hour{result="ack"}` is 1. A
-   `timeout` here (with the device staying online until its Session-Timeout) most likely means
-   the access points do not sign their Disconnect-ACK (Message-Authenticator, PARITY.md "PKI and
-   artefacts"): roll back or fix before residents enrol.
+   `timeout` here most likely means the access points do not sign their Disconnect-ACK
+   (Message-Authenticator, PARITY.md "PKI and artefacts"; the revoke page then says the cut was
+   not confirmed, and the log names the setting): roll back or fix before residents enrol. The
+   reconciliation: `docker logs netportal-offboard` shows no `Disconnect reconciliation failed`;
+   `SELECT last_success, cursor FROM job WHERE name = 'disconnect_recheck';` is fresh (every
+   30 s); `netportal_locked_sessions_live` is 0.
 9. **Offboarding round.** `docker logs netportal-offboard` after 15 minutes: no `offboarding failed`;
    `SELECT name, last_success, last_error FROM job WHERE name = 'offboarding';` (a fresh
    `last_success`). With a test account: take it out of `residents` in Authentik; within one
@@ -169,9 +186,20 @@ From PARITY.md; each one before residents are asked to enrol, where possible on 
 - **Disconnect with UniFi**: the Rust portal requires a Message-Authenticator in the
   Disconnect-ACK/NAK (`NETPORTAL_DAE_REQUIRE_REPLY_MESSAGE_AUTHENTICATOR`, default true);
   hostapd signs them, UniFi's build is to be confirmed: revoke a connected test device and see
-  `disconnect:ack` (check 8). If UniFi does not sign, every Disconnect ends as `timeout` and the
-  log names the setting: set it to false in house-infra (the replies are then accepted
-  unsigned).
+  `disconnect:ack` (check 8). Only if this test shows that UniFi does not sign (every
+  Disconnect ends as `timeout`, the log names the setting) set it to false in house-infra. It
+  then only lets a reply WITHOUT Message-Authenticator through: the Response Authenticator (MD5
+  keyed with the secret) is still checked, a present but wrong one is still refused, replies
+  from other addresses never reach the check, and every accepted unsigned reply is logged as a
+  warning. The damage of a forged ACK (the device keeps its association) is bounded by the
+  reconciliation: a revoked device's session that the accounting still shows live (a Start or
+  Interim-Update within two intervals, no Stop) is disconnected again by the next round after
+  the 20 s grace (every 30 s), retried while the access point keeps reporting it, and
+  `netportal_locked_sessions_live{reason="revoked"}` alerts. Also confirm that UniFi answers a
+  Disconnect-Request naming an `Acct-Session-Id` (the reconciliation's) with an ACK, and one for
+  a session it no longer has with a NAK carrying Error-Cause 503. The ignored test
+  `live_dae_server` sends one Disconnect to an access point by hand (tests/README.md, "Ignored
+  tests").
 - **EAP-TLS with the production access points** for certificates of the Rust issuer (checked
   with eapol_test against FreeRADIUS, not with UniFi): TLS 1.2 and 1.3 clients, the
   Session-Timeout, Acct-Interim-Interval and Class in the Accept, the VLAN of each policy.
@@ -183,6 +211,29 @@ From PARITY.md; each one before residents are asked to enrol, where possible on 
 
 - `build_sources.netportal_rust.commit` is the placeholder until the owner pins a pushed
   commit; `validate.py` refuses `implementation: rust` until then.
-- The HTTP server has no header-read timeout (PARITY.md "Web", open point); Caddy in front holds
-  slow clients.
+- A revoked certificate stops new authentications at once, but does not end an association the
+  access point already has: only the Disconnect-Request (or the RADIUS Session-Timeout, 12 h)
+  does. The reconciliation repeats failed Disconnects while the accounting shows the session
+  live; an access point that neither answers Disconnects nor sends accounting leaves the device
+  online until the Session-Timeout.
+- Final review 2026-10-29, accepted and left as they are (low):
+  - The portal's own Disconnects (revoke, policy move) name the MAC and User-Name, not one
+    session. An access point that answers them with NAK 503 although the device is associated
+    (another Calling-Station-Id format, another identity) makes the revoke look confirmed; the
+    reconciliation then cuts the session by its Acct-Session-Id, and
+    `netportal_locked_sessions_live` alerts while it lasts. Check with the real UniFi test.
+  - Liveness uses the access point's Event-Timestamps (`radius_acct.updated`): an access point
+    whose clock lags more than 2 x interim + 60 s (660 s at 300 s) looks silent to the
+    reconciliation. The APs keep NTP (UniFi default); watch it in the cutover checks.
+  - Disconnect targets are the NAS-IP-Address the access point sends (as before, and now also
+    from accounting). Only a holder of the RADIUS secret can name another address.
+  - A session is judged by the first Accept of its accounting session: a re-authentication
+    inside the same session (a renewed certificate) can still be cut once the old certificate
+    is retired; the device connects again.
+  - Moving a policy to another VLAN in the settings cuts every live session of that policy
+    (64 per 30 s round): plan it for a quiet hour.
+- Deploy order: the migrations before the new FreeRADIUS configuration (its `radius.login` has
+  an 8th argument). house-infra does it: `netaccess-radius` starts only after
+  `netportal-init-db` finished; the running FreeRADIUS keeps working during the migration (the
+  7-argument call still resolves).
 

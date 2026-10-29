@@ -52,7 +52,7 @@ three containers keep one image.
 
 | Need | Crate | Why |
 |---|---|---|
-| HTTP server | `axum` 0.8, `tokio`, `tower-http` | the de-facto standard; explicit routing and extractors |
+| HTTP server | `axum` 0.8, `tokio`, `tower-http`; the connections through `hyper` / `hyper-util` (axum's own dependencies) | the de-facto standard; explicit routing and extractors; hyper's connection builder for the header read timeout `axum::serve` lacks (2026-10-29) |
 | Templates | `minijinja` | Jinja2 semantics (the templates port with few changes), autoescape like markupsafe |
 | PostgreSQL | `sqlx` (runtime-checked queries, no compile-time DB) | async, pooled; builds without a database |
 | OIDC client | `openidconnect` | maintained, strict (nonce, PKCE, ID-token validation) |

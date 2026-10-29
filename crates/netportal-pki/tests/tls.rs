@@ -131,15 +131,14 @@ fn test_a_root_signed_client_certificate_fails_the_issuer_check() {
 
 /// Writes a ceremony and one eap-config artefact's PKCS#12 for a manual EAP-TLS run with
 /// eapol_test against FreeRADIUS: `NETPORTAL_PKI_EXPORT=<dir> cargo test -p netportal-pki
-/// --test tls -- --ignored export`.
+/// --test tls -- --ignored export`. Ignored because it is a tool, not a check: it writes keys
+/// into a directory of your choice (tests/README.md, "Ignored tests"); run without the setting
+/// it fails instead of passing without having written anything.
 #[test]
-#[ignore]
+#[ignore = "a tool that writes test keys: NETPORTAL_PKI_EXPORT=<dir>"]
 fn export_for_eapol_test() {
     use base64::Engine;
-    let Ok(dir) = std::env::var("NETPORTAL_PKI_EXPORT") else {
-        eprintln!("SKIPPED: NETPORTAL_PKI_EXPORT not set");
-        return;
-    };
+    let dir = std::env::var("NETPORTAL_PKI_EXPORT").expect("NETPORTAL_PKI_EXPORT=<dir> is not set");
     let dir = std::path::PathBuf::from(dir);
     let request =
         netportal_pki::ceremony::Request { name: "Test".into(), server_name: "radius.scharni.org".into(), realm: None };

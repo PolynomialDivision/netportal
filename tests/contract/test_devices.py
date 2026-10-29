@@ -263,17 +263,24 @@ class RevokeTests(ContractCase):
         self.assertEqual(A.reg.credential(self.cert)["status"], "revoked")
 
     def test_nak(self):
+        """The fake access point's NAK carries Error-Cause 503 Session-Context-Not-Found: it has no
+        such session, so nothing is left to cut (owner's review 2026-10-29: the page goes on as
+        after an ACK)."""
         A.nas.reset("nak")
         A.reg.radius_session(self.dev, self.cert)
-        self.revoke()
-        self.assertEqual(A.reg.audit(self.dev)[-1], (self.person.sub, "disconnect:nak"))
+        self.assertRedirect(self.revoke(), "/")
+        self.assertEqual(A.reg.audit(self.dev)[-1], (self.person.sub, "disconnect:not-found"))
 
     def test_timeout_retries_with_the_same_identifier(self):
         """7.1: no answer -> retransmissions with the same Identifier (RFC 5080 2.2.1), then
         timeout; the revocation stands."""
         A.nas.reset("silent")
         A.reg.radius_session(self.dev, self.cert)
-        self.revoke()
+        r = self.revoke()
+        # owner's review 2026-10-29: the page says the Disconnect was not confirmed (the device
+        # is revoked; its running session may last until the reconciliation cuts it)
+        self.assertPage(r, 200)
+        self.assertIn("did not confirm", r.text)
         packets = A.nas.received()
         self.assertGreaterEqual(len(packets), 2)
         self.assertEqual(len({p["identifier"] for p in packets}), 1)

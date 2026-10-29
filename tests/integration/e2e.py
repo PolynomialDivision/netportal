@@ -163,9 +163,14 @@ def check(name, ok, detail=""):
 
 
 def users(*people):
+    """The mock's directory (the first person logs in); a person given twice is listed once (the
+    first time), as Authentik lists everyone once (the portal refuses a uid twice)."""
+    unique = {}
+    for person in people:
+        unique.setdefault(person[0], person)
     requests.post(IDP + "/_test/users", json=[
         {"sub": sub, "username": name, "name": name.title(), "groups": groups, "active": active}
-        for sub, name, groups, active in people]).raise_for_status()
+        for sub, name, groups, active in unique.values()]).raise_for_status()
 
 
 ALICE = ("sub-alice", "alice", ["residents"], True)
@@ -636,6 +641,8 @@ def main():
     out = subprocess.run(CLI + ["offboard"], cwd=ROOT, capture_output=True, text=True)
     check("an empty Authentik answer revokes nothing (fails safe)", out.returncode != 0)
 
+    recheck_checks()
+
     # --- monitoring -----------------------------------------------------------------------
     text = requests.get(METRICS + "/metrics").text
     check("metrics: devices and certificate states", "netportal_devices{state=\"active\"}" in text
@@ -652,6 +659,81 @@ def main():
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0
+
+
+def nas_log_count(text):
+    """How often the fake access point's log (FreeRADIUS -X) shows this text."""
+    out = subprocess.run(["docker", "logs", "netportal-it-nas"], capture_output=True, text=True)
+    return (out.stdout + out.stderr).count(text)
+
+
+def recheck_checks():
+    """The Disconnect reconciliation (owner's review 2026-10-29): a revocation whose Disconnect is
+    lost (the access point does not answer) says so on the page; the sidecar's second loop
+    (offboard --every, NETPORTAL_DISCONNECT_RECHECK_S) finds the session still live in the
+    accounting and disconnects it later, naming the session; a stale record the access point
+    does not know (NAK, Error-Cause 503) is asked once and settled for good."""
+    gil = ("sub-gil", "gil", ["residents"], True)
+    g, _ = login(gil, others=(CAROL, ADMIN))
+    key, cert, chain = from_eap_config(g.get(PORTAL + enrol(g, "eap-config", "gil phone")).content)
+    write_client("gil", key, cert, chain)
+    verdict = connect("gil", mac="02:00:00:00:0a:01")
+    check("recheck: gil's phone connects (VLAN 30)", verdict == ("accept", "30"), verdict)
+    klass = reply_class() or ""
+    phone = sql("SELECT id::text FROM device WHERE owner = 'sub-gil' AND name = 'gil phone'")[0][0]
+    check("the login records the VLAN its Accept assigned",
+          sql("SELECT vlan FROM radius_auth WHERE class_token = %s", klass) == [(30,)], klass)
+    sql("UPDATE radius_session SET nas_ip = %s WHERE device_id = %s", FAKE_NAS, phone)
+    base = {"Calling-Station-Id": '"02-00-00-00-0A-01"', "Called-Station-Id": '"AA-BB-CC-00-00-01:Scharni"',
+            "Class": "0x" + klass.encode().hex()}
+    live, gone = "5E2F00000000A001", "gone-5E2F00000000A002"
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"%s"' % live})
+    accounting({**base, "Acct-Status-Type": "Start", "Acct-Session-Id": '"%s"' % gone})
+    # the access point does not answer: the revocation stands, the page says the cut is not confirmed
+    subprocess.run(["docker", "pause", "netportal-it-nas"], capture_output=True)
+    try:
+        r = g.post(PORTAL + "/devices/%s/revoke" % phone, data={"csrf": csrf(g)})
+    finally:
+        subprocess.run(["docker", "unpause", "netportal-it-nas"], capture_output=True)
+    check("recheck: a revocation whose Disconnect is lost says so on the page",
+          r.status_code == 200 and "did not confirm" in r.text, (r.status_code, r.text[-300:]))
+    check("... and the device cannot connect again", connect("gil", mac="02:00:00:00:0a:01")[0] == "reject")
+    # the access point still has the session: its next Interim-Update
+    accounting({**base, "Acct-Status-Type": "Interim-Update", "Acct-Session-Id": '"%s"' % live,
+                "Acct-Session-Time": "60"})
+    sidecar = {k: v for k, v in os.environ.items() if k not in ("NETPORTAL_AUTHENTIK_API", "NETPORTAL_AUTHENTIK_TOKEN")}
+    sidecar.update({"NETPORTAL_DISCONNECT_RECHECK_S": "2", "NETPORTAL_HEARTBEAT": str(RUN / "recheck.heartbeat")})
+    loop = subprocess.Popen(CLI + ["offboard", "--every", "3600"], cwd=ROOT, env=sidecar, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        actions = set()
+        deadline = time.time() + 60
+        while time.time() < deadline and not {"disconnect:ack", "disconnect:not-found"} <= actions:
+            time.sleep(1)
+            actions = {a for (a,) in sql("SELECT action FROM audit WHERE device_id = %s AND actor = 'recheck'", phone)}
+        time.sleep(6)                                  # three more rounds: nothing is sent again
+    finally:
+        loop.terminate()
+        try:
+            _, err = loop.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            loop.kill()
+            _, err = loop.communicate()
+    check("recheck: the sidecar disconnects the revoked device's still-live session later (ACK, audited)",
+          "disconnect:ack" in actions, (actions, err[-600:]))
+    check("... naming that one session at the access point (Acct-Session-Id)",
+          nas_log_count('Acct-Session-Id = "%s"' % live) >= 1, nas_log_count('Acct-Session-Id = "%s"' % live))
+    states = dict(sql("SELECT acct_session_id, settled FROM disconnect_recheck WHERE device_id = %s", phone))
+    check("... a stale record the access point does not know (NAK 503) is asked once and settled for good",
+          states.get(gone) == "not_found" and nas_log_count('Acct-Session-Id = "%s"' % gone) == 1,
+          (states, nas_log_count('Acct-Session-Id = "%s"' % gone)))
+    check("... and the ACK settles the live one", states.get(live) == "ack", states)
+    check("the sidecar's loops stop on SIGTERM (exit 0)", loop.returncode == 0, (loop.returncode, err[-300:]))
+    check("metrics: the reconciliation's totals and no revoked device left connected",
+          (metric('netportal_disconnect_rechecks_total{result="ack"}') or 0) >= 1
+          and (metric('netportal_disconnect_rechecks_total{result="not_found"}') or 0) >= 1
+          and metric('netportal_locked_sessions_live{reason="revoked"}') == 0,
+          [metric('netportal_disconnect_rechecks_total{result="%s"}' % r) for r in ("ack", "not_found")])
 
 
 def presence_of(portal, device_id, etag=None):
@@ -828,7 +910,7 @@ def telemetry_checks(tablet, portal=None):
         blocker.close()
 
     # --- fail open for logging, fail closed for access --------------------------------------
-    sql("REVOKE EXECUTE ON FUNCTION radius.login(text, text, text, text, text, text, text), "
+    sql("REVOKE EXECUTE ON FUNCTION radius.login(text, text, text, text, text, text, text, text), "
         "radius.reject(text, text, text, text, text), radius.accounting(" + ", ".join(["text"] * 14) + ") FROM radius")
     before = sql("SELECT count(*) FROM radius_auth")[0][0]
     verdict = connect("carol-tablet", mac=mac)

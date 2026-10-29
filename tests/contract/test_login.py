@@ -3,7 +3,8 @@ rights read from the registry on every request (4.3)."""
 
 import urllib.parse
 
-from harness import (A, B, IDP, ContractCase, Person, admin_person, enrol, idp_users, newest_device, resident)
+from harness import (A, B, IDP, ContractCase, Person, admin_person, enrol, idp_directory, idp_users, newest_device,
+                     resident)
 
 
 def split(location):
@@ -249,22 +250,93 @@ class LogoutTests(ContractCase):
         r = b.post("/logout", data={"csrf": b.csrf()})
         self.assertEqual(r.headers.get("Location"), A.env["NETPORTAL_LOGOUT_URL"])
 
+    def test_logout_ends_only_this_session(self):
+        """Owner's review 2026-10-29: a logout ends this session (copies of its cookie too); the
+        person's other sessions stay."""
+        p = resident("one")
+        phone, laptop = A.browser().logged_in(p), A.browser().logged_in(p)
+        copy = dict(phone.cookies)
+        r = phone.post("/logout", data={"csrf": phone.csrf()})
+        self.assertEqual(r.headers["Location"], A.env["NETPORTAL_LOGOUT_URL"])
+        self.assertToLogin(phone.get("/"))
+        stolen = A.browser()
+        stolen.cookies.update(copy)
+        self.assertToLogin(stolen.get("/"))
+        self.assertEqual(laptop.get("/").status_code, 200)
+
+    def test_logout_everywhere(self):
+        """POST /logout/all (CSRF): every session of the person ends, this one too, then to the
+        house's logout; other people's stay."""
+        p, other = resident("all"), resident("allo")
+        phone, laptop = A.browser().logged_in(p), A.browser().logged_in(p)
+        someone = A.browser().logged_in(other)
+        self.assertIn('action="/logout/all"', phone.get("/").text)
+        self.assertPage(phone.post("/logout/all"), 400)
+        r = phone.post("/logout/all", data={"csrf": phone.csrf()})
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(r.headers["Location"], A.env["NETPORTAL_LOGOUT_URL"])
+        self.assertToLogin(phone.get("/"))
+        self.assertToLogin(laptop.get("/"))
+        self.assertJsonError(laptop.get("/api/devices"), 401, "login_required")
+        self.assertEqual(someone.get("/").status_code, 200)
+
 
 class RegistryRightsTests(ContractCase):
     """INVENTORY 4.3: admin and "still a person" are read from the registry on every request;
-    the cookie carries no rights."""
+    the cookie carries no rights. Owner's review 2026-10-29: the registry's admin flag grants
+    nothing by itself, every request that uses admin rights asks Authentik's users API (a
+    confirmation counts 30 s)."""
+
+    def tearDown(self):
+        idp_directory(reset=True)
 
     def test_admin_granted_and_taken_between_requests(self):
         p = resident("adm")
         b = A.browser().logged_in(p)
         self.assertPage(b.get("/admin"), 403)
         self.assertJsonError(b.get("/api/admin/devices"), 403, "forbidden")
+        # the registry alone: Authentik does not confirm it, the flag is cleared, the session ends
+        A.reg.set_admin(p.sub, True)
+        self.assertPage(b.get("/admin"), 403)
+        self.assertFalse(A.reg.person(p.sub)["admin"])
+        self.assertToLogin(b.get("/"))
+        # the registry and Authentik: admin
+        b = A.browser().logged_in(p)
+        idp_directory(override={p.sub: p.json(groups=["residents", "it-admins"])})
         A.reg.set_admin(p.sub, True)
         self.assertPage(b.get("/admin"), 200)
         self.assertEqual(b.get("/api/admin/devices").status_code, 200)
         A.reg.set_admin(p.sub, False)
         self.assertPage(b.get("/admin"), 403)
         self.assertJsonError(b.get("/api/admin/overview"), 403, "forbidden")
+
+    def test_out_of_the_admin_group_in_authentik_refuses_the_next_admin_request(self):
+        """Without an offboarding round: the next admin request (also a script's direct API call)
+        is refused, the registry's flag cleared, every session of the person ends."""
+        for path, json_api in (("/admin", False), ("/api/admin/devices", True)):
+            with self.subTest(path=path):
+                p = admin_person("gone")
+                b, other = A.browser().logged_in(p), A.browser().logged_in(p)
+                idp_directory(override={p.sub: p.json(groups=["residents"])})
+                r = b.get(path)
+                if json_api:
+                    self.assertJsonError(r, 403, "forbidden")
+                else:
+                    self.assertPage(r, 403)
+                self.assertFalse(A.reg.person(p.sub)["admin"])
+                self.assertToLogin(other.get("/"))
+
+    def test_authentik_failing_refuses_admin_requests_only(self):
+        p = admin_person("down")
+        b = A.browser().logged_in(p)
+        idp_directory(fail=500)
+        try:
+            self.assertPage(b.get("/admin"), 503)
+            self.assertJsonError(b.get("/api/admin/overview"), 503, "unavailable")
+            self.assertEqual(b.get("/").status_code, 200)
+            self.assertTrue(A.reg.person(p.sub)["admin"])
+        finally:
+            idp_directory(fail=None)
 
     def test_admin_from_the_groups_is_not_in_the_cookie(self):
         """An it-admins login whose registry row loses admin has no admin rights from then on."""

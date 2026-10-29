@@ -33,6 +33,9 @@ axum-extra = { version = "0.12", features = ["cookie-private", "typed-header"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "fs", "process", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["fs", "set-header"] }
+# the server's connections (header read timeout, graceful shutdown): what axum::serve uses inside
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "service", "http1"] }
 http = "1"
 bytes = "1"
 futures = "0.3"

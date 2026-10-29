@@ -18,8 +18,12 @@ const LOG: &str = "netportal.disconnect";
 pub enum DisconnectResult {
     /// Disconnect-ACK with a valid Response Authenticator
     Ack,
-    /// Disconnect-NAK (no such session at the access point, ...)
+    /// Disconnect-NAK (the access point refused: an attribute, the NAS, ...)
     Nak,
+    /// Disconnect-NAK with Error-Cause 503 Session-Context-Not-Found: the access point has no
+    /// such session (`not-found`, not `nak`: the alert on failed Disconnects must not fire for a
+    /// device that is simply not connected, e.g. after an access point restarted)
+    NotFound,
     /// no valid answer after every try
     Timeout,
     /// not sent: no IPv4 address, unreachable network, ...
@@ -31,12 +35,13 @@ pub enum DisconnectResult {
 }
 
 impl DisconnectResult {
-    pub const ALL: [DisconnectResult; 6] = [
+    pub const ALL: [DisconnectResult; 7] = [
         DisconnectResult::Ack,
         DisconnectResult::NoSession,
         DisconnectResult::Skipped,
         DisconnectResult::Timeout,
         DisconnectResult::Nak,
+        DisconnectResult::NotFound,
         DisconnectResult::Error,
     ];
 
@@ -45,11 +50,19 @@ impl DisconnectResult {
         match self {
             DisconnectResult::Ack => "ack",
             DisconnectResult::Nak => "nak",
+            DisconnectResult::NotFound => "not-found",
             DisconnectResult::Timeout => "timeout",
             DisconnectResult::Error => "error",
             DisconnectResult::Skipped => "skipped",
             DisconnectResult::NoSession => "no-session",
         }
+    }
+
+    /// Whether the session is known to be gone: an ACK, the access point has no such session,
+    /// or there was none to cut. Anything else leaves the device possibly connected until the
+    /// reconciliation or the RADIUS Session-Timeout ends it.
+    pub fn confirmed(self) -> bool {
+        matches!(self, DisconnectResult::Ack | DisconnectResult::NotFound | DisconnectResult::NoSession)
     }
 }
 
@@ -86,6 +99,7 @@ impl Disconnector for RadiusDisconnector {
             nas_ip: session.nas_ip.clone(),
             calling_station: session.calling_station.clone(),
             user_name: session.user_name.clone(),
+            acct_session_id: session.acct_session_id.clone(),
         };
         let outcome = netportal_pki::disconnect::disconnect(Some(&session), self.dae.as_ref()).await;
         result_of(&session.nas_ip, &outcome)
@@ -105,7 +119,11 @@ fn result_of(nas_ip: &str, outcome: &Outcome) -> DisconnectResult {
                     cause.name().unwrap_or("")
                 );
             }
-            DisconnectResult::Nak
+            if *error_cause == Some(netportal_pki::disconnect::SESSION_CONTEXT_NOT_FOUND) {
+                DisconnectResult::NotFound
+            } else {
+                DisconnectResult::Nak
+            }
         }
         Outcome::Timeout => DisconnectResult::Timeout,
         Outcome::Error(e) => {
@@ -134,6 +152,7 @@ mod tests {
             nas_ip: "192.0.2.1".into(),
             calling_station: "02-00-00-00-00-01".into(),
             user_name: "anonymous@example.org".into(),
+            acct_session_id: String::new(),
         };
         assert_eq!(d.disconnect(&session).await, DisconnectResult::Skipped);
     }
@@ -152,6 +171,15 @@ mod tests {
         ] {
             assert_eq!(result_of("192.0.2.1", &outcome).as_str(), outcome.label());
         }
+        // 503 Session-Context-Not-Found is told apart (the reconciliation settles on it)
+        assert_eq!(
+            result_of("192.0.2.1", &Outcome::Nak { error_cause: Some(ErrorCause(503)) }),
+            DisconnectResult::NotFound
+        );
+        assert_eq!(result_of("192.0.2.1", &Outcome::Nak { error_cause: Some(ErrorCause(404)) }), DisconnectResult::Nak);
+        let confirmed: Vec<bool> = DisconnectResult::ALL.iter().map(|r| r.confirmed()).collect();
+        assert_eq!(confirmed, [true, true, false, false, false, true, false]);
+        assert!(DisconnectResult::NotFound.confirmed());
     }
 
     #[tokio::test]
@@ -166,6 +194,7 @@ mod tests {
             nas_ip: "127.0.0.1".into(),
             calling_station: "02-00-00-00-00-01".into(),
             user_name: "anonymous@example.org".into(),
+            acct_session_id: String::new(),
         };
         let listen = tokio::spawn(async move {
             let mut buf = [0u8; 4096];
@@ -188,6 +217,7 @@ mod tests {
             nas_ip: "fe80::1".into(),
             calling_station: "02-00-00-00-00-01".into(),
             user_name: "u".into(),
+            acct_session_id: String::new(),
         };
         assert_eq!(d.disconnect(&session).await, DisconnectResult::Error);
     }

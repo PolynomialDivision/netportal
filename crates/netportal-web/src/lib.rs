@@ -4,7 +4,9 @@
 //!
 //! - [`web`]: the application state, the route table, `netportal serve`;
 //! - [`pipeline`]: the request pipeline (session, CSRF, errors, security headers);
+//! - [`server`]: the connections (header read timeout, graceful shutdown);
 //! - [`session`], [`ctx`], [`clock`]: the session cookie, the request context, the clock;
+//! - [`rights`]: the live check of admin rights with Authentik;
 //! - [`login`], [`oidc`]: the login with Authentik;
 //! - [`dashboard`], [`devices`], [`letswifi`], [`ops`], [`static_files`]: the handlers;
 //! - [`limits`]: devices and certificates per person;
@@ -26,6 +28,8 @@ pub mod ops;
 pub mod pipeline;
 pub mod platform;
 pub mod render;
+pub mod rights;
+pub mod server;
 pub mod session;
 pub mod static_files;
 pub mod web;

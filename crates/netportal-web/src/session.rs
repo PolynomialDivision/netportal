@@ -13,14 +13,17 @@
 //!   in the future ends it too). A logged-in cookie also expires in the browser [`IDLE_S`] after
 //!   the last request (`Max-Age`, re-sent with every response); before the login it is a
 //!   browser-session cookie.
-//! - Every login gets a new session (new CSRF token, nothing carried over); a logout and an
-//!   offboarding move the person's session epoch on (registry `end_sessions`,
-//!   `offboard_person`), so the cookies of earlier logins stop working everywhere, also copies
-//!   and responses still in flight that set them again.
+//! - Every login gets a new session (new CSRF token, nothing carried over) and a row of its own
+//!   on the server (registry `web_session`, the cookie carries its random id; only the id's
+//!   SHA-256 is stored). Every request that resolves the login asks for that row, so ending it
+//!   ends the cookie and every copy of it (responses still in flight that would set it again
+//!   too): a logout ends its own session (`end_session`), "log out everywhere", an offboarding
+//!   and the loss of the admin right end every session of the person (`end_sessions`).
 //!
-//! The cookie carries who it is (sub, names), the login's times and epoch, the CSRF token, where
-//! the login goes back to and the pending OIDC logins (state, nonce, PKCE verifier); never a
-//! right: admin comes from the registry on every request.
+//! The cookie carries who it is (sub, names), the login's times and session id, the CSRF token,
+//! where the login goes back to and the pending OIDC logins (state, nonce, PKCE verifier); never
+//! a right: admin comes from the registry on every request, and is checked with Authentik
+//! wherever it is used ([`crate::rights`]).
 
 use axum::http::HeaderMap;
 use axum_extra::extract::cookie::{Cookie, CookieJar, Key, PrivateCookieJar, SameSite};
@@ -32,14 +35,15 @@ use subtle::ConstantTimeEq;
 
 /// A login ends this long after the last request (seconds).
 pub const IDLE_S: i64 = 8 * 3600;
-/// ... and this long after the login, however busy (seconds).
-pub const MAX_S: i64 = 12 * 3600;
+/// ... and this long after the login, however busy (seconds; the registry's session rows end
+/// then too).
+pub const MAX_S: i64 = netportal_core::registry::SESSION_LIFETIME.whole_seconds();
 /// A started login (Authentik's form) must come back within this time (seconds).
 pub const PENDING_LOGIN_S: i64 = 20 * 60;
 /// Logins started at once (several tabs) that may be pending together.
 pub const PENDING_LOGINS: usize = 4;
-/// The session format; another version is no session.
-const VERSION: u32 = 1;
+/// The session format; another version is no session (2: the server-side session id).
+const VERSION: u32 = 2;
 /// Cookies above this size are not set reliably; pending logins go first.
 const MAX_COOKIE_JSON: usize = 2800;
 
@@ -78,8 +82,8 @@ pub struct Login {
     pub login_at: i64,
     /// Unix seconds of the latest request (the idle limit)
     pub seen_at: i64,
-    /// the person's session epoch at the login (registry `person.session_epoch`)
-    pub epoch: i64,
+    /// the id of the login's row on the server (registry `web_session`)
+    pub sid: String,
 }
 
 impl Login {
@@ -114,18 +118,29 @@ pub struct Session {
     pub next: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<PendingLogin>,
+    /// this request only (never in the cookie): the server row of a login [`Session::end_login`]
+    /// dropped (idle or too old), so a logout or a new login still ends it on the server
+    #[serde(skip)]
+    pub ended_sid: Option<String>,
 }
 
 impl Session {
     /// A new anonymous session with a new CSRF token.
     pub fn new() -> Session {
-        Session { v: VERSION, csrf: random_token(), login: None, next: None, pending: Vec::new() }
+        Session { v: VERSION, csrf: random_token(), login: None, next: None, pending: Vec::new(), ended_sid: None }
     }
 
     /// The login ends (stale, offboarded, unknown): the CSRF token stays, so a form sent now goes
     /// through the login instead of into a CSRF error.
     pub fn end_login(&mut self) {
-        self.login = None;
+        if let Some(login) = self.login.take() {
+            self.ended_sid = Some(login.sid);
+        }
+    }
+
+    /// The server row of this cookie's login, alive or just dropped by [`Session::end_login`].
+    pub fn login_sid(&self) -> Option<String> {
+        self.login.as_ref().map(|l| l.sid.clone()).or_else(|| self.ended_sid.clone())
     }
 
     /// Remember a started login (the newest few; older and expired ones go).
@@ -256,8 +271,14 @@ mod tests {
             assert!(set.contains(attr), "{set}");
         }
         assert!(!set.contains("Domain") && !set.contains("Max-Age"), "{set}");
-        session.login =
-            Some(Login { sub: "s".into(), username: "u".into(), name: "n".into(), login_at: 1, seen_at: 1, epoch: 0 });
+        session.login = Some(Login {
+            sub: "s".into(),
+            username: "u".into(),
+            name: "n".into(),
+            login_at: 1,
+            seen_at: 1,
+            sid: random_token(),
+        });
         let response = https.write(&mut session).expect("cookie").into_response();
         let set = response.headers()[header::SET_COOKIE].to_str().expect("ascii").to_string();
         assert!(set.contains("Max-Age=28800"), "{set}");
@@ -290,7 +311,7 @@ mod tests {
             name: "n".into(),
             login_at,
             seen_at,
-            epoch: 0,
+            sid: "x".into(),
         };
         assert!(login(now - 60, now - 60).fresh(now));
         assert!(login(now - MAX_S + 1, now - 10).fresh(now));

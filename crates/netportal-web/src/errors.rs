@@ -116,6 +116,7 @@ pub fn status_code_name(status: StatusCode) -> &'static str {
         403 => "forbidden",
         404 => "not_found",
         405 => "method_not_allowed",
+        408 => "request_timeout",
         409 => "conflict",
         413 => "too_large",
         429 => "too_many_requests",

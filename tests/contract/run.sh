@@ -80,7 +80,10 @@ printf 'ct-session-secret-b-of-at-least-32-bytes\n' > "$run/secrets/session-secr
 printf 'ct-oidc-secret\n' > "$run/secrets/oidc-client-secret"
 printf 'ct-dae-secret-b\n' > "$run/secrets/dae-secret"
 printf 'mock-reader-token\n' > "$run/secrets/authentik-token"
+printf 'ct-metrics-token-b-of-at-least-32-bytes\n' > "$run/secrets/metrics-token"
 chmod 0600 "$run"/secrets/*
+# read-only, as house-infra mounts it for the container's user
+chmod 0400 "$run/secrets/metrics-token"
 
 # The instances' environments, one KEY=VALUE per line (no quoting: env -i gets each line as is).
 common() {
@@ -135,6 +138,7 @@ NETPORTAL_AUTHENTIK_TOKEN_FILE=$run/secrets/authentik-token
 NETPORTAL_PASSPOINT=false
 NETPORTAL_HEARTBEAT=$run/heartbeat-b
 NETPORTAL_METRICS_LISTEN=127.0.0.1:$METRICS_B
+NETPORTAL_METRICS_TOKEN_FILE=$run/secrets/metrics-token
 EOF
 } > "$run/env-b"
 

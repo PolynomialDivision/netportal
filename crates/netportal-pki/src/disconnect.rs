@@ -5,24 +5,35 @@
 //! Small on purpose (no RADIUS library): one request, retransmitted unchanged, one answer.
 //!
 //! * **Request.** Code 40, a random identifier, attributes `Message-Authenticator (80)` (first),
-//!   `User-Name (1)` and `Calling-Station-Id (31)` as the access point recorded them (left out
-//!   when empty: RFC 2865 5 forbids zero-length values), `NAS-IP-Address (4)`, `Event-Timestamp
-//!   (55)` (hostapd drops a request outside its 300 s window and, with
-//!   `radius_das_require_event_timestamp`, one without it). Message-Authenticator is HMAC-MD5 over
+//!   `User-Name (1)` and `Calling-Station-Id (31)` as the access point recorded them,
+//!   `Acct-Session-Id (44)` when the request is for one accounting session (the reconciliation's:
+//!   hostapd then cuts only that session and answers a NAK with Error-Cause 503 when it has no
+//!   such session) (each left out when empty: RFC 2865 5 forbids zero-length values),
+//!   `NAS-IP-Address (4)`, `Event-Timestamp (55)` (hostapd drops a request outside its 300 s
+//!   window and, with `radius_das_require_event_timestamp`, one without it). Message-Authenticator is HMAC-MD5 over
 //!   the packet with the authenticator field and its own value zeroed (RFC 5176 3.3, RFC 3579
 //!   3.2); the Request Authenticator is MD5(Code, Identifier, Length, 16 zero octets,
 //!   Attributes, Secret) over the final attributes (RFC 5176 2.3). Message-Authenticator is the
 //!   first attribute, as the BlastRADIUS mitigations recommend for every packet (hostapd and
 //!   FreeRADIUS put it first in their own replies; its position does not matter to a receiver).
 //! * **Replies** are accepted only from the NAS address and port the request went to (connected
-//!   socket), with the same identifier, code 41 or 42, a valid Response Authenticator (MD5(Code,
-//!   Identifier, Length, Request Authenticator, Attributes, Secret)), well-formed attributes and a
-//!   valid Message-Authenticator (computed with the Request Authenticator in the authenticator
-//!   field). A reply without Message-Authenticator is refused unless
-//!   [`DaeConfig::require_reply_message_authenticator`] is off: hostapd (`radius_das.c`, every
-//!   UniFi access point) always adds one to Disconnect-ACK/NAK. Anything else is ignored and the
-//!   wait goes on, so a forged or stale datagram cannot end it. The Python version checked the
-//!   Response Authenticator only.
+//!   socket: the kernel drops datagrams from any other source), with the same identifier, code
+//!   41 or 42, a valid Response Authenticator (MD5(Code, Identifier, Length, Request
+//!   Authenticator, Attributes, Secret)), well-formed attributes and a valid Message-Authenticator
+//!   (computed with the Request Authenticator in the authenticator field; at most one). Anything
+//!   else is ignored and the wait goes on, so a forged or stale datagram cannot end it. These
+//!   checks hold whatever the configuration says. The Python version checked the Response
+//!   Authenticator only.
+//! * **The one setting** [`DaeConfig::require_reply_message_authenticator`]
+//!   (`NETPORTAL_DAE_REQUIRE_REPLY_MESSAGE_AUTHENTICATOR`, default on) only decides whether a
+//!   reply WITHOUT Message-Authenticator is accepted. hostapd (`radius_das.c`, every UniFi access
+//!   point) adds one to every Disconnect-ACK/NAK, so it stays on; turn it off only after the test
+//!   against the real UniFi access points (docs/CUTOVER.md) showed that they do not sign. With it
+//!   off, a reply without one still needs its Response Authenticator (keyed MD5 with the secret),
+//!   a present but wrong or doubled one is still refused, and every accepted unsigned reply is
+//!   logged as a warning. The damage of a forged ACK (the device keeps its session) is bounded by
+//!   the reconciliation (`netportal_offboard::recheck`): a revoked device's session that is still
+//!   live in accounting is disconnected again.
 //! * **Timing.** 2 s per try, 3 tries (RFC 5080 2.2.1: retransmissions keep the identifier and
 //!   the authenticator), then `timeout`.
 //! * **Result.** [`Outcome`]: `ack`, `nak` (with the Error-Cause, RFC 5176 3.6), `timeout`,
@@ -46,6 +57,7 @@ pub const DISCONNECT_NAK: u8 = 42;
 pub const USER_NAME: u8 = 1;
 pub const NAS_IP_ADDRESS: u8 = 4;
 pub const CALLING_STATION_ID: u8 = 31;
+pub const ACCT_SESSION_ID: u8 = 44;
 pub const EVENT_TIMESTAMP: u8 = 55;
 pub const MESSAGE_AUTHENTICATOR: u8 = 80;
 pub const ERROR_CAUSE: u8 = 101;
@@ -53,7 +65,7 @@ pub const ERROR_CAUSE: u8 = 101;
 /// RFC 2865 3: the largest RADIUS packet.
 const MAX_PACKET: usize = 4096;
 
-/// The latest RADIUS session of a device, as `radius_session` stores it.
+/// A RADIUS session of a device, as the registry knows it (`radius_session`, `radius_acct`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
     /// NAS-IP-Address (or the packet source) of the access point
@@ -62,6 +74,9 @@ pub struct Session {
     pub calling_station: String,
     /// the outer User-Name
     pub user_name: String,
+    /// the accounting session's Acct-Session-Id to cut only that session; empty: every session
+    /// of the MAC
+    pub acct_session_id: String,
 }
 
 /// Where and how Disconnect-Requests go (`NETPORTAL_DAE_SECRET`, `NETPORTAL_DAE_PORT`).
@@ -161,10 +176,13 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The audit (`disconnect:<label>`) and metric label, as in the Python version.
+    /// The audit (`disconnect:<label>`) and metric label, as in the Python version, except
+    /// `not-found` (a NAK with Error-Cause 503: the access point has no such session), which
+    /// Python counted as `nak`.
     pub fn label(&self) -> &'static str {
         match self {
             Outcome::Ack => "ack",
+            Outcome::Nak { error_cause: Some(SESSION_CONTEXT_NOT_FOUND) } => "not-found",
             Outcome::Nak { .. } => "nak",
             Outcome::Timeout => "timeout",
             Outcome::Error(_) => "error",
@@ -204,12 +222,13 @@ fn attr(out: &mut Vec<u8>, kind: u8, value: &[u8], name: &'static str) -> Result
     Ok(())
 }
 
-/// The Disconnect-Request packet (deterministic for given inputs).
+/// The Disconnect-Request packet (deterministic for given inputs); empty values are left out.
 pub fn build_request(
     identifier: u8,
     secret: &[u8],
     user_name: &str,
     calling_station: &str,
+    acct_session_id: &str,
     nas_ip: Ipv4Addr,
     event_timestamp: u32,
 ) -> Result<Vec<u8>, DisconnectError> {
@@ -221,9 +240,12 @@ pub fn build_request(
     if !calling_station.is_empty() {
         attr(&mut attrs, CALLING_STATION_ID, calling_station.as_bytes(), "Calling-Station-Id")?;
     }
+    if !acct_session_id.is_empty() {
+        attr(&mut attrs, ACCT_SESSION_ID, acct_session_id.as_bytes(), "Acct-Session-Id")?;
+    }
     attr(&mut attrs, NAS_IP_ADDRESS, &nas_ip.octets(), "NAS-IP-Address")?;
     attr(&mut attrs, EVENT_TIMESTAMP, &event_timestamp.to_be_bytes(), "Event-Timestamp")?;
-    let length = 20 + attrs.len(); // at most 20 + 18 + 2 * 255 + 6 + 6, far below 4096
+    let length = 20 + attrs.len(); // at most 20 + 18 + 3 * 255 + 6 + 6, far below 4096
     let header = [DISCONNECT_REQUEST, identifier, (length >> 8) as u8, length as u8];
     let ma = hmac_md5(secret, &[&header, &[0; 16], &attrs]);
     attrs[2..18].copy_from_slice(&ma);
@@ -252,14 +274,22 @@ pub fn parse_attributes(data: &[u8]) -> Option<Vec<(u8, &[u8])>> {
 pub struct Reply {
     pub code: u8,
     pub error_cause: Option<ErrorCause>,
+    /// it carried a (valid) Message-Authenticator; `false` only when the check allowed a reply
+    /// without one
+    pub signed: bool,
 }
+
+/// Error-Cause 503 Session-Context-Not-Found (RFC 5176 3.6): the access point has no such
+/// session.
+pub const SESSION_CONTEXT_NOT_FOUND: ErrorCause = ErrorCause(503);
 
 /// [`check_reply`]'s refusal of a reply whose Response Authenticator is right but which carries
 /// no Message-Authenticator (while one is required).
 pub const NO_MESSAGE_AUTHENTICATOR: &str = "no Message-Authenticator";
 
 /// Checks a datagram against the request it should answer (see the module docs); the error
-/// says why it was ignored.
+/// says why it was ignored. `require_message_authenticator` only decides about a reply without
+/// Message-Authenticator; every other check is unconditional.
 pub fn check_reply(
     datagram: &[u8],
     request: &[u8],
@@ -311,7 +341,7 @@ pub fn check_reply(
         .iter()
         .find(|(kind, value)| *kind == ERROR_CAUSE && value.len() == 4)
         .map(|(_, v)| ErrorCause(u32::from_be_bytes([v[0], v[1], v[2], v[3]])));
-    Ok(Reply { code, error_cause })
+    Ok(Reply { code, error_cause, signed: ma_seen })
 }
 
 /// Sends a Disconnect-Request for a stored session and waits for its answer.
@@ -328,6 +358,16 @@ pub async fn disconnect(session: Option<&Session>, dae: Option<&DaeConfig>) -> O
     outcome
 }
 
+/// Every reply accepted without Message-Authenticator (the requirement is off) is logged: its
+/// only protection is the Response Authenticator.
+fn unsigned_reply_accepted(nas: Ipv4Addr) {
+    tracing::warn!(
+        target: "netportal.disconnect",
+        "accepted a Disconnect reply from {nas} without Message-Authenticator \
+         (NETPORTAL_DAE_REQUIRE_REPLY_MESSAGE_AUTHENTICATOR=false; only its Response Authenticator was checked)"
+    );
+}
+
 fn io_error(e: std::io::Error) -> Outcome {
     Outcome::Error(DisconnectError::Io(e.to_string()))
 }
@@ -340,11 +380,18 @@ async fn send(session: &Session, dae: &DaeConfig, event_timestamp: u32) -> Outco
     if let Err(e) = openssl::rand::rand_bytes(&mut id) {
         return Outcome::Error(DisconnectError::Io(e.to_string()));
     }
-    let packet =
-        match build_request(id[0], &dae.secret, &session.user_name, &session.calling_station, nas, event_timestamp) {
-            Ok(packet) => packet,
-            Err(e) => return Outcome::Error(e),
-        };
+    let packet = match build_request(
+        id[0],
+        &dae.secret,
+        &session.user_name,
+        &session.calling_station,
+        &session.acct_session_id,
+        nas,
+        event_timestamp,
+    ) {
+        Ok(packet) => packet,
+        Err(e) => return Outcome::Error(e),
+    };
     let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
         Ok(socket) => socket,
         Err(e) => return io_error(e),
@@ -369,8 +416,15 @@ async fn send(session: &Session, dae: &DaeConfig, event_timestamp: u32) -> Outco
                 Ok(Err(e)) => return io_error(e),
                 Ok(Ok(n)) => {
                     match check_reply(&buf[..n], &packet, &dae.secret, dae.require_reply_message_authenticator) {
-                        Ok(reply) if reply.code == DISCONNECT_ACK => return Outcome::Ack,
-                        Ok(reply) => return Outcome::Nak { error_cause: reply.error_cause },
+                        Ok(reply) => {
+                            if !reply.signed {
+                                unsigned_reply_accepted(nas);
+                            }
+                            if reply.code == DISCONNECT_ACK {
+                                return Outcome::Ack;
+                            }
+                            return Outcome::Nak { error_cause: reply.error_cause };
+                        }
                         // a reply that is right in everything but its missing signature: the
                         // access point does not sign; say so, or every revocation reads `timeout`
                         Err(NO_MESSAGE_AUTHENTICATOR) => tracing::warn!(

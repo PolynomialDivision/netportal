@@ -10,7 +10,8 @@
 //! 2. [`pipeline::shed`]: at most `NETPORTAL_MAX_REQUESTS` requests at once; one more is
 //!    answered 503 at once (load shedding: a flood cannot queue up work; `/healthz` is not
 //!    counted);
-//! 3. a timeout (60 s: the request is answered 503) and a body limit (64 KiB: 413);
+//! 3. a timeout (60 s: the request is answered 503) and the whole body read within 10 s (408) and
+//!    at most 64 KiB (413) ([`pipeline::read_body`]);
 //! 4. routing: exact paths (no trailing-slash redirects; `/api/eap-config` is served without the
 //!    slash too, for apps that drop it), device ids only in the canonical UUID form, the method
 //!    decided here (a POST to a GET-only route is 405, never a CSRF error);
@@ -19,9 +20,16 @@
 //!    POST; afterwards the rendering of rejections and the session cookie. The machine endpoints
 //!    (`/oauth/token`, `/api/eap-config/`, discovery, `/healthz`, static files) have no session
 //!    and no cookie;
-//! 6. the handler: a registry connection from the process's pool ([`App::registry`], [`Reg`])
+//! 6. on the admin routes ([`Gate::Admin`]) [`pipeline::admin_gate`]: the login and the admin right
+//!    checked live with Authentik ([`crate::rights`]) before the handler, which takes the
+//!    [`crate::ctx::Admin`] it leaves; routes where admin rights widen what a user sees or does
+//!    ([`Gate::AdminWidens`]) check them in the handler ([`crate::ctx::Ctx::admin_for`]);
+//! 7. the handler: a registry connection from the process's pool ([`App::registry`], [`Reg`])
 //!    only when it needs one, after the cheap checks (a request without a login never takes one,
 //!    except the login's callback); the rights from the registry, the work, explicit commits.
+//!
+//! The connections themselves (header read timeout, keep-alive idle limit, graceful shutdown):
+//! [`crate::server`].
 //!
 //! The registry pool (H1 of the security review 2026-10-29): `NETPORTAL_DB_POOL_SIZE`
 //! connections at most (10), opened lazily (an outage is a 503 and recovers without a restart),
@@ -32,9 +40,9 @@
 //! FreeRADIUS, the offboarding and the collector.
 //!
 //! `/metrics` is not on this router: it has a listener of its own (`NETPORTAL_METRICS_LISTEN`,
-//! unset: none; [`metrics_router`]). Nothing trusts forwarded headers: the portal's own URL is
-//! `NETPORTAL_BASE_URL`, no client address is used, and `/metrics` also refuses any request that
-//! came through a proxy.
+//! unset: none; [`metrics_router`]), optionally behind a bearer token (`NETPORTAL_METRICS_TOKEN`).
+//! Nothing trusts forwarded headers: the portal's own URL is `NETPORTAL_BASE_URL`, no client
+//! address is used, and `/metrics` also refuses any request that came through a proxy.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -62,8 +70,9 @@ use crate::errors::{Reject, Sparse, left_out};
 use crate::metrics::Metrics;
 use crate::oidc::Oidc;
 use crate::render::{self, Base, RequestView, SettingsView, Templates};
+use crate::rights::AdminCheck;
 use crate::session::{CookieConfig, cookie_key};
-use crate::{dashboard, devices, letswifi, login, ops, pipeline, static_files};
+use crate::{dashboard, devices, letswifi, login, ops, pipeline, server, static_files};
 
 const LOG: &str = "netportal.web";
 /// Request bodies (forms) larger than this are refused (413).
@@ -71,6 +80,8 @@ pub const BODY_LIMIT: usize = 64 * 1024;
 /// A request taking longer is answered 503 (a hung dependency; the Disconnect's 3 x 2 s and the
 /// telemetry's budget are far below).
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// A request body (at most [`BODY_LIMIT`]) must arrive within this (408).
+pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Waiting for a registry connection of the pool (or for a new one to open) at most.
 pub const DB_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 /// The web's sessions: no statement runs longer (the heaviest page reads take milliseconds).
@@ -103,6 +114,8 @@ pub struct AppInner {
     pub telemetry: Telemetry,
     pub metrics: Metrics,
     pub disconnector: RadiusDisconnector,
+    /// the live check of admin rights
+    pub admin_check: AdminCheck,
     pub clock: Clock,
     /// the house's days (`NETPORTAL_TIMEZONE`)
     pub zone: jiff::tz::TimeZone,
@@ -170,8 +183,16 @@ impl App {
             .unwrap_or_default();
         let zone = netportal_core::conventions::zone(&settings.timezone)
             .ok_or_else(|| anyhow::anyhow!("NETPORTAL_TIMEZONE: unknown zone"))?;
-        let metrics = Metrics::new(&telemetry);
+        let metrics = Metrics::new(&telemetry, settings.acct_interim_s);
         let disconnector = RadiusDisconnector::new(&settings.dae);
+        let admin_check = AdminCheck::new(&settings, clock.clone())?;
+        if !admin_check.enabled() {
+            tracing::warn!(
+                target: LOG,
+                "admin rights cannot be checked with Authentik (NETPORTAL_AUTHENTIK_API or NETPORTAL_AUTHENTIK_TOKEN \
+                 is not set): every admin request is refused"
+            );
+        }
         let pool = Pool::new(
             settings.database_url.expose(),
             &PoolSettings {
@@ -194,6 +215,7 @@ impl App {
             telemetry,
             metrics,
             disconnector,
+            admin_check,
             clock,
             zone,
             host,
@@ -258,7 +280,7 @@ impl App {
             sub: u.sub.clone(),
             username: u.username.clone(),
             name: u.name.clone(),
-            admin: u.admin,
+            admin: u.listed_admin,
         });
         Base {
             lang: ctx.lang.to_string(),
@@ -349,55 +371,97 @@ impl FromRequestParts<App> for Reg {
     }
 }
 
+/// Who a route is for: the route table's second column. The router puts the browser pipeline in
+/// front of every route but the machine ones, and the admin gate in front of the admin routes;
+/// `tests/rights.rs` walks the table ([`routes`]) and checks that every [`Gate::Admin`] and
+/// [`Gate::AdminWidens`] route refuses a login whose admin right Authentik no longer confirms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// no session, no cookie (the apps' endpoints, discovery, `/healthz`, static files)
+    Machine,
+    /// the browser pipeline, no login needed (the login, the logout, the landing page)
+    Anyone,
+    /// a login: the person's own devices and pages
+    Login,
+    /// admins only: [`pipeline::admin_gate`] checks the right live before the handler
+    Admin,
+    /// a login; admin rights let it show or change more (another person's device, the admin view
+    /// of one), checked live by the handler ([`crate::ctx::Ctx::admin_for`])
+    AdminWidens,
+}
+
+/// The routes (INVENTORY 3.2) with their gates and handlers.
+fn table() -> Vec<(&'static str, Gate, MethodRouter<App>)> {
+    use Gate::{Admin, AdminWidens, Anyone, Login, Machine};
+    vec![
+        // login (rows 1-3)
+        ("/login", Anyone, get(login::login)),
+        ("/auth/callback", Anyone, get(login::callback)),
+        ("/logout", Anyone, post(login::logout)),
+        ("/logout/all", Anyone, post(login::logout_all)),
+        // the resident's pages and actions (rows 4-11)
+        ("/welcome", Anyone, get(dashboard::welcome)),
+        ("/", Anyone, get(dashboard::index)),
+        ("/devices/{id}", AdminWidens, get(dashboard::device_page)),
+        ("/enroll", Login, post(devices::enrol)),
+        ("/devices/{id}/renew", Login, post(devices::renew)),
+        ("/download/{token}", Login, get(devices::download)),
+        ("/devices/{id}/rename", AdminWidens, post(devices::rename)),
+        ("/devices/{id}/revoke", AdminWidens, post(devices::revoke)),
+        // admin pages (rows 12-15)
+        ("/admin", Admin, get(dashboard::admin)),
+        ("/admin/aps", Admin, get(dashboard::admin_aps)),
+        ("/admin/incidents", Admin, get(dashboard::admin_incidents)),
+        ("/admin/devices/{id}", Admin, get(dashboard::admin_device)),
+        // the dashboard's JSON API (rows 16-25)
+        ("/api/devices", Login, get(dashboard::api_devices)),
+        ("/api/devices/{id}", AdminWidens, get(dashboard::api_device)),
+        ("/api/devices/{id}/history", AdminWidens, get(dashboard::api_history)),
+        ("/api/house", Login, get(dashboard::api_house)),
+        ("/api/admin/devices", Admin, get(dashboard::api_admin_devices)),
+        ("/api/admin/overview", Admin, get(dashboard::api_admin_overview)),
+        ("/api/admin/aps", Admin, get(dashboard::api_admin_aps)),
+        ("/api/admin/incidents", Admin, get(dashboard::api_admin_incidents)),
+        ("/api/admin/auth", Admin, get(dashboard::api_admin_auth)),
+        ("/api/admin/devices/{id}/raw", Admin, get(dashboard::api_admin_device_raw)),
+        // Let's Wi-Fi (rows 26-29)
+        ("/.well-known/letswifi.json", Machine, get(letswifi::well_known)),
+        ("/oauth/authorize", Login, get(letswifi::authorize).post(letswifi::authorize)),
+        ("/oauth/token", Machine, post(letswifi::token)),
+        ("/api/eap-config/", Machine, post(letswifi::eap_config)),
+        ("/api/eap-config", Machine, post(letswifi::eap_config)),
+        // operations (rows 30, 32; /metrics is on its own listener: metrics_router)
+        ("/healthz", Machine, get(ops::healthz)),
+        ("/static/{name}", Machine, get(static_files::serve)),
+    ]
+}
+
+/// Every route of the router with its gate.
+pub fn routes() -> Vec<(&'static str, Gate)> {
+    table().into_iter().map(|(path, gate, _)| (path, gate)).collect()
+}
+
 /// The route table (INVENTORY 3.2), with the layers described in the module documentation.
 pub fn router(app: App) -> Router {
-    let browser =
-        |mr: MethodRouter<App>| mr.route_layer(middleware::from_fn_with_state(app.clone(), pipeline::browser));
-    let routes = Router::new()
-        // login (rows 1-3)
-        .route("/login", browser(get(login::login)))
-        .route("/auth/callback", browser(get(login::callback)))
-        .route("/logout", browser(post(login::logout)))
-        // the resident's pages and actions (rows 4-11)
-        .route("/welcome", browser(get(dashboard::welcome)))
-        .route("/", browser(get(dashboard::index)))
-        .route("/devices/{id}", browser(get(dashboard::device_page)))
-        .route("/enroll", browser(post(devices::enrol)))
-        .route("/devices/{id}/renew", browser(post(devices::renew)))
-        .route("/download/{token}", browser(get(devices::download)))
-        .route("/devices/{id}/rename", browser(post(devices::rename)))
-        .route("/devices/{id}/revoke", browser(post(devices::revoke)))
-        // admin pages (rows 12-15)
-        .route("/admin", browser(get(dashboard::admin)))
-        .route("/admin/aps", browser(get(dashboard::admin_aps)))
-        .route("/admin/incidents", browser(get(dashboard::admin_incidents)))
-        .route("/admin/devices/{id}", browser(get(dashboard::admin_device)))
-        // the dashboard's JSON API (rows 16-25)
-        .route("/api/devices", browser(get(dashboard::api_devices)))
-        .route("/api/devices/{id}", browser(get(dashboard::api_device)))
-        .route("/api/devices/{id}/history", browser(get(dashboard::api_history)))
-        .route("/api/house", browser(get(dashboard::api_house)))
-        .route("/api/admin/devices", browser(get(dashboard::api_admin_devices)))
-        .route("/api/admin/overview", browser(get(dashboard::api_admin_overview)))
-        .route("/api/admin/aps", browser(get(dashboard::api_admin_aps)))
-        .route("/api/admin/incidents", browser(get(dashboard::api_admin_incidents)))
-        .route("/api/admin/auth", browser(get(dashboard::api_admin_auth)))
-        .route("/api/admin/devices/{id}/raw", browser(get(dashboard::api_admin_device_raw)))
-        // Let's Wi-Fi (rows 26-29)
-        .route("/.well-known/letswifi.json", get(letswifi::well_known))
-        .route("/oauth/authorize", browser(get(letswifi::authorize).post(letswifi::authorize)))
-        .route("/oauth/token", post(letswifi::token))
-        .route("/api/eap-config/", post(letswifi::eap_config))
-        .route("/api/eap-config", post(letswifi::eap_config))
-        // operations (rows 30, 32; /metrics is on its own listener: metrics_router)
-        .route("/healthz", get(ops::healthz))
-        .route("/static/{name}", get(static_files::serve))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT))
-        .with_state(app.clone());
+    let mut routes = Router::new();
+    for (path, gate, handler) in table() {
+        let handler = match gate {
+            Gate::Machine => handler,
+            Gate::Admin => handler
+                .route_layer(middleware::from_fn_with_state(app.clone(), pipeline::admin_gate))
+                .route_layer(middleware::from_fn_with_state(app.clone(), pipeline::browser)),
+            Gate::Anyone | Gate::Login | Gate::AdminWidens => {
+                handler.route_layer(middleware::from_fn_with_state(app.clone(), pipeline::browser))
+            }
+        };
+        routes = routes.route(path, handler);
+    }
+    let routes = routes.layer(DefaultBodyLimit::max(BODY_LIMIT)).with_state(app.clone());
     // the routes as one service, so the outer layer sees routing's complete answers (a 405 with
     // its Allow)
     Router::new()
         .fallback_service(routes)
+        .layer(middleware::from_fn(pipeline::read_body))
         .layer(TimeoutLayer::with_status_code(StatusCode::SERVICE_UNAVAILABLE, REQUEST_TIMEOUT))
         .layer(middleware::from_fn_with_state(app.clone(), pipeline::shed))
         .layer(middleware::from_fn_with_state(app, pipeline::outer))
@@ -410,6 +474,7 @@ pub fn metrics_router(app: App) -> Router {
     Router::new()
         .route("/metrics", get(ops::metrics))
         .with_state(app)
+        .layer(middleware::from_fn(pipeline::read_body))
         .layer(TimeoutLayer::with_status_code(StatusCode::SERVICE_UNAVAILABLE, REQUEST_TIMEOUT))
 }
 
@@ -422,9 +487,9 @@ pub fn listen_address(bind: Option<&str>) -> String {
 
 /// `netportal serve`: migrate and seed the registry (the schema is ready before `/healthz`
 /// answers), check the CA, templates and OIDC settings, then serve HTTP on `bind` (and
-/// `/metrics` on `NETPORTAL_METRICS_LISTEN` when set) until SIGTERM or SIGINT (requests in
-/// progress finish). The settings are taken, not copied: the device CA key's path is all they
-/// hold of it.
+/// `/metrics` on `NETPORTAL_METRICS_LISTEN` when set) through [`server::serve`] (header read
+/// timeout, keep-alive idle limit) until SIGTERM or SIGINT (requests in progress finish). The
+/// settings are taken, not copied: the device CA key's path is all they hold of it.
 pub async fn serve(settings: PortalSettings, bind: &str) -> anyhow::Result<()> {
     let addr: SocketAddr =
         bind.parse().map_err(|_| anyhow::anyhow!("--bind / NETPORTAL_LISTEN: {bind:?} is not host:port"))?;
@@ -466,7 +531,7 @@ pub async fn serve(settings: PortalSettings, bind: &str) -> anyhow::Result<()> {
         let _ = signal_tx.send(true);
     });
     let web = async {
-        let result = axum::serve(listener, router(app.clone())).with_graceful_shutdown(stopped(stop_rx.clone())).await;
+        let result = server::serve(listener, router(app.clone()), server::LIMITS, stopped(stop_rx.clone())).await;
         let _ = stop_tx.send(true);
         result
     };
@@ -474,10 +539,9 @@ pub async fn serve(settings: PortalSettings, bind: &str) -> anyhow::Result<()> {
         let result = match metrics_listener {
             Some(listener) => {
                 let at = listener.local_addr().map(|a| a.to_string()).unwrap_or_default();
-                tracing::info!(target: LOG, "serving /metrics on {at}");
-                axum::serve(listener, metrics_router(app.clone()))
-                    .with_graceful_shutdown(stopped(stop_rx.clone()))
-                    .await
+                let token = if app.settings.metrics_token.is_some() { " (bearer token required)" } else { "" };
+                tracing::info!(target: LOG, "serving /metrics on {at}{token}");
+                server::serve(listener, metrics_router(app.clone()), server::LIMITS, stopped(stop_rx.clone())).await
             }
             None => {
                 tracing::info!(target: LOG, "no metrics listener (NETPORTAL_METRICS_LISTEN is not set)");

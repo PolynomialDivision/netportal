@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use crate::ctx::{Ctx, User};
+use crate::ctx::{Admin, Ctx, User};
 use crate::errors::Reject;
 use crate::http::device_id;
 use crate::letswifi::document;
@@ -154,13 +154,30 @@ fn to_json<T: serde::Serialize>(value: &T) -> Result<Value, Reject> {
     serde_json::to_value(value).map_err(|_| crate::errors::internal("payload not serialisable"))
 }
 
-/// The device of this URL for this person (theirs; any for an admin), not revoked; else 404.
-async fn visible_device(db: &mut Db, id: &str, user: &User) -> Result<DeviceRow, Reject> {
+/// The device of this URL for this person, not revoked, else 404: theirs, or another person's
+/// for an admin. The admin view (other people's devices, conflicts, owners) needs the right
+/// checked live: for another person's device it is required (refused or 503 without it), for
+/// their own it is the admin's view when Authentik confirms it and the resident's when it cannot
+/// be asked.
+async fn visible_device(
+    app: &App,
+    ctx: &Ctx,
+    db: &mut Db,
+    id: &str,
+    user: &User,
+) -> Result<(DeviceRow, Option<Admin>), Reject> {
     let id = device_id(id).ok_or_else(Reject::not_found)?;
-    let owner = if user.admin { None } else { Some(user.sub.as_str()) };
-    match registry::device(db, id, owner).await? {
-        Some(dev) if dev.revoked_at.is_none() => Ok(dev),
-        _ => Err(Reject::not_found()),
+    let row = match registry::device(db, id, None).await? {
+        Some(dev) if dev.revoked_at.is_none() => dev,
+        _ => return Err(Reject::not_found()),
+    };
+    let own = row.owner == user.sub;
+    if !own && !user.listed_admin {
+        return Err(Reject::not_found());
+    }
+    match ctx.admin_for(app, db, user, !own).await? {
+        None if !own => Err(Reject::not_found()),
+        admin => Ok((row, admin)),
     }
 }
 
@@ -257,14 +274,15 @@ async fn device_context(
     ctx: &Ctx,
     db: &mut Db,
     row: &DeviceRow,
-    user: &User,
+    admin: Option<&Admin>,
 ) -> Result<BTreeMap<String, Page>, Reject> {
     let page = app.telemetry.page();
-    let people = if user.admin { Some(registry::people(db).await?) } else { None };
-    let payload = dashboard_of(app, &page, db, std::slice::from_ref(row), people.as_ref(), user.admin, true).await?;
+    let people = if admin.is_some() { Some(registry::people(db).await?) } else { None };
+    let payload =
+        dashboard_of(app, &page, db, std::slice::from_ref(row), people.as_ref(), admin.is_some(), true).await?;
     let range = Range::parse(ctx.arg("range")).unwrap_or(Range::H24);
     let opts = HistoryOptions {
-        admin: user.admin,
+        admin: admin.is_some(),
         now: Some(unix(app.now())),
         tz: Some(app.zone.clone()),
         ..Default::default()
@@ -289,22 +307,22 @@ pub async fn device_page(
     mut reg: Reg,
     Path(id): Path<String>,
 ) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, false).await?;
-    let row = visible_device(&mut reg, &id, &user).await?;
-    let values = device_context(&app, &ctx, &mut reg, &row, &user).await?;
+    let user = ctx.need_user(&mut reg).await?;
+    let (row, admin) = visible_device(&app, &ctx, &mut reg, &id, &user).await?;
+    let values = device_context(&app, &ctx, &mut reg, &row, admin.as_ref()).await?;
     dashboard_page(app.page(&ctx, Some(&user), "device.html", Page::from(values)))
 }
 
 /// `GET /admin`: the house's overview and every device.
-pub async fn admin(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, true).await?;
+pub async fn admin(State(app): State<App>, ctx: Ctx, right: Admin, mut reg: Reg) -> Result<Response, Reject> {
+    let user = right.user();
     let page = app.telemetry.page();
     let (rows, people, payload) = admin_dashboard(&app, &page, &mut reg).await?;
     let overview = admin::overview(&page, &mut *reg, unix(app.now())).await;
     let rows_json: Vec<Value> = rows.iter().map(row_json).collect();
     dashboard_page(app.page(
         &ctx,
-        Some(&user),
+        Some(user),
         "admin.html",
         context! {
             devices => serde(&rows_json), people => serde(&people_json(&people)),
@@ -314,17 +332,16 @@ pub async fn admin(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Res
 }
 
 /// `GET /admin/aps`.
-pub async fn admin_aps(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, true).await?;
+pub async fn admin_aps(State(app): State<App>, ctx: Ctx, right: Admin, mut reg: Reg) -> Result<Response, Reject> {
     let page = app.telemetry.page();
     let aps = admin::aps(&page, &mut *reg, unix(app.now()), &app.zone).await?;
-    dashboard_page(app.page(&ctx, Some(&user), "admin_aps.html", context! { aps => serde(&aps) }))
+    dashboard_page(app.page(&ctx, Some(right.user()), "admin_aps.html", context! { aps => serde(&aps) }))
 }
 
 /// `GET /admin/incidents`: `?range=` or `?from=&to=`, `?kind=`; anything invalid: the last 7
 /// days, all kinds (no error page).
-pub async fn admin_incidents(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, true).await?;
+pub async fn admin_incidents(State(app): State<App>, ctx: Ctx, right: Admin, mut reg: Reg) -> Result<Response, Reject> {
+    let user = right.user();
     let now = unix(app.now());
     let (since, until, kind) = match (admin_span(&ctx, now, INCIDENT_SPAN, true), incident_kind(&ctx)) {
         (Some((s, u)), Ok(k)) => (s, u, k),
@@ -335,7 +352,7 @@ pub async fn admin_incidents(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> 
     let span = json!({"from": payload.from, "to": payload.to, "kind": kind.unwrap_or_default()});
     dashboard_page(app.page(
         &ctx,
-        Some(&user),
+        Some(user),
         "admin_incidents.html",
         context! { incidents => serde(&payload), span => serde(&span), incident_kinds => INCIDENT_KINDS.to_vec() },
     ))
@@ -345,17 +362,22 @@ pub async fn admin_incidents(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> 
 pub async fn admin_device(
     State(app): State<App>,
     ctx: Ctx,
+    right: Admin,
     mut reg: Reg,
     Path(id): Path<String>,
 ) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, true).await?;
-    let row = visible_device(&mut reg, &id, &user).await?;
-    let mut values = device_context(&app, &ctx, &mut reg, &row, &user).await?;
+    let user = right.user();
+    let id = device_id(&id).ok_or_else(Reject::not_found)?;
+    let row = match registry::device(&mut reg, id, None).await? {
+        Some(dev) if dev.revoked_at.is_none() => dev,
+        _ => return Err(Reject::not_found()),
+    };
+    let mut values = device_context(&app, &ctx, &mut reg, &row, Some(&right)).await?;
     let now = unix(app.now());
     let raw = device_raw(&app, &mut reg, &row, now - RAW_SPAN.0, now).await?;
     values.insert("admin_view".to_string(), Page::from(true));
     values.insert("raw".to_string(), serde(&raw));
-    dashboard_page(app.page(&ctx, Some(&user), "device.html", Page::from(values)))
+    dashboard_page(app.page(&ctx, Some(user), "device.html", Page::from(values)))
 }
 
 async fn device_raw(app: &App, db: &mut Db, row: &DeviceRow, since: f64, until: f64) -> Result<admin::Raw, Reject> {
@@ -375,7 +397,7 @@ pub async fn api_devices(
     mut reg: Reg,
     headers: HeaderMap,
 ) -> Result<Response, Reject> {
-    let user = ctx.api_user(&mut reg, false).await?;
+    let user = ctx.api_user(&mut reg).await?;
     let page = app.telemetry.page();
     let rows = registry::devices(&mut reg, Some(&user.sub), false).await?;
     let payload = dashboard_of(&app, &page, &mut reg, &rows, None, false, false).await?;
@@ -390,12 +412,12 @@ pub async fn api_device(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Reject> {
-    let user = ctx.api_user(&mut reg, false).await?;
-    let row = visible_device(&mut reg, &id, &user).await?;
+    let user = ctx.api_user(&mut reg).await?;
+    let (row, admin) = visible_device(&app, &ctx, &mut reg, &id, &user).await?;
     let page = app.telemetry.page();
-    let people = if user.admin { Some(registry::people(&mut reg).await?) } else { None };
+    let people = if admin.is_some() { Some(registry::people(&mut reg).await?) } else { None };
     let payload =
-        dashboard_of(&app, &page, &mut reg, std::slice::from_ref(&row), people.as_ref(), user.admin, true).await?;
+        dashboard_of(&app, &page, &mut reg, std::slice::from_ref(&row), people.as_ref(), admin.is_some(), true).await?;
     let one = payload.into_one().ok_or(Reject::Internal)?;
     Ok(polled_response(to_json(&one)?, &headers))
 }
@@ -407,15 +429,15 @@ pub async fn api_history(
     mut reg: Reg,
     Path(id): Path<String>,
 ) -> Result<Response, Reject> {
-    let user = ctx.api_user(&mut reg, false).await?;
-    let row = visible_device(&mut reg, &id, &user).await?;
+    let user = ctx.api_user(&mut reg).await?;
+    let (row, admin) = visible_device(&app, &ctx, &mut reg, &id, &user).await?;
     let key = ctx.args.get("range").map(String::as_str).unwrap_or("24h");
     let Some(range) = Range::parse(key) else {
         return Err(Reject::Json(StatusCode::BAD_REQUEST, "bad_range"));
     };
     let page = app.telemetry.page();
     let opts = HistoryOptions {
-        admin: user.admin,
+        admin: admin.is_some(),
         now: Some(unix(app.now())),
         tz: Some(app.zone.clone()),
         ..Default::default()
@@ -426,7 +448,7 @@ pub async fn api_history(
 
 /// `GET /api/house`.
 pub async fn api_house(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, false).await?;
+    ctx.api_user(&mut reg).await?;
     let page = app.telemetry.page();
     let house = house::house(page.budget.as_ref()).await;
     Ok(axum::Json(to_json(&house)?).into_response())
@@ -437,10 +459,10 @@ pub async fn api_house(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result
 pub async fn api_admin_devices(
     State(app): State<App>,
     ctx: Ctx,
+    _right: Admin,
     mut reg: Reg,
     headers: HeaderMap,
 ) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, true).await?;
     let page = app.telemetry.page();
     let (_, _, mut payload) = admin_dashboard(&app, &page, &mut reg).await?;
     payload.filter(ctx.arg("q"), ctx.arg("state"));
@@ -448,24 +470,26 @@ pub async fn api_admin_devices(
 }
 
 /// `GET /api/admin/overview`.
-pub async fn api_admin_overview(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, true).await?;
+pub async fn api_admin_overview(State(app): State<App>, _right: Admin, mut reg: Reg) -> Result<Response, Reject> {
     let page = app.telemetry.page();
     let overview = admin::overview(&page, &mut *reg, unix(app.now())).await;
     Ok(axum::Json(to_json(&overview)?).into_response())
 }
 
 /// `GET /api/admin/aps`.
-pub async fn api_admin_aps(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, true).await?;
+pub async fn api_admin_aps(State(app): State<App>, _right: Admin, mut reg: Reg) -> Result<Response, Reject> {
     let page = app.telemetry.page();
     let aps = admin::aps(&page, &mut *reg, unix(app.now()), &app.zone).await?;
     Ok(axum::Json(to_json(&aps)?).into_response())
 }
 
 /// `GET /api/admin/incidents?from=&to=|range=&kind=`.
-pub async fn api_admin_incidents(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, true).await?;
+pub async fn api_admin_incidents(
+    State(app): State<App>,
+    ctx: Ctx,
+    _right: Admin,
+    mut reg: Reg,
+) -> Result<Response, Reject> {
     let now = unix(app.now());
     let Some((since, until)) = admin_span(&ctx, now, INCIDENT_SPAN, true) else {
         return Err(Reject::Json(StatusCode::BAD_REQUEST, "bad_range"));
@@ -479,8 +503,7 @@ pub async fn api_admin_incidents(State(app): State<App>, ctx: Ctx, mut reg: Reg)
 }
 
 /// `GET /api/admin/auth?result=reject&from=&to=&limit=`.
-pub async fn api_admin_auth(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, true).await?;
+pub async fn api_admin_auth(State(app): State<App>, ctx: Ctx, _right: Admin, mut reg: Reg) -> Result<Response, Reject> {
     if ctx.args.get("result").map(String::as_str).unwrap_or("reject") != "reject" {
         return Err(Reject::Json(StatusCode::BAD_REQUEST, "bad_result"));
     }
@@ -505,10 +528,10 @@ pub async fn api_admin_auth(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> R
 pub async fn api_admin_device_raw(
     State(app): State<App>,
     ctx: Ctx,
+    _right: Admin,
     mut reg: Reg,
     Path(id): Path<String>,
 ) -> Result<Response, Reject> {
-    ctx.api_user(&mut reg, true).await?;
     let not_found = || Reject::Json(StatusCode::NOT_FOUND, "not_found");
     let id = device_id(&id).ok_or_else(not_found)?;
     let row = registry::device(&mut reg, id, None).await?.ok_or_else(not_found)?;

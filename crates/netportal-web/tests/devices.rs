@@ -196,6 +196,81 @@ async fn test_revoke_and_its_metrics() {
     assert_eq!(b.get(&format!("/download/{}", token.expect("token"))).await.status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn test_a_revocation_whose_disconnect_is_not_confirmed_says_so() {
+    // no DAE secret here: the Disconnect is not sent ("skipped"), as a timeout or NAK would
+    let admin_url = need_db!();
+    let portal = Portal::new(&admin_url).await;
+    let person = resident("unc");
+    let mut b = portal.browser().logged_in(&person).await;
+    b.enrol("apple", "kitchen tablet").await;
+    let device = newest_device(&portal, &person.sub).await;
+    portal
+        .exec(&format!(
+            "INSERT INTO radius_session (device_id, nas_ip, calling_station, user_name)
+             VALUES ('{device}', '127.0.0.1', 'AA-BB-CC-DD-EE-01', 'anonymous@scharni.org')"
+        ))
+        .await;
+    let csrf = b.csrf().await;
+    let r = b.post(&format!("/devices/{device}/revoke"), &[("csrf", &csrf)]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let page = r.text();
+    assert!(page.contains("is removed: it cannot join the Wi-Fi again") && page.contains("kitchen tablet"), "{page}");
+    assert!(page.contains(r#"<a href="/">"#), "{page}");
+    let actions = sqlx_actions(&portal, &device.to_string()).await;
+    assert_eq!(actions[actions.len() - 2..], ["revoke".to_string(), "disconnect:skipped".to_string()]);
+    // an admin's revocation from the admin page goes back there
+    let other = resident("unc2");
+    let mut ob = portal.browser().logged_in(&other).await;
+    ob.enrol("apple", "theirs").await;
+    let theirs = newest_device(&portal, &other.sub).await;
+    portal
+        .exec(&format!(
+            "INSERT INTO radius_session (device_id, nas_ip, calling_station, user_name)
+             VALUES ('{theirs}', '127.0.0.1', 'AA-BB-CC-DD-EE-02', '')"
+        ))
+        .await;
+    let mut ab = portal.browser().logged_in(&admin("unca")).await;
+    let csrf = ab.csrf().await;
+    let r = ab.post(&format!("/devices/{theirs}/revoke"), &[("csrf", &csrf), ("back", "/admin")]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.text().contains(r#"<a href="/admin">"#), "{}", r.text());
+}
+
+#[tokio::test]
+async fn test_the_metrics_token() {
+    let admin_url = need_db!();
+    let token = "prometheus-scrape-token-0123456789abcdef";
+    let portal = Portal::with(&admin_url, &[("NETPORTAL_METRICS_TOKEN", token)]).await;
+    let get = |auth: Option<String>| {
+        let mut req = Request::get("/metrics");
+        if let Some(auth) = auth {
+            req = req.header("authorization", auth);
+        }
+        req.body(Body::empty()).expect("request")
+    };
+    for auth in
+        [None, Some("Bearer wrong".to_string()), Some(format!("Basic {token}")), Some(format!("Bearer {token}x"))]
+    {
+        let r = portal.call_metrics(get(auth.clone())).await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{auth:?}");
+        assert_eq!(r.header("www-authenticate").as_deref(), Some("Bearer realm=\"metrics\""));
+        assert!(!r.text().contains("netportal_"));
+    }
+    for auth in [format!("Bearer {token}"), format!("bearer {token}")] {
+        let r = portal.call_metrics(get(Some(auth))).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert!(r.text().contains("netportal_registry_up 1"));
+    }
+    // through a proxy: 404 whatever the token
+    let req = Request::get("/metrics")
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-forwarded-for", "203.0.113.7")
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(portal.call_metrics(req).await.status, StatusCode::NOT_FOUND);
+}
+
 async fn metrics_text(portal: &Portal) -> String {
     portal.call_metrics(Request::get("/metrics").body(Body::empty()).expect("request")).await.text()
 }
@@ -240,6 +315,10 @@ async fn test_metrics_only_without_a_proxy() {
         "# TYPE netportal_certificates gauge",
         "# TYPE netportal_telemetry_queries_total counter",
         "# TYPE netportal_registry_up gauge",
+        "# TYPE netportal_disconnect_rechecks_total counter",
+        "netportal_disconnect_rechecks_total{result=\"not_found\"} 0",
+        "# TYPE netportal_locked_sessions_live gauge",
+        "netportal_locked_sessions_live{reason=\"revoked\"} 0",
     ] {
         assert!(text.contains(line), "{line}");
     }

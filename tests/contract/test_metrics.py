@@ -2,7 +2,7 @@
 dashboards use, values that follow what happens, never reachable through the proxy. Not
 pinned: float spelling, HELP texts, prometheus-client's *_created series."""
 
-from harness import A, ContractCase, download, resident, sample
+from harness import RUN, A, B, ContractCase, download, resident, sample
 
 FAMILIES = {
     "netportal_enrolments_total": "counter",
@@ -14,6 +14,8 @@ FAMILIES = {
     "netportal_certificates": "gauge",
     "netportal_telemetry_queries_total": "counter",
     "netportal_registry_up": "gauge",
+    "netportal_disconnect_rechecks_total": "counter",
+    "netportal_locked_sessions_live": "gauge",
 }
 
 
@@ -41,12 +43,17 @@ class MetricsTests(ContractCase):
             self.assertIsNotNone(sample(m, "netportal_devices", state=state), state)
         for state in ("valid", "expiring_30d", "expired"):
             self.assertIsNotNone(sample(m, "netportal_certificates", state=state), state)
-        for result in ("ack", "nak", "timeout", "error", "skipped", "no-session"):
+        for result in ("ack", "nak", "not-found", "timeout", "error", "skipped", "no-session"):
             self.assertIsNotNone(sample(m, "netportal_disconnects_last_hour", result=result), result)
         for result in ("ok", "error"):
             self.assertIsNotNone(sample(m, "netportal_telemetry_queries_total", result=result), result)
         self.assertGreater(sample(m, "netportal_offboarding_last_success_timestamp_seconds") or 0, 0)
         self.assertGreater(sample(m, "netportal_job_last_success_timestamp_seconds", job="offboarding") or 0, 0)
+        # the Disconnect reconciliation (owner's review 2026-10-29): its totals and the alert's gauge
+        for result in ("ack", "not_found", "nak", "timeout", "error", "settled_stale", "given_up"):
+            self.assertIsNotNone(sample(m, "netportal_disconnect_rechecks_total", result=result), result)
+        for reason in ("revoked", "credential", "vlan"):
+            self.assertEqual(sample(m, "netportal_locked_sessions_live", reason=reason), 0, reason)
 
     def test_values_follow_enrolment_and_revocation(self):
         _, before = A.metrics()
@@ -77,3 +84,25 @@ class MetricsTests(ContractCase):
                 r, _ = A.metrics(headers={"X-Forwarded-For": value})
                 self.assertEqual(r.status_code, 404)
                 self.assertNotIn("netportal_", r.text)
+
+
+class MetricsTokenTests(ContractCase):
+    """Owner's review 2026-10-29: NETPORTAL_METRICS_TOKEN_FILE (instance B, a read-only file):
+    /metrics only with `Authorization: Bearer <token>` (401 otherwise)."""
+
+    def test_bearer_token(self):
+        token = (RUN / "secrets" / "metrics-token").read_text().strip()
+        for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic " + token},
+                        {"Authorization": "Bearer " + token[:-1]}):
+            with self.subTest(headers=headers):
+                r, _ = B.metrics(headers=headers)
+                self.assertEqual(r.status_code, 401)
+                self.assertTrue(r.headers.get("WWW-Authenticate", "").startswith("Bearer"))
+                self.assertNotIn("netportal_", r.text)
+        r, m = B.metrics(headers={"Authorization": "Bearer " + token})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sample(m, "netportal_registry_up"), 1)
+        r, _ = B.metrics(headers={"Authorization": "Bearer " + token, "X-Forwarded-For": "203.0.113.7"})
+        self.assertEqual(r.status_code, 404)
+        # instance A has no token: open on its own listener
+        self.assertEqual(A.metrics()[0].status_code, 200)

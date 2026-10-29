@@ -61,9 +61,9 @@ same placeholders: unit tests check both).
 | `crates/netportal-pki` | PKI, issuing, the per-platform artefacts (Apple profile, Android Passpoint, eap-config), RADIUS Disconnect |
 | `crates/netportal-telemetry` | the "My devices" data, presence, diagnostics |
 | `crates/netportal-collect` | the collector: UniFi events from Loki, incidents and rollups from Prometheus, retention |
-| `crates/netportal-offboard` | reconciliation with Authentik's users API (devices, app grants, portal sessions) |
-| `crates/netportal-web` | routes, sessions, OIDC, Let's Wi-Fi (geteduroam apps), limits, templates (`templates/`), static files (`static/`), `/metrics` on its own listener |
-| `crates/netportal` | the binary: `serve`, `init-db`, `offboard [--every N]`, `collect [--once] [--jobs a,b]`, `job <name>`, `pki`, `health` |
+| `crates/netportal-offboard` | reconciliation with Authentik's users API (devices, app grants, portal sessions); the Disconnect reconciliation (`recheck`: live sessions of revoked or moved devices cut again) |
+| `crates/netportal-web` | routes (the table with each route's gate), sessions (a row per login on the server), the live check of admin rights with Authentik (`rights`), OIDC, Let's Wi-Fi (geteduroam apps), limits, templates (`templates/`), static files (`static/`), `/metrics` on its own listener (optional bearer token), the connections (`server`: header read timeout, graceful shutdown) |
+| `crates/netportal` | the binary: `serve`, `init-db`, `offboard [--every N]` (with the Disconnect reconciliation), `collect [--once] [--jobs a,b]`, `job <name>`, `pki`, `health` |
 | `migrations/` | the schema, applied in order by `registry::migrate` (`NNNN_name.sql`; never edit an applied one) |
 | `sql/radius_grants.sql` | the FreeRADIUS role's rights, applied after every migration run |
 | `radius/` | FreeRADIUS 3.2 configuration and image (EAP-TLS only, registry lookup, logging through its own pool `sql_log`, status server) |

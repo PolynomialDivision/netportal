@@ -134,26 +134,36 @@ fn answer(st: &IdpState, query: &HashMap<String, String>, authorized: bool) -> R
 
 // --- Disconnect ------------------------------------------------------------------------------------
 
-/// Records every session it is asked to disconnect and answers `result`.
+/// Records every session it is asked to disconnect and answers `result` (changeable).
 pub struct FakeDisconnector {
-    pub result: DisconnectResult,
+    pub result: Mutex<DisconnectResult>,
     pub sent: Mutex<Vec<RadiusSession>>,
 }
 
 impl FakeDisconnector {
     pub fn new(result: DisconnectResult) -> FakeDisconnector {
-        FakeDisconnector { result, sent: Mutex::new(Vec::new()) }
+        FakeDisconnector { result: Mutex::new(result), sent: Mutex::new(Vec::new()) }
+    }
+
+    /// Answer `result` from now on.
+    pub fn answer(&self, result: DisconnectResult) {
+        *self.result.lock().expect("result") = result;
     }
 
     pub fn sent(&self) -> Vec<RadiusSession> {
         self.sent.lock().expect("sent").clone()
+    }
+
+    /// Forget what was sent.
+    pub fn clear(&self) {
+        self.sent.lock().expect("sent").clear();
     }
 }
 
 impl Disconnector for FakeDisconnector {
     async fn disconnect(&self, session: &RadiusSession) -> DisconnectResult {
         self.sent.lock().expect("sent").push(session.clone());
-        self.result
+        *self.result.lock().expect("result")
     }
 }
 

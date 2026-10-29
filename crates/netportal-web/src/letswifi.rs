@@ -153,7 +153,7 @@ pub async fn well_known(State(app): State<App>) -> Response {
 /// `GET /oauth/authorize` (the consent page: which app asks, and where the browser goes
 /// afterwards) and `POST` (the consent: a grant and a code, within the person's device limit).
 pub async fn authorize(State(app): State<App>, ctx: Ctx, mut reg: Reg) -> Result<Response, Reject> {
-    let user = ctx.need_user(&mut reg, false).await?;
+    let user = ctx.need_user(&mut reg).await?;
     let values = ctx.values();
     let get = |k: &str| values.get(k).map(String::as_str).unwrap_or("");
     let redirect_uri = get("redirect_uri");

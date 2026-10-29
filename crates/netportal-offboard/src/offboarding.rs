@@ -68,8 +68,9 @@ pub enum OffboardError {
     /// Nothing was changed: the directory does not look like the house's.
     #[error("refusing to offboard: {0}")]
     Guard(String),
-    #[error("another offboarding round is running")]
-    Locked,
+    /// Another process holds the job's lock (`offboarding`, `disconnect_recheck`).
+    #[error("another {0} round is running")]
+    Locked(&'static str),
     /// Nothing was changed: the directory would offboard too many people at once.
     #[error("HELD BACK, nothing changed: {0}")]
     HeldBack(String),
@@ -243,7 +244,7 @@ pub async fn round<D: Disconnector>(
     };
     if !held {
         let _ = db.close().await;
-        return Err(OffboardError::Locked);
+        return Err(OffboardError::Locked(JOB));
     }
     let result = async {
         registry::job_begin(&mut db, JOB).await?;
@@ -333,11 +334,14 @@ pub fn touch(path: &Path) -> Result<(), OffboardError> {
 }
 
 /// `netportal offboard [--every SECONDS] [--allow-mass]`: one round (`every` 0) or a round every
-/// `every` seconds until SIGTERM/SIGINT. The heartbeat file is touched after every round, also a
-/// failed one: it says the sidecar is alive (the container healthcheck); whether rounds succeed
-/// is `job.offboarding` (the staleness alert; a held-back round is a failed one). One round:
-/// `Ok(0)`, or its error (exit 1). `allow_mass` (one round only) waives the mass-removal hold and
-/// the second round.
+/// `every` seconds until SIGTERM/SIGINT, and then, next to it in the same process, the Disconnect
+/// reconciliation every `NETPORTAL_DISCONNECT_RECHECK_S` ([`crate::recheck`]; it needs the DAE
+/// secret this process holds anyway). The heartbeat file is touched after every offboarding
+/// round, also a failed one: it says the sidecar is alive (the container healthcheck); whether
+/// rounds succeed is `job.offboarding` and `job.disconnect_recheck` (the staleness alerts; a
+/// held-back round is a failed one). One round: `Ok(0)`, or its error (exit 1); it does no
+/// reconciliation. `allow_mass` (one round only) waives the mass-removal hold and the second
+/// round.
 pub async fn run(settings: &OffboardSettings, every: u64, allow_mass: bool) -> Result<i32, OffboardError> {
     if allow_mass && every != 0 {
         return Err(OffboardError::Guard("--allow-mass is for one round, not with --every".into()));
@@ -358,8 +362,21 @@ pub async fn run(settings: &OffboardSettings, every: u64, allow_mass: bool) -> R
         beat?;
         return Ok(0);
     }
-    let stop = shutdown_signal().map_err(OffboardError::Signal)?;
-    Ok(run_loop(settings, api.as_ref(), &disconnector, &options, Duration::from_secs(every), stop).await)
+    let signal = shutdown_signal().map_err(OffboardError::Signal)?;
+    // one stop for both loops
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
+    let stop_on_signal = async move {
+        signal.await;
+        let _ = stop_tx.send(true);
+    };
+    let offboarding =
+        run_loop(settings, api.as_ref(), &disconnector, &options, Duration::from_secs(every), stopped(stop_rx.clone()));
+    let recheck = crate::recheck::run_loop(settings, &disconnector, stopped(stop_rx));
+    let (code, (), ()) = tokio::join!(offboarding, recheck, stop_on_signal);
+    Ok(code)
 }
 
 /// Rounds every `every` until `stop` completes (checked between rounds: a round in progress

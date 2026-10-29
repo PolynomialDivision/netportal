@@ -275,7 +275,7 @@ async fn test_a_second_process_is_locked_out() {
     assert!(held);
     let nas = FakeDisconnector::new(DisconnectResult::Ack);
     let result = offboarding::round(&case.url, &idp.client(), &policies(), &nas, &at_once()).await;
-    assert!(matches!(result, Err(OffboardError::Locked)), "{result:?}");
+    assert!(matches!(result, Err(OffboardError::Locked("offboarding"))), "{result:?}");
     assert!(idp.requests().is_empty());
     assert!(!case.offboarded("p").await);
     sqlx::query("SELECT pg_advisory_unlock(hashtext($1))").bind(LOCK_KEY).execute(&mut other).await.expect("unlock");
@@ -398,23 +398,26 @@ async fn test_losing_the_admin_right_ends_the_portal_sessions() {
     let mut case = Case::new(&admin).await;
     case.person("boss", true).await;
     case.person("res", false).await;
-    let epoch = "SELECT session_epoch FROM person WHERE sub = 'boss'";
-    assert_eq!(case.count(epoch).await, 0);
+    for sub in ["boss", "boss", "res"] {
+        registry::start_session(&mut case.db, sub).await.expect("session");
+    }
+    case.db.commit().await.expect("commit");
+    let open = "SELECT count(*) FROM web_session WHERE sub = 'boss' AND ended_at IS NULL";
+    assert_eq!(case.count(open).await, 2);
     let nas = FakeDisconnector::new(DisconnectResult::Ack);
     // still an admin: nothing ends
     let directory = dir(&[("boss", true, &["it-admins"]), ("res", true, &["residents"])]);
     let report = offboarding::reconcile(&mut case.db, &directory, &policies(), &nas, &sidecar()).await.expect("round");
-    assert_eq!((report.admins_removed, case.count(epoch).await), (0, 0));
+    assert_eq!((report.admins_removed, case.count(open).await), (0, 2));
     // out of it-admins: no admin, and every portal session of the person ends
     let directory = dir(&[("boss", true, &["residents"]), ("res", true, &["residents"])]);
     let report = offboarding::reconcile(&mut case.db, &directory, &policies(), &nas, &sidecar()).await.expect("round");
     assert_eq!(report.admins_removed, 1);
     assert_eq!(case.is_admin("boss").await, Some(false));
-    assert_eq!(case.count(epoch).await, 1);
-    // the next round changes nothing
+    assert_eq!(case.count(open).await, 0);
+    // the next round changes nothing; the resident's session stays
     offboarding::reconcile(&mut case.db, &directory, &policies(), &nas, &sidecar()).await.expect("round");
-    assert_eq!(case.count(epoch).await, 1);
-    assert_eq!(case.count("SELECT session_epoch FROM person WHERE sub = 'res'").await, 0);
+    assert_eq!(case.count("SELECT count(*) FROM web_session WHERE sub = 'res' AND ended_at IS NULL").await, 1);
 }
 
 #[tokio::test]

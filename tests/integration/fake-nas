@@ -1,6 +1,7 @@
 # Test only: FreeRADIUS plays the access point's Dynamic Authorization server (RFC 5176), so
 # netportal's Disconnect-Request is checked by an independent implementation (authenticator,
-# Message-Authenticator). It answers Disconnect-ACK and logs the request.
+# Message-Authenticator). It answers Disconnect-ACK (a NAK with Error-Cause 503 for a session id
+# starting with "gone-") and logs the request.
 server fake-nas {
 	listen {
 		type = coa
@@ -12,6 +13,14 @@ server fake-nas {
 		# portal requires that; FreeRADIUS computes the attribute when it is set to zero
 		update reply {
 			Message-Authenticator := 0x00
+		}
+		# a session the test marks as unknown to the access point: Disconnect-NAK with
+		# Error-Cause 503 Session-Context-Not-Found, as hostapd answers for a session it lost
+		if (&Acct-Session-Id && (&Acct-Session-Id =~ /^gone-/)) {
+			update reply {
+				Error-Cause := Session-Context-Not-Found
+			}
+			reject
 		}
 		ok
 	}

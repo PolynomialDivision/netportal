@@ -248,9 +248,6 @@ pub struct Person {
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct PersonState {
     pub is_admin: bool,
-    /// moves on when every portal session of the person ends ([`end_sessions`], offboarding);
-    /// a session cookie carries the epoch of its login
-    pub session_epoch: i64,
 }
 
 /// A RADIUS session of a device: where a Disconnect-Request goes (the access point or switch,
@@ -260,6 +257,9 @@ pub struct RadiusSession {
     pub nas_ip: String,
     pub calling_station: String,
     pub user_name: String,
+    /// the accounting session's Acct-Session-Id when the request names one session (the
+    /// reconciliation's), else empty (every session of the MAC at that access point)
+    pub acct_session_id: String,
 }
 
 /// Accounting sessions still open after this long without an update are not disconnected (the
@@ -273,7 +273,7 @@ pub const SESSION_TARGETS: i64 = 16;
 /// (`radius_acct`, stopped IS NULL, updated in the last [`OPEN_SESSION_HOURS`]; a Mac on Wi-Fi
 /// and on the wired port has two), one per access point and MAC, the latest login first.
 const SESSIONS_OF: &str = "
-    SELECT nas_ip, calling_station, user_name FROM (
+    SELECT nas_ip, calling_station, user_name, '' AS acct_session_id FROM (
         SELECT DISTINCT ON (nas_ip, mac) nas_ip, calling_station, user_name, pri FROM (
             SELECT host(s.nas_ip) AS nas_ip, s.calling_station, s.user_name,
                    np_mac(s.calling_station) AS mac, 0 AS pri
@@ -315,22 +315,23 @@ pub async fn upsert_person(db: &mut Db, sub: &str, username: &str, display_name:
     Ok(())
 }
 
-/// Whether the person is in the admin groups now (the offboarding round, from the directory).
-/// Losing the right also ends every portal session of the person (the session epoch moves on):
-/// the next page logs in again and gets the groups from Authentik. Returns whether the right
-/// was taken away now.
+/// Whether the person is in the admin groups now (the offboarding round from the directory, the
+/// portal's live check). Losing the right also ends every portal session of the person
+/// ([`end_sessions`]): the next page logs in again and gets the groups from Authentik. Returns
+/// whether the right was taken away now.
 pub async fn set_admin(db: &mut Db, sub: &str, is_admin: bool) -> Result<bool> {
     let lost: Option<bool> = sqlx::query_scalar(
-        "UPDATE person SET is_admin = $2,
-             session_epoch = session_epoch + CASE WHEN is_admin AND NOT $2 THEN 1 ELSE 0 END
-         WHERE sub = $1 AND is_admin IS DISTINCT FROM $2
-         RETURNING NOT $2",
+        "UPDATE person SET is_admin = $2 WHERE sub = $1 AND is_admin IS DISTINCT FROM $2 RETURNING NOT $2",
     )
     .bind(sub)
     .bind(is_admin)
     .fetch_optional(db.tx().await?)
     .await?;
-    Ok(lost.unwrap_or(false))
+    let lost = lost.unwrap_or(false);
+    if lost {
+        end_sessions(db, sub).await?;
+    }
+    Ok(lost)
 }
 
 /// The person's policy, `None` when unknown (or no such person).
@@ -372,10 +373,10 @@ pub async fn people(db: &mut Db) -> Result<IndexMap<String, Person>> {
     Ok(rows.into_iter().map(|p| (p.sub.clone(), p)).collect())
 }
 
-/// The person's rights while active (logged in, not offboarded since), else `None`. Asked on
-/// every request that needs a login: rights come from here, not from the cookie.
+/// The person's rights while active (logged in, not offboarded since), else `None` (the portal
+/// asks [`session_rights`] on every request instead: the same with the session's row).
 pub async fn person_state(db: &mut Db, sub: &str) -> Result<Option<PersonState>> {
-    Ok(sqlx::query_as("SELECT is_admin, session_epoch FROM person WHERE sub = $1 AND offboarded_at IS NULL")
+    Ok(sqlx::query_as("SELECT is_admin FROM person WHERE sub = $1 AND offboarded_at IS NULL")
         .bind(sub)
         .fetch_optional(db.tx().await?)
         .await?)
@@ -441,30 +442,84 @@ pub async fn clear_absent(db: &mut Db, sub: &str) -> Result<()> {
     Ok(())
 }
 
-/// End every portal session of the person (a logout; their cookies carry an older epoch now).
-pub async fn end_sessions(db: &mut Db, sub: &str) -> Result<()> {
-    sqlx::query("UPDATE person SET session_epoch = session_epoch + 1 WHERE sub = $1")
-        .bind(sub)
-        .execute(db.tx().await?)
-        .await?;
-    Ok(())
-}
+// --- portal sessions ---------------------------------------------------------------------------------
 
-/// The person lost access: no portal session (now, and none of the old cookies after a later
-/// login), no admin right, no app grants (devices: revoke each).
-pub async fn offboard_person(db: &mut Db, sub: &str) -> Result<()> {
+/// A portal session ends this long after its login however busy (the 8 h idle limit is the
+/// cookie's own timestamp, checked by the web).
+pub const SESSION_LIFETIME: Duration = Duration::hours(12);
+
+/// A new portal session of the person (the login): its id for the session cookie (32 random
+/// bytes, base64url; only its SHA-256 is stored). The person's ended and expired rows go now.
+pub async fn start_session(db: &mut Db, sub: &str) -> Result<String> {
+    let id = new_token();
     let conn = db.tx().await?;
     sqlx::query(
-        "UPDATE person SET offboarded_at = now(), is_admin = false, session_epoch = session_epoch + 1
-         WHERE sub = $1 AND offboarded_at IS NULL",
+        "DELETE FROM web_session
+         WHERE sub = $1 AND (ended_at IS NOT NULL OR created_at <= now() - make_interval(secs => $2))",
     )
     .bind(sub)
+    .bind(SESSION_LIFETIME.as_seconds_f64())
     .execute(&mut *conn)
     .await?;
+    sqlx::query("INSERT INTO web_session (id_hash, sub) VALUES ($1, $2)")
+        .bind(token_hash(&id))
+        .bind(sub)
+        .execute(&mut *conn)
+        .await?;
+    Ok(id)
+}
+
+/// The rights of the person while this portal session of theirs lives (not ended, younger than
+/// [`SESSION_LIFETIME`], the person not offboarded), else `None`. Asked on every request that
+/// needs a login (one query): rights come from here, not from the cookie.
+pub async fn session_rights(db: &mut Db, session_id: &str, sub: &str) -> Result<Option<PersonState>> {
+    Ok(sqlx::query_as(
+        "SELECT p.is_admin FROM web_session s JOIN person p ON p.sub = s.sub
+         WHERE s.id_hash = $1 AND s.sub = $2 AND s.ended_at IS NULL AND p.offboarded_at IS NULL
+           AND s.created_at > now() - make_interval(secs => $3)",
+    )
+    .bind(token_hash(session_id))
+    .bind(sub)
+    .bind(SESSION_LIFETIME.as_seconds_f64())
+    .fetch_optional(db.tx().await?)
+    .await?)
+}
+
+/// End this portal session (a logout: the person's other sessions stay). Returns whether it was
+/// still open.
+pub async fn end_session(db: &mut Db, session_id: &str) -> Result<bool> {
+    let n = sqlx::query("UPDATE web_session SET ended_at = now() WHERE id_hash = $1 AND ended_at IS NULL")
+        .bind(token_hash(session_id))
+        .execute(db.tx().await?)
+        .await?
+        .rows_affected();
+    Ok(n > 0)
+}
+
+/// End every portal session of the person ("log out everywhere", an offboarding, the loss of the
+/// admin right): every cookie of theirs, copies included, is no login from now on. Returns how
+/// many were open.
+pub async fn end_sessions(db: &mut Db, sub: &str) -> Result<u64> {
+    Ok(sqlx::query("UPDATE web_session SET ended_at = now() WHERE sub = $1 AND ended_at IS NULL")
+        .bind(sub)
+        .execute(db.tx().await?)
+        .await?
+        .rows_affected())
+}
+
+/// The person lost access: no portal session (now; a later login starts new ones), no admin
+/// right, no app grants (devices: revoke each).
+pub async fn offboard_person(db: &mut Db, sub: &str) -> Result<()> {
+    let conn = db.tx().await?;
+    sqlx::query("UPDATE person SET offboarded_at = now(), is_admin = false WHERE sub = $1 AND offboarded_at IS NULL")
+        .bind(sub)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("UPDATE oauth_grant SET revoked_at = now() WHERE owner = $1 AND revoked_at IS NULL")
         .bind(sub)
         .execute(&mut *conn)
         .await?;
+    end_sessions(db, sub).await?;
     Ok(())
 }
 
@@ -649,6 +704,223 @@ pub async fn audit(db: &mut Db, actor: &str, action: &str, device_id: Option<Uui
     Ok(())
 }
 
+// --- the Disconnect reconciliation ------------------------------------------------------------------
+
+/// A lock must be this old before the reconciliation acts on it: the portal's or the
+/// offboarding's own Disconnect-Requests (3 tries of 2 s) are done by then.
+pub const RECHECK_GRACE: Duration = Duration::seconds(20);
+/// A settled session the access point reports this long after it was settled is live again.
+pub const RECHECK_HEARD_SLACK: Duration = Duration::seconds(60);
+/// Why a live session should not be there any more (`disconnect_recheck.reason`, the label of
+/// `netportal_locked_sessions_live`).
+pub const LOCK_REASONS: [&str; 3] = ["revoked", "credential", "vlan"];
+/// Live locked sessions read per round at most.
+pub const LOCKED_SESSIONS_MAX: i64 = 1000;
+
+/// The live accounting sessions of locked devices, with their reconciliation state. Live: no
+/// Stop, and a Start or Interim-Update within two accounting intervals plus 60 s (the session's
+/// measured interval or `$1`, NETPORTAL_ACCT_INTERIM_S, whichever is longer; the presence's
+/// stale rule). Locked, in this order:
+/// - `revoked`: the device is revoked;
+/// - `credential`: the certificate the session's login used is retired or expired, or the
+///   device has no valid certificate left;
+/// - `vlan`: the session's login put it into another VLAN than the device's policy gives now
+///   (`radius_auth.vlan`), or, for a login without a recorded VLAN, the device moved to another
+///   policy after the session opened.
+///
+/// The session's login is the device's latest Accept with the session's MAC before the registry
+/// first heard of the session (`opened_at`, the registry's clock). Only locks older than `$2`
+/// seconds count ([`RECHECK_GRACE`]).
+const LOCKED_LIVE: &str = "
+    WITH live AS (
+        SELECT a.nas_ip, a.acct_session_id, a.device_id, a.mac, a.updated, a.opened_at
+        FROM radius_acct a
+        WHERE a.stopped IS NULL AND a.device_id IS NOT NULL AND a.mac IS NOT NULL
+          AND a.updated > now() - make_interval(secs => 2 * greatest(coalesce(a.interim_s, 0), $1) + 60)
+    ), judged AS (
+        SELECT l.*, d.revoked_at, p.vlan AS policy_vlan, login.at AS login_at, login.vlan AS login_vlan,
+               least(coalesce(c.retired_at, 'infinity'), c.not_after) AS cert_until,
+               (SELECT max(least(coalesce(c2.retired_at, 'infinity'), c2.not_after))
+                  FROM credential c2 WHERE c2.device_id = d.id) AS device_until,
+               (SELECT max(au.at) FROM audit au
+                 WHERE au.device_id = d.id AND au.action LIKE 'policy:%') AS moved_at
+        FROM live l
+        JOIN device d ON d.id = l.device_id
+        JOIN policy p ON p.name = d.policy
+        LEFT JOIN LATERAL (
+            SELECT r.at, r.serial, r.vlan FROM radius_auth r
+            WHERE r.device_id = l.device_id AND r.result = 'accept' AND r.mac = l.mac AND r.at <= l.opened_at
+            ORDER BY r.at DESC LIMIT 1
+        ) login ON true
+        LEFT JOIN credential c ON c.serial = login.serial AND c.device_id = d.id
+    ), locked AS (
+        SELECT j.*,
+            CASE WHEN j.revoked_at IS NOT NULL THEN 'revoked'
+                 WHEN j.cert_until <= now() OR coalesce(j.device_until, '-infinity') <= now() THEN 'credential'
+                 WHEN j.login_vlan IS NOT NULL AND j.login_vlan <> j.policy_vlan THEN 'vlan'
+                 WHEN j.login_vlan IS NULL AND j.moved_at > j.opened_at THEN 'vlan'
+            END AS reason,
+            CASE WHEN j.revoked_at IS NOT NULL THEN j.revoked_at
+                 WHEN j.cert_until <= now() THEN j.cert_until
+                 WHEN coalesce(j.device_until, '-infinity') <= now() THEN coalesce(j.device_until, '-infinity')
+                 ELSE coalesce(j.moved_at, j.login_at, '-infinity')
+            END AS lock_at
+        FROM judged j
+    )
+    SELECT host(k.nas_ip) AS nas_ip, k.acct_session_id, k.device_id, k.mac::text AS mac, k.updated, k.reason,
+           coalesce(r.tries, 0) AS tries, r.settled, r.settled_at, r.next_at
+    FROM locked k
+    LEFT JOIN disconnect_recheck r ON r.nas_ip = k.nas_ip AND r.acct_session_id = k.acct_session_id
+    WHERE k.reason IS NOT NULL AND k.lock_at < now() - make_interval(secs => $2)
+    ORDER BY k.updated DESC
+    LIMIT $3";
+
+/// A live accounting session of a locked device ([`locked_live_sessions`]).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LockedSession {
+    pub nas_ip: String,
+    pub acct_session_id: String,
+    pub device_id: Uuid,
+    /// `aa:bb:cc:dd:ee:ff`
+    pub mac: String,
+    /// its latest Start or Interim-Update
+    pub updated: OffsetDateTime,
+    /// one of [`LOCK_REASONS`]
+    pub reason: String,
+    /// Disconnect-Requests the reconciliation sent for it so far
+    pub tries: i32,
+    /// `ack`, `not_found`, `stale`, `given_up`, or `None` while open
+    pub settled: Option<String>,
+    pub settled_at: Option<OffsetDateTime>,
+    /// when its next try is due (`None`: never tried)
+    pub next_at: Option<OffsetDateTime>,
+}
+
+impl LockedSession {
+    /// Reported by the access point after it was settled (an Interim-Update after an ACK).
+    fn heard_since_settled(&self) -> bool {
+        self.settled_at.is_some_and(|at| self.updated > at + RECHECK_HEARD_SLACK)
+    }
+
+    /// Whether the reconciliation sends a Disconnect-Request now: never tried, or its retry due;
+    /// a session settled by an ACK (or as stale) that the access point reports again, while
+    /// fewer than `max_tries` were sent. Never one an access point answered "no such session"
+    /// (`not_found`) or one given up.
+    pub fn due(&self, now: OffsetDateTime, max_tries: i32) -> bool {
+        match self.settled.as_deref() {
+            None => self.next_at.is_none_or(|at| at <= now),
+            Some("ack" | "stale") => self.heard_since_settled() && self.tries < max_tries,
+            _ => false,
+        }
+    }
+
+    /// Whether it counts as still connected after the reconciliation's tries
+    /// (`netportal_locked_sessions_live`): not settled, given up, or reported again since it was
+    /// settled.
+    pub fn still_live(&self) -> bool {
+        match self.settled.as_deref() {
+            None | Some("given_up") => true,
+            Some(_) => self.heard_since_settled(),
+        }
+    }
+
+    /// The Disconnect target: this one session at its access point (Acct-Session-Id and the MAC
+    /// as hostapd formats it).
+    pub fn target(&self) -> RadiusSession {
+        RadiusSession {
+            nas_ip: self.nas_ip.clone(),
+            calling_station: self.mac.to_ascii_uppercase().replace(':', "-"),
+            user_name: String::new(),
+            acct_session_id: self.acct_session_id.clone(),
+        }
+    }
+}
+
+/// Every live accounting session of a locked device whose lock is older than `grace` (at most
+/// [`LOCKED_SESSIONS_MAX`], the most recently heard first), see [`LOCKED_LIVE`]. `interim_s`:
+/// NETPORTAL_ACCT_INTERIM_S.
+pub async fn locked_live_sessions(db: &mut Db, interim_s: u32, grace: Duration) -> Result<Vec<LockedSession>> {
+    Ok(sqlx::query_as(LOCKED_LIVE)
+        .bind(f64::from(interim_s))
+        .bind(grace.as_seconds_f64())
+        .bind(LOCKED_SESSIONS_MAX)
+        .fetch_all(db.tx().await?)
+        .await?)
+}
+
+/// `netportal_locked_sessions_live{reason}`: the [`locked_live_sessions`] past [`RECHECK_GRACE`]
+/// that are still live after the reconciliation's tries ([`LockedSession::still_live`]), per
+/// reason of [`LOCK_REASONS`] in that order.
+pub async fn locked_live_counts(db: &mut Db, interim_s: u32) -> Result<Vec<(&'static str, i64)>> {
+    let sessions = locked_live_sessions(db, interim_s, RECHECK_GRACE).await?;
+    Ok(LOCK_REASONS
+        .iter()
+        .map(|reason| (*reason, sessions.iter().filter(|s| s.reason == *reason && s.still_live()).count() as i64))
+        .collect())
+}
+
+/// One Disconnect-Request of the reconciliation for this session: its `result`
+/// (`disconnect_recheck.last_result`), `settled` when it settles the session (`ack`,
+/// `not_found`, `given_up`), else the next try in `retry_in`.
+pub async fn record_recheck(
+    db: &mut Db,
+    session: &LockedSession,
+    result: &str,
+    settled: Option<&str>,
+    retry_in: Duration,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO disconnect_recheck AS r (nas_ip, acct_session_id, device_id, reason, tries, last_at, last_result,
+                                             next_at, settled, settled_at)
+         VALUES ($1::inet, $2, $3, $4, 1, now(), $5, now() + make_interval(secs => $6), $7,
+                 CASE WHEN $7::text IS NOT NULL THEN now() END)
+         ON CONFLICT (nas_ip, acct_session_id) DO UPDATE SET
+             device_id = EXCLUDED.device_id, reason = EXCLUDED.reason, tries = r.tries + 1, last_at = now(),
+             last_result = EXCLUDED.last_result, next_at = EXCLUDED.next_at, settled = EXCLUDED.settled,
+             settled_at = EXCLUDED.settled_at",
+    )
+    .bind(&session.nas_ip)
+    .bind(&session.acct_session_id)
+    .bind(session.device_id)
+    .bind(&session.reason)
+    .bind(result)
+    .bind(retry_in.as_seconds_f64())
+    .bind(settled)
+    .execute(db.tx().await?)
+    .await?;
+    Ok(())
+}
+
+/// After a round over the `live` sessions (all of [`locked_live_sessions`]): open entries of
+/// sessions no longer among them are settled as `stale` (a Stop, no update for two intervals,
+/// or no longer locked); settled entries of such sessions go a day after they settled. Returns
+/// the sessions settled as stale now.
+pub async fn settle_rechecks(db: &mut Db, live: &[LockedSession]) -> Result<u64> {
+    let nas: Vec<&str> = live.iter().map(|s| s.nas_ip.as_str()).collect();
+    let ids: Vec<&str> = live.iter().map(|s| s.acct_session_id.as_str()).collect();
+    let conn = db.tx().await?;
+    let stale = sqlx::query(
+        "UPDATE disconnect_recheck SET settled = 'stale', settled_at = now()
+         WHERE settled IS NULL
+           AND (host(nas_ip), acct_session_id) NOT IN (SELECT * FROM unnest($1::text[], $2::text[]))",
+    )
+    .bind(&nas)
+    .bind(&ids)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        "DELETE FROM disconnect_recheck
+         WHERE settled_at < now() - interval '1 day'
+           AND (host(nas_ip), acct_session_id) NOT IN (SELECT * FROM unnest($1::text[], $2::text[]))",
+    )
+    .bind(&nas)
+    .bind(&ids)
+    .execute(&mut *conn)
+    .await?;
+    Ok(stale)
+}
+
 // --- retention ---------------------------------------------------------------------------------------
 
 /// radius_auth, radius_acct, connection_event, device_mac of revoked devices
@@ -659,7 +931,8 @@ pub const PRUNE_BATCH: i64 = 10_000;
 
 /// Housekeeping: RADIUS decisions, accounting sessions and UniFi events older than 400 days,
 /// the MAC identities of revoked devices 400 days after their last use, audit rows after
-/// `audit_days`, expired tokens and downloads. Rollups and incidents are kept. Every table in
+/// `audit_days`, expired tokens and downloads, ended and expired portal sessions. Rollups and
+/// incidents are kept. Every table in
 /// DELETEs of at most `batch` rows until one deletes fewer; with `commit` each is committed
 /// (no statement or transaction grows with the backlog), else the caller commits. Returns the
 /// rows deleted per table.
@@ -672,7 +945,7 @@ pub async fn prune(
 ) -> Result<IndexMap<&'static str, u64>> {
     let now = now.unwrap_or_else(OffsetDateTime::now_utc);
     let cutoff = now - Duration::days(RETENTION_DAYS);
-    let statements: [(&'static str, &str, OffsetDateTime); 7] = [
+    let statements: [(&'static str, &str, OffsetDateTime); 8] = [
         ("radius_auth", "SELECT ctid FROM radius_auth WHERE at < $1", cutoff),
         ("radius_acct", "SELECT ctid FROM radius_acct WHERE updated < $1", cutoff),
         ("connection_event", "SELECT ctid FROM connection_event WHERE at < $1", cutoff),
@@ -685,6 +958,11 @@ pub async fn prune(
         ("audit", "SELECT ctid FROM audit WHERE at < $1", now - Duration::days(audit_days)),
         ("download", "SELECT ctid FROM download WHERE expires_at < $1", now),
         ("oauth_token", "SELECT ctid FROM oauth_token WHERE expires_at < $1", now),
+        (
+            "web_session",
+            "SELECT ctid FROM web_session WHERE ended_at IS NOT NULL OR created_at < $1",
+            now - SESSION_LIFETIME,
+        ),
     ];
     let batch = batch.max(1);
     let mut deleted = IndexMap::new();
@@ -1732,8 +2010,15 @@ pub async fn job_status(db: &mut Db) -> Result<Vec<JobStatus>> {
         .await?)
 }
 
+/// The job's stored cursor (`{}` for a job without one, `None` for an unknown job).
+pub async fn job_cursor(db: &mut Db, name: &str) -> Result<Option<Value>> {
+    let cursor: Option<Json<Value>> =
+        sqlx::query_scalar("SELECT cursor FROM job WHERE name = $1").bind(name).fetch_optional(db.tx().await?).await?;
+    Ok(cursor.map(|c| c.0))
+}
+
 /// Disconnect results counted for `/metrics` (`audit.action = 'disconnect:<result>'`).
-pub const DISCONNECT_RESULTS: [&str; 6] = ["ack", "no-session", "skipped", "timeout", "nak", "error"];
+pub const DISCONNECT_RESULTS: [&str; 7] = ["ack", "no-session", "skipped", "timeout", "nak", "not-found", "error"];
 
 /// Counts for `/metrics`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1848,7 +2133,16 @@ mod tests {
     #[test]
     fn test_migration_files() {
         let names: Vec<(i64, &str)> = MIGRATOR.iter().map(|m| (m.version, m.description.as_ref())).collect();
-        assert_eq!(names, [(1, "registry"), (2, "radius contract"), (3, "session epoch"), (4, "security review")]);
+        assert_eq!(
+            names,
+            [
+                (1, "registry"),
+                (2, "radius contract"),
+                (3, "session epoch"),
+                (4, "security review"),
+                (5, "sessions and rechecks")
+            ]
+        );
         // every file in migrations is embedded (a new file needs a rebuild, not a code change)
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
         let mut files: Vec<String> = std::fs::read_dir(dir)
@@ -1857,14 +2151,27 @@ mod tests {
         files.sort();
         assert_eq!(
             files,
-            ["0001_registry.sql", "0002_radius_contract.sql", "0003_session_epoch.sql", "0004_security_review.sql"]
+            [
+                "0001_registry.sql",
+                "0002_radius_contract.sql",
+                "0003_session_epoch.sql",
+                "0004_security_review.sql",
+                "0005_sessions_and_rechecks.sql"
+            ]
         );
     }
 
     #[test]
     fn test_contract_functions_are_hardened() {
         let sql = MIGRATOR.iter().find(|m| m.version == 2).map(|m| m.sql.as_ref()).unwrap_or("");
-        for name in ["radius.login", "radius.reject", "radius.accounting", "radius.cert_status"] {
+        let v5 = MIGRATOR.iter().find(|m| m.version == 5).map(|m| m.sql.as_ref()).unwrap_or("");
+        for (name, sql) in [
+            ("radius.login", sql),
+            ("radius.reject", sql),
+            ("radius.accounting", sql),
+            ("radius.cert_status", sql),
+            ("radius.login", v5),
+        ] {
             let head = sql.split(&format!("CREATE FUNCTION {name}(")).nth(1).unwrap_or("");
             let head = head.split(" AS $$").next().unwrap_or("");
             assert!(head.contains("SECURITY DEFINER"), "{name}");

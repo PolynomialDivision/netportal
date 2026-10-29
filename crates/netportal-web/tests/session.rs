@@ -307,7 +307,7 @@ async fn test_tampered_or_foreign_cookie_is_no_session() {
 }
 
 #[tokio::test]
-async fn test_logout_ends_every_session_of_the_person() {
+async fn test_logout_ends_only_this_session() {
     let admin_url = need_db!();
     let portal = Portal::new(&admin_url).await;
     let person = resident("out");
@@ -320,14 +320,67 @@ async fn test_logout_ends_every_session_of_the_person() {
     assert_eq!(r.location().as_deref(), Some(common::LOGOUT_URL));
     assert!(phone.cookies.is_empty(), "the cookie is removed");
     assert!(phone.get("/").await.to_login());
-    // a copy of the cookie (or a response in flight that sets it again) is no session either
+    // a copy of the cookie (or a response in flight that sets it again) is no session either:
+    // the session ended on the server
     let mut stolen = portal.browser();
     stolen.cookies = copy;
     assert!(stolen.get("/").await.to_login());
-    // every portal session of the person ends; the next login is a new one
-    assert!(laptop.get("/").await.to_login());
+    // the person's other sessions stay
+    assert_eq!(laptop.get("/").await.status, StatusCode::OK);
+    let open: i64 = portal
+        .scalar(&format!("SELECT count(*) FROM web_session WHERE sub = '{}' AND ended_at IS NULL", person.sub))
+        .await;
+    assert_eq!(open, 1);
+}
+
+#[tokio::test]
+async fn test_logout_everywhere_ends_every_session_of_the_person() {
+    let admin_url = need_db!();
+    let portal = Portal::new(&admin_url).await;
+    let person = resident("all");
+    let other = resident("other");
+    let mut phone = portal.browser().logged_in(&person).await;
+    let mut laptop = portal.browser().logged_in(&person).await;
+    let mut someone = portal.browser().logged_in(&other).await;
+    let copy = laptop.cookies.clone();
+    let page = phone.get("/").await.text();
+    assert!(page.contains(r#"<form method="post" action="/logout/all" class="inline">"#), "{page}");
+    // CSRF as every POST
+    assert_eq!(phone.post("/logout/all", &[]).await.status, StatusCode::BAD_REQUEST);
+    let csrf = phone.csrf().await;
+    let r = phone.post("/logout/all", &[("csrf", &csrf)]).await;
+    assert_eq!(r.status, StatusCode::FOUND);
+    assert_eq!(r.location().as_deref(), Some(common::LOGOUT_URL));
+    assert!(phone.cookies.is_empty());
+    for b in [&mut phone, &mut laptop] {
+        assert!(b.get("/").await.to_login());
+    }
+    let mut stolen = portal.browser();
+    stolen.cookies = copy;
+    assert!(stolen.get("/").await.to_login());
+    // nobody else's
+    assert_eq!(someone.get("/").await.status, StatusCode::OK);
+    // the next login is a new session
     laptop.login(&person).await;
     assert_eq!(laptop.get("/").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_a_stale_cookie_cannot_log_the_person_out_everywhere() {
+    let admin_url = need_db!();
+    let portal = Portal::new(&admin_url).await;
+    let person = resident("stale-all");
+    let mut current = portal.browser().logged_in(&person).await;
+    let mut copy = portal.browser().logged_in(&person).await;
+    let saved = copy.cookies.clone();
+    let token = copy.csrf().await;
+    copy.post("/logout", &[("csrf", &token)]).await;
+    // a copy of that ended session's cookie (its CSRF token still matches): it ends nothing else
+    let mut replay = portal.browser();
+    replay.cookies = saved;
+    let r = replay.post("/logout/all", &[("csrf", &token)]).await;
+    assert_eq!(r.status, StatusCode::FOUND);
+    assert_eq!(current.get("/").await.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -527,4 +580,75 @@ async fn test_security_headers() {
     assert_eq!(b.get_with("/static/dashboard.js", &[("if-none-match", &tag)]).await.status, StatusCode::NOT_MODIFIED);
     assert_eq!(b.get("/static/nope.js").await.status, StatusCode::NOT_FOUND);
     assert_eq!(b.get("/static/..%2Fweb.py").await.status, StatusCode::NOT_FOUND);
+}
+
+/// Waits (a little) until the person has `open` sessions on the server: the row of an expired
+/// cookie is ended by a task the request does not wait for.
+async fn open_sessions_become(portal: &Portal, sub: &str, open: i64) {
+    let sql = format!("SELECT count(*) FROM web_session WHERE sub = '{sub}' AND ended_at IS NULL");
+    for _ in 0..100 {
+        if portal.scalar::<i64>(&sql).await == open {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(portal.scalar::<i64>(&sql).await, open);
+}
+
+#[tokio::test]
+async fn test_a_cookie_past_its_idle_limit_ends_its_row_so_copies_stop() {
+    // review 2026-10-29: the idle limit lives in each copy of the cookie; a copy kept fresh
+    // elsewhere must not outlive the owner's expired one
+    let admin_url = need_db!();
+    let portal = Portal::new(&admin_url).await;
+    let person = resident("idlecopy");
+    let mut owner = portal.browser().logged_in(&person).await;
+    let mut copy = portal.browser();
+    copy.cookies = owner.cookies.clone();
+    portal.clock.advance(4 * HOUR);
+    assert_eq!(copy.get("/").await.status, StatusCode::OK); // the copy is used, the owner's is not
+    portal.clock.advance(4 * HOUR + 60);
+    assert!(owner.get("/").await.to_login());
+    open_sessions_become(&portal, &person.sub, 0).await;
+    assert!(copy.get("/").await.to_login());
+}
+
+#[tokio::test]
+async fn test_a_login_over_a_login_ends_the_old_row() {
+    // review 2026-10-29: on a shared computer the previous person's cookie (and its copies) is no
+    // login once someone logs in on top of it
+    let admin_url = need_db!();
+    let portal = Portal::new(&admin_url).await;
+    let (first, second) = (resident("shared1"), resident("shared2"));
+    let mut b = portal.browser().logged_in(&first).await;
+    let mut copy = portal.browser();
+    copy.cookies = b.cookies.clone();
+    let mut elsewhere = portal.browser().logged_in(&first).await;
+    b.login(&second).await;
+    assert_eq!(b.get("/").await.status, StatusCode::OK);
+    assert!(copy.get("/").await.to_login());
+    // only that browser's row: the first person's other session stays
+    assert_eq!(elsewhere.get("/").await.status, StatusCode::OK);
+    open_sessions_become(&portal, &first.sub, 1).await;
+}
+
+#[tokio::test]
+async fn test_a_logout_that_cannot_reach_the_registry_says_so_and_keeps_the_cookie() {
+    // review 2026-10-29: "log out everywhere" must not look done when no row was ended
+    let admin_url = need_db!();
+    let portal = Portal::new(&admin_url).await;
+    let person = resident("nodb");
+    let mut b = portal.browser().logged_in(&person).await;
+    let csrf = b.csrf().await;
+    // the person's rows cannot be written for a moment
+    portal.exec("ALTER TABLE web_session ADD CONSTRAINT test_no_end CHECK (ended_at IS NULL) NOT VALID").await;
+    let r = b.post("/logout/all", &[("csrf", &csrf)]).await;
+    portal.exec("ALTER TABLE web_session DROP CONSTRAINT test_no_end").await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(r.text().contains("still valid") || r.text().contains("gelten noch"), "{}", r.text());
+    assert!(!b.cookies.is_empty(), "the cookie stays, so the person can try again");
+    open_sessions_become(&portal, &person.sub, 1).await;
+    let r = b.post("/logout/all", &[("csrf", &csrf)]).await;
+    assert_eq!(r.status, StatusCode::FOUND);
+    open_sessions_become(&portal, &person.sub, 0).await;
 }

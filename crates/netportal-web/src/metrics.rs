@@ -9,7 +9,11 @@
 //! shows as `netportal_registry_up 0`, the other gauges keep their last values): devices, certificates
 //! (DEVICES per certificate state: a device in its renewal overlap counts once), the
 //! Disconnects of the last hour of every process, the offboarding's last success and the jobs'
-//! gauges (rebuilt each scrape; a job without an attempt has no `_up` and `_last_attempt`).
+//! gauges (rebuilt each scrape; a job without an attempt has no `_up` and `_last_attempt`), the
+//! Disconnect reconciliation's running totals (`netportal_disconnect_rechecks_total{result}`, a
+//! counter kept in the job's cursor by the offboarding sidecar) and the live sessions of locked
+//! devices (`netportal_locked_sessions_live{reason}`: still connected after the
+//! reconciliation's tries, for the alert "a revoked device is still connected").
 //!
 //! Encoding: prometheus-client's OpenMetrics text when the scraper asks for it (`Accept:
 //! application/openmetrics-text`, as Prometheus does), else the classic text format 0.0.4
@@ -20,8 +24,11 @@
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use std::sync::Mutex;
+
 use netportal_core::Pool;
-use netportal_core::registry::{self, DISCONNECT_RESULTS};
+use netportal_core::registry::{self, DISCONNECT_RESULTS, LOCK_REASONS};
+use netportal_offboard::recheck;
 use netportal_telemetry::telemetry::Telemetry;
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
@@ -38,8 +45,13 @@ type FloatGauge = Gauge<f64, AtomicU64>;
 
 /// The enrolment formats (the downloads and the Let's Wi-Fi API).
 pub const FORMATS: [&str; 5] = ["apple", "apple-mac", "android", "eap-config", "letswifi"];
-const COUNTERS: [&str; 4] =
-    ["netportal_enrolments", "netportal_disconnects", "netportal_offboarded_devices", "netportal_telemetry_queries"];
+const COUNTERS: [&str; 5] = [
+    "netportal_enrolments",
+    "netportal_disconnects",
+    "netportal_offboarded_devices",
+    "netportal_telemetry_queries",
+    "netportal_disconnect_rechecks",
+];
 /// A scrape waits at most this long for the registry.
 const DB_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -68,6 +80,28 @@ impl Collector for TelemetryQueries {
     }
 }
 
+/// `netportal_disconnect_rechecks_total{result}`: the reconciliation's totals as the registry
+/// held them at the latest scrape (the job's cursor; every label from the start).
+#[derive(Debug, Default)]
+struct Rechecks(std::sync::Arc<Mutex<Vec<(&'static str, u64)>>>);
+
+impl Collector for Rechecks {
+    fn encode(&self, mut encoder: DescriptorEncoder) -> Result<(), std::fmt::Error> {
+        let totals = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut family = encoder.encode_descriptor(
+            "netportal_disconnect_rechecks",
+            "Disconnect-Requests of the reconciliation (sessions still live after a lock) and sessions it settled, by result",
+            None,
+            MetricType::Counter,
+        )?;
+        for result in recheck::RESULTS {
+            let n = totals.iter().find(|(r, _)| *r == result).map(|(_, n)| *n).unwrap_or(0);
+            ConstCounter::new(n).encode(family.encode_family(&label("result", result))?)?;
+        }
+        Ok(())
+    }
+}
+
 /// The portal's metrics (one per process).
 pub struct Metrics {
     registry: Registry,
@@ -82,12 +116,16 @@ pub struct Metrics {
     job_last_attempt: Family<Labels, FloatGauge>,
     job_up: Family<Labels, FloatGauge>,
     job_duration: Family<Labels, FloatGauge>,
+    rechecks: std::sync::Arc<Mutex<Vec<(&'static str, u64)>>>,
+    locked_live: Family<Labels, FloatGauge>,
+    /// `NETPORTAL_ACCT_INTERIM_S` (which sessions are live)
+    interim_s: u32,
     /// one scrape at a time (the gauges are shared)
     scrape: tokio::sync::Mutex<()>,
 }
 
 impl Metrics {
-    pub fn new(telemetry: &Telemetry) -> Metrics {
+    pub fn new(telemetry: &Telemetry, interim_s: u32) -> Metrics {
         let mut registry = Registry::default();
         let enrolments = Family::<Labels, Counter>::default();
         let disconnects = Family::<Labels, Counter>::default();
@@ -101,6 +139,9 @@ impl Metrics {
         let job_last_attempt = Family::<Labels, FloatGauge>::default();
         let job_up = Family::<Labels, FloatGauge>::default();
         let job_duration = Family::<Labels, FloatGauge>::default();
+        let rechecks = Rechecks::default();
+        let recheck_totals = rechecks.0.clone();
+        let locked_live = Family::<Labels, FloatGauge>::default();
         registry.register("netportal_enrolments", "Profiles and app enrolments handed out", enrolments.clone());
         registry.register(
             "netportal_disconnects",
@@ -138,6 +179,15 @@ impl Metrics {
         );
         registry.register("netportal_job_up", "Whether the job's last run succeeded", job_up.clone());
         registry.register("netportal_job_duration_seconds", "How long the job's last run took", job_duration.clone());
+        registry.register_collector(Box::new(rechecks));
+        registry.register(
+            "netportal_locked_sessions_live",
+            "Live accounting sessions of revoked or moved devices still connected after the reconciliation's tries, by reason",
+            locked_live.clone(),
+        );
+        for reason in LOCK_REASONS {
+            locked_live.get_or_create(&label("reason", reason)).set(0.0);
+        }
         for format in FORMATS {
             let _ = enrolments.get_or_create(&label("format", format));
         }
@@ -157,6 +207,9 @@ impl Metrics {
             job_last_attempt,
             job_up,
             job_duration,
+            rechecks: recheck_totals,
+            locked_live,
+            interim_s,
             scrape: tokio::sync::Mutex::new(()),
         }
     }
@@ -186,6 +239,9 @@ impl Metrics {
             for (result, n) in &stats.disconnects_1h {
                 self.disconnects_1h.get_or_create(&label("result", result)).set(*n as f64);
             }
+            for (reason, n) in registry::locked_live_counts(&mut db, self.interim_s).await? {
+                self.locked_live.get_or_create(&label("reason", reason)).set(n as f64);
+            }
             let jobs = registry::job_status(&mut db).await;
             let _ = db.close().await;
             Ok::<_, registry::RegistryError>(jobs)
@@ -197,6 +253,16 @@ impl Metrics {
                 }
                 match jobs {
                     Ok(rows) => {
+                        if let Some(row) = rows.iter().find(|r| r.name == recheck::JOB) {
+                            let totals = recheck::RESULTS
+                                .iter()
+                                .map(|r| {
+                                    let n = row.cursor.0.get("totals").and_then(|t| t.get(*r)).and_then(|v| v.as_u64());
+                                    (*r, n.unwrap_or(0))
+                                })
+                                .collect();
+                            *self.rechecks.lock().unwrap_or_else(|e| e.into_inner()) = totals;
+                        }
                         for row in rows.iter().filter(|r| !r.name.is_empty()) {
                             let labels = label("job", &row.name);
                             if let Some(at) = row.last_success {
@@ -279,7 +345,7 @@ mod tests {
     #[tokio::test]
     async fn test_families_without_a_registry() {
         let telemetry = Telemetry::new(None, "Example");
-        let metrics = Metrics::new(&telemetry);
+        let metrics = Metrics::new(&telemetry, 300);
         metrics.enrolled("apple");
         metrics.disconnected("no-session");
         let pool = Pool::new(
@@ -309,6 +375,15 @@ mod tests {
             "netportal_telemetry_queries_total{result=\"error\"} 0",
             "# TYPE netportal_registry_up gauge",
             "netportal_registry_up 0.0",
+            "# TYPE netportal_disconnect_rechecks_total counter",
+            "netportal_disconnect_rechecks_total{result=\"ack\"} 0",
+            "netportal_disconnect_rechecks_total{result=\"not_found\"} 0",
+            "netportal_disconnect_rechecks_total{result=\"settled_stale\"} 0",
+            "netportal_disconnect_rechecks_total{result=\"given_up\"} 0",
+            "# TYPE netportal_locked_sessions_live gauge",
+            "netportal_locked_sessions_live{reason=\"revoked\"} 0.0",
+            "netportal_locked_sessions_live{reason=\"credential\"} 0.0",
+            "netportal_locked_sessions_live{reason=\"vlan\"} 0.0",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} missing in\n{text}");
         }

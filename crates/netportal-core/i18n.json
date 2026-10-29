@@ -803,7 +803,12 @@
    "consent_app": "App",
    "consent_return": "Afterwards your browser opens",
    "too_many_devices": "You have reached the limit of {n} devices. Remove a device you no longer use under \"Your devices\", then try again.",
-   "rate_limited": "Too many new devices or downloads in a short time. Please try again later."
+   "rate_limited": "Too many new devices or downloads in a short time. Please try again later.",
+   "logout_all": "Log out everywhere",
+   "logout_all_title": "Ends every session of yours in this portal, on all your devices and browsers",
+   "logout_failed": "You could not be logged out of the portal just now: your sessions are still valid. Please try again in a moment.",
+   "admin_unavailable": "Your admin rights cannot be checked with the house login right now. Please try again in a moment.",
+   "revoke_unconfirmed": "\"{name}\" is removed: it cannot join the Wi-Fi again. The Wi-Fi did not confirm that its current connection was cut, so it may stay online for a while; the portal keeps trying to cut it."
   },
   "de": {
    "title": "WLAN",
@@ -1603,7 +1608,12 @@
    "consent_app": "App",
    "consent_return": "Danach öffnet dein Browser",
    "too_many_devices": "Du hast die Grenze von {n} Geräten erreicht. Entferne unter \"Deine Geräte\" ein Gerät, das du nicht mehr nutzt, und versuche es dann noch einmal.",
-   "rate_limited": "Zu viele neue Geräte oder Downloads in kurzer Zeit. Bitte versuche es später noch einmal."
+   "rate_limited": "Zu viele neue Geräte oder Downloads in kurzer Zeit. Bitte versuche es später noch einmal.",
+   "logout_all": "Überall abmelden",
+   "logout_all_title": "Beendet alle deine Sitzungen in diesem Portal, auf allen deinen Geräten und Browsern",
+   "logout_failed": "Die Abmeldung im Portal hat gerade nicht geklappt: deine Sitzungen gelten noch. Bitte versuche es gleich noch einmal.",
+   "admin_unavailable": "Deine Admin-Rechte lassen sich gerade nicht beim Haus-Login prüfen. Bitte versuche es gleich noch einmal.",
+   "revoke_unconfirmed": "„{name}“ ist entfernt: Es kommt nicht mehr ins WLAN. Das WLAN hat nicht bestätigt, dass seine laufende Verbindung getrennt wurde; es kann also noch eine Weile online bleiben. Das Portal versucht weiter, sie zu trennen."
   },
   "uk": {
    "title": "Wi-Fi",
@@ -2403,7 +2413,12 @@
    "consent_app": "Застосунок",
    "consent_return": "Потім ваш браузер відкриє",
    "too_many_devices": "Досягнуто ліміту пристроїв ({n}). Видаліть у розділі \"Ваші пристрої\" пристрій, яким ви більше не користуєтеся, і спробуйте ще раз.",
-   "rate_limited": "Забагато нових пристроїв або завантажень за короткий час. Спробуйте пізніше."
+   "rate_limited": "Забагато нових пристроїв або завантажень за короткий час. Спробуйте пізніше.",
+   "logout_all": "Вийти на всіх пристроях",
+   "logout_all_title": "Завершує всі ваші сеанси в цьому порталі на всіх ваших пристроях і в усіх браузерах",
+   "logout_failed": "Зараз не вдалося вийти з порталу: ваші сеанси ще дійсні. Спробуйте ще раз за мить.",
+   "admin_unavailable": "Зараз не вдається перевірити ваші права адміністратора в домашньому вході. Спробуйте ще раз за мить.",
+   "revoke_unconfirmed": "«{name}» видалено: він більше не зможе підключитися до Wi-Fi. Wi-Fi не підтвердив, що поточне з’єднання розірвано, тож пристрій може ще деякий час залишатися онлайн; портал і далі намагається його від’єднати."
   }
  },
  "tables": {
