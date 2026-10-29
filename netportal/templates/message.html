@@ -1,8 +1,0 @@
-{% extends "base.html" %}
-{% block body %}
-<section class="card notice">
-  <svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg>
-  <p>{{ message }}</p>
-</section>
-<p class="backlink"><a href="{{ url_for('index') }}"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>{{ t.back_home }}</a></p>
-{% endblock %}

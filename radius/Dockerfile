@@ -1,13 +1,15 @@
-# FreeRADIUS for the house Wi-Fi: the image's server with only our modules and sites
-# (radius/mods, radius/sites). Mounted at run time: /etc/netportal (RADIUS server certificate,
-# device CA chain), /etc/netportal-secrets/radius-server.key and clients.conf (the access
+# FreeRADIUS for the house Wi-Fi (docs/RADIUS_CONTRACT.md): EAP-TLS against the registry's
+# contract in the schema radius (view radius.valid_cert, functions radius.login / radius.reject /
+# radius.accounting), with every access guard of README "FreeRADIUS lessons".
+# The image's server with only our modules and sites (radius/mods, radius/sites).
+# Mounted at run time: /etc/netportal (RADIUS server certificate, device CA chain; from
+# `netportal pki`), /etc/netportal-secrets/radius-server.key and clients.conf (the access
 # points). Environment:
-# RADIUS_DB_HOST, RADIUS_DB_NAME, RADIUS_DB_PASSWORD, RADIUS_STATUS_SECRET, DEVICE_CA_DN,
-# RADIUS_SESSION_TIMEOUT (seconds), NETPORTAL_ACCT_INTERIM_S (accounting interval, seconds; default
-# 300, set by the entrypoint).
-# Built from the repository root (docker build -f radius/Dockerfile .): a git context with a
-# subdirectory (repo.git#<commit>:radius) fails in buildx 0.38 ("failed to stat policy file
-# Dockerfile.rego ... 404") whenever the git source is not cached yet.
+# RADIUS_DB_HOST, RADIUS_DB_NAME (the registry's database), RADIUS_DB_PASSWORD,
+# RADIUS_STATUS_SECRET, DEVICE_CA_DN, RADIUS_SESSION_TIMEOUT (seconds), NETPORTAL_ACCT_INTERIM_S
+# (accounting interval, seconds; default 300, set by the entrypoint).
+# Built from the repository root (docker build -f radius/Dockerfile .);
+# radius/Dockerfile.dockerignore keeps the context to radius/ (not target/).
 FROM freeradius/freeradius-server:3.2.10@sha256:cc7fd136e7b03e7b332d94297530318e824a4ecfedbce54562cced723e71e812
 RUN rm -rf /etc/freeradius/mods-enabled/* /etc/freeradius/sites-enabled/*
 COPY radius/mods/ /etc/freeradius/mods-enabled/

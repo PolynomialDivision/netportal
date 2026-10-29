@@ -1,6 +1,11 @@
 # EAP: only EAP-TLS. No PEAP/MSCHAPv2, no TTLS/PAP: nothing on the air that a fake access
 # point could phish or crack. TLS 1.3 is allowed so the client certificate is not visible to a
 # passive listener (TLS 1.2 sends it in clear; it carries no personal data either way).
+#
+# The PKI (`netportal pki`, crates/netportal-pki) writes the files (radius-server.pem/.key,
+# device-ca-chain.pem) and prints DEVICE_CA_DN (/CN=<name> Device CA); the device CA carries EKU
+# clientAuth and name constraints, which OpenSSL checks here as part of the chain
+# (tests/radius/run.sh connects through this file).
 eap {
 	default_eap_type = tls
 	timer_expire = 60

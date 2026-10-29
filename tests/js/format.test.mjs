@@ -1,18 +1,16 @@
 // static/format.js: numbers, sizes, rates, durations, times and rooms per language, and that
-// they read exactly like the server's (netportal/i18n.py Format) for the same values.
+// they read exactly like the server's (crates/netportal-web/src/render/format.rs; Python: i18n.Format)
+// for the same values.
 // node --test tests/js/
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { createFormatter, fill, signalLevel, healthLevel, toDate, DIAGNOSES } from "../../netportal/static/format.js";
+import { createFormatter, fill, signalLevel, healthLevel, toDate, DIAGNOSES } from "../../crates/netportal-web/static/format.js";
+import { askServer, SKIP } from "./web-oracle.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const NOW = "2026-10-25T12:05:00+00:00";
 
-// The cases both formatters get; the server's answers come from python3.
+// The cases both formatters get; the server's answers come from the Rust oracle.
 const CASES = [
   ["bytes", [1234567890]], ["bytes", [999]], ["bytes", [42_000_000]], ["bytes", [null]],
   ["bitrate", [86_600_000]], ["bitrate", [950]], ["bitrate", [1_200_000_000]], ["bitrate", [4_200]],
@@ -30,32 +28,9 @@ const CASES = [
   ["wifi", [{ band: "5", channel: 36, proto: "b" }]], ["band", ["2.4"]],
 ];
 
-const PY = `
-import json, sys
-sys.path.insert(0, ${JSON.stringify(root)})
-from netportal import i18n
-cases = json.loads(sys.stdin.read())
-out = {"texts": i18n.TEXT, "answers": {}}
-for lang in ("en", "de", "uk"):
-    answers = []
-    for name, args in cases:
-        fn = getattr(i18n.Format, name)
-        if name in ("ago", "when"):
-            answers.append(fn(args[0], lang, args[1]))
-        elif name in ("duration",) or len(args) == 1:
-            answers.append(fn(args[0], lang))
-        else:
-            answers.append(fn(args[0], lang, args[1]))
-    out["answers"][lang] = answers
-print(json.dumps(out))
-`;
-
-let server = null;
-try {
-  server = JSON.parse(execFileSync("python3", ["-c", PY], { input: JSON.stringify(CASES), encoding: "utf8" }));
-} catch {
-  server = null;   // no python3: the cross-check is skipped, the rest still runs
-}
+// no oracle (no cargo): the cross-check is skipped, the rest still runs
+const server = askServer("format", CASES);
+const skip = !server && SKIP;
 const texts = server ? server.texts : null;
 
 function call(f, name, args) {
@@ -64,7 +39,7 @@ function call(f, name, args) {
   return f[name](...args);
 }
 
-test("the browser formats like the server, in every language", { skip: !server && "python3 not available" }, () => {
+test("the browser formats like the server, in every language", { skip }, () => {
   for (const lang of ["en", "de", "uk"]) {
     const f = createFormatter(lang, texts[lang]);
     CASES.forEach(([name, args], i) => {
@@ -73,7 +48,7 @@ test("the browser formats like the server, in every language", { skip: !server &
   }
 });
 
-test("examples read naturally", { skip: !server && "python3 not available" }, () => {
+test("examples read naturally", { skip }, () => {
   const en = createFormatter("en", texts.en), de = createFormatter("de", texts.de), uk = createFormatter("uk", texts.uk);
   assert.equal(en.bytes(1_830_000_000), "1.8 GB");
   assert.equal(de.bytes(1_830_000_000), "1,8 GB");
@@ -111,7 +86,7 @@ test("signal and quality levels", () => {
   assert.equal(healthLevel(undefined), null);
 });
 
-test("every diagnosis code has its three texts in every language", { skip: !server && "python3 not available" }, () => {
+test("every diagnosis code has its three texts in every language", { skip }, () => {
   for (const lang of ["en", "de", "uk"]) {
     for (const code of DIAGNOSES) {
       for (const suffix of ["", "_why", "_do"]) assert.ok(texts[lang][`diag_${code}${suffix}`], `${lang} diag_${code}${suffix}`);

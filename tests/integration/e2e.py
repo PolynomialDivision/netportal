@@ -8,14 +8,24 @@ the Let's Wi-Fi OAuth flow of the geteduroam apps, offboarding, admin rights, CS
 Telemetry v2 (docs/TELEMETRY.md): every decision logged with its reason, the Class token in the
 Accept, accounting from the fake access point (radclient), the radius role's rights, and that
 no logging failure (functions revoked, the database stopped) changes a decision.
+
+The registry is the schema of migrations/ (docs/RADIUS_CONTRACT.md: the FreeRADIUS contract in
+the schema radius); the CLI is the binary under test ($NETPORTAL_BIN offboard, init-db). The
+trap certificates come from tests/radius/certs (run.sh: <run dir>/certs.json and client/).
+
+    e2e.py <run dir>         (run.sh sets NETPORTAL_BIN and the portal's NETPORTAL_* variables)
 """
 
 import base64
-import datetime
 import hashlib
+import hmac
+import json
+import os
 import plistlib
 import re
 import secrets
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -28,13 +38,10 @@ import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tests"))
-sys.path.insert(0, str(ROOT))
-from test_profiles import aosp_parse  # noqa: E402
-from netportal import disconnect, pki, registry  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]          # tests/integration -> the repo root
 
 PORTAL, IDP = "http://127.0.0.1:18080", "http://127.0.0.1:19000"
+METRICS = "http://127.0.0.1:18090"   # NETPORTAL_METRICS_LISTEN (run.sh): /metrics has a listener of its own
 DB = "postgresql://netportal:it-db-password@127.0.0.1:15432/netportal"
 RUN = Path(sys.argv[1])
 failures = []
@@ -42,6 +49,111 @@ LAST_REPLY = ""   # eapol_test output of the last connect()
 RADIUS_DB = "postgresql://radius:it-radius-db-password@127.0.0.1:15432/netportal"
 CALLED = "AA-BB-CC-00-00-01:Scharni"     # what hostapd sends: <BSSID>:<SSID>
 FAKE_NAS = "10.199.0.11"
+CLI = [os.environ["NETPORTAL_BIN"]]      # the binary under test
+CERTS = json.loads((RUN / "certs.json").read_text())   # the trap certificates: {name: {device_id, serial, not_after}}
+
+
+# The registry's own reads (crates/netportal-core/src/registry.rs), as queries
+def mac_claims(macs):
+    """registry::mac_claims: {mac: {owner}} of active devices by their latest session."""
+    claims = {}
+    for mac, owner in sql("""SELECT np_mac(s.calling_station)::text, d.owner
+                             FROM radius_session s JOIN device d ON d.id = s.device_id
+                             WHERE d.revoked_at IS NULL AND np_mac(s.calling_station) = ANY(%s::macaddr[])""",
+                          list(macs)):
+        claims.setdefault(mac, set()).add(owner)
+    return claims
+
+
+def device_windows(device_ids):
+    """registry::device_windows (open bounds): {device: [{"mac", "auth_count", "randomized", ...}]}."""
+    result = {d: [] for d in device_ids}
+    for row in sql("""SELECT device_id::text, mac::text, first_seen, last_seen, window_end, current, randomized,
+                             auth_count FROM device_mac_window WHERE device_id = ANY(%s::uuid[])
+                      ORDER BY first_seen, mac""", list(device_ids)):
+        result[row[0]].append(dict(zip(("mac", "first_seen", "last_seen", "window_end", "current", "randomized",
+                                        "auth_count"), row[1:])))
+    return result
+
+
+def acct_sessions(device_id):
+    """registry::acct_sessions over the last hour, oldest first: [{"acct_session_id", ...}]."""
+    rows = sql("""SELECT acct_session_id, host(nas_ip), started, updated, stopped FROM radius_acct
+                  WHERE device_id = %s AND coalesce(started, updated) <= now()
+                    AND coalesce(stopped, updated) >= now() - interval '1 hour'
+                  ORDER BY coalesce(started, updated) DESC LIMIT 1000""", device_id)
+    return [{"acct_session_id": r[0], "nas_ip": r[1], "started": r[2], "updated": r[3], "stopped": r[4]}
+            for r in reversed(rows)]
+
+
+def aosp_parse(data):
+    """{content type: decoded bytes} of a Passpoint download, read the way Android's installer
+    does (a port of android.net.wifi.hotspot2.ConfigParser.parseMimeMultipartMessage)."""
+    lines = base64.b64decode(data).decode().splitlines()
+    i = 0
+
+    def headers():
+        nonlocal i
+        found = {}
+        while lines[i] != "":
+            key, _, value = lines[i].partition(":")
+            found[key.strip()] = value.strip()
+            i += 1
+        i += 1
+        return found
+
+    top = headers()
+    ctype, _, rest = top["Content-Type"].partition(";")
+    assert ctype.strip() == "multipart/mixed", ctype
+    boundary = rest.strip().split("boundary=", 1)[1]
+    assert top["Content-Transfer-Encoding"] == "base64"
+    while lines[i] != "--" + boundary:
+        i += 1
+    i += 1
+    parts, last = {}, False
+    while not last:
+        h = headers()
+        assert h["Content-Transfer-Encoding"] == "base64"
+        assert h["Content-Type"] in ("application/x-passpoint-profile", "application/x-x509-ca-cert",
+                                     "application/x-pkcs12"), h
+        body = []
+        while not lines[i].startswith("--" + boundary):
+            body.append(lines[i])
+            i += 1
+        last = lines[i] == "--" + boundary + "--"
+        i += 1
+        parts[h["Content-Type"]] = base64.b64decode("".join(body))
+    return parts
+
+
+def forged_disconnect(nas_ip, calling_station, user_name, secret, timeout=1.0):
+    """A Disconnect-Request (RFC 5176, with Message-Authenticator: RFC 3579) signed with `secret`,
+    sent from this host (the portal's address for the access point): "answered" if any packet
+    comes back within the timeout, else "timeout"."""
+    secret = secret.encode()
+    ident = secrets.randbits(8)
+    attr = lambda kind, value: struct.pack("!BB", kind, len(value) + 2) + value  # noqa: E731
+    attrs = (attr(1, user_name.encode()) + attr(31, calling_station.encode()) + attr(4, socket.inet_aton(nas_ip))
+             + attr(55, struct.pack("!I", int(time.time()))))
+    header = struct.pack("!BBH", 40, ident, 20 + len(attrs) + 18)             # 40: Disconnect-Request
+    ma = hmac.new(secret, header + b"\0" * 16 + attrs + attr(80, b"\0" * 16), hashlib.md5).digest()
+    attrs += attr(80, ma)                                                     # 80: Message-Authenticator
+    packet = header + hashlib.md5(header + b"\0" * 16 + attrs + secret).digest() + attrs
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        sock.sendto(packet, (nas_ip, 3799))
+        try:
+            sock.recvfrom(4096)
+            return "answered"
+        except socket.timeout:
+            return "timeout"
+
+
+def migrate():
+    """The binary's init-db (it gets this process's NETPORTAL_* from run.sh)."""
+    out = subprocess.run(CLI + ["init-db"], cwd=ROOT, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError("init-db failed: %s" % out.stderr[-500:])
 
 
 def check(name, ok, detail=""):
@@ -86,7 +198,7 @@ def enrol(s, fmt, name=None):
 def device_ids(owner_sub):
     with psycopg.connect(DB) as db:
         return [str(r[0]) for r in db.execute(
-            "SELECT id FROM device WHERE owner = %s ORDER BY created", (owner_sub,))]
+            "SELECT id FROM device WHERE owner = %s ORDER BY created_at", (owner_sub,))]
 
 
 def sql(query, *args):
@@ -101,6 +213,11 @@ def write_client(name, key, cert, chain):
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     (RUN / "client" / (name + ".crt")).write_bytes(b"".join(
         c.public_bytes(serialization.Encoding.PEM) for c in [cert] + list(chain)))
+    write_conf(name)
+
+
+def write_conf(name):
+    """eapol_test's configuration for RUN/client/<name>.crt and .key."""
     (RUN / "client" / (name + ".conf")).write_text(
         'network={\n ssid="Scharni"\n key_mgmt=WPA-EAP\n eap=TLS\n identity="anonymous@scharni.org"\n'
         ' ca_cert="/pki/root.pem"\n client_cert="/client/%s.crt"\n private_key="/client/%s.key"\n'
@@ -222,7 +339,7 @@ def from_passpoint(body):
 
 
 def metric(name):
-    text = requests.get(PORTAL + "/metrics").text
+    text = requests.get(METRICS + "/metrics").text
     m = re.search(r"^%s ([0-9.e+]+)$" % re.escape(name), text, re.M)
     return float(m.group(1)) if m else None
 
@@ -299,9 +416,8 @@ def main():
     moved = session_of()
     check("a login with another MAC starts first_seen again",
           moved[0].lower().replace("-", ":") == "02:00:00:00:00:99" and moved[1] > same[1], (same, moved))
-    with registry.connect(DB) as db:
-        claims = registry.mac_claims(db, ["02:00:00:00:00:99", "02:00:00:00:00:98"])
-        windows = registry.device_windows(db, [android_id])[android_id]
+    claims = mac_claims(["02:00:00:00:00:99", "02:00:00:00:00:98"])
+    windows = device_windows([android_id])[android_id]
     check("the registry tells whose devices claim a MAC", claims == {"02:00:00:00:00:99": {"sub-alice"}}, claims)
     check("both MACs of the device are kept as identities with their logins (device_mac)",
           [(w["mac"], w["auth_count"], w["randomized"]) for w in windows]
@@ -322,8 +438,7 @@ def main():
     check("revoke answers", r.status_code in (200, 302), r.status_code)
     after = metric('netportal_disconnects_total{result="ack"}') or 0
     check("revoke sends a Disconnect-Request the access point accepts (ACK)", after == before + 1, (before, after))
-    forged = disconnect.disconnect({"nas_ip": "10.199.0.11", "calling_station": "02-00-00-00-00-01",
-                                    "user_name": "anonymous@scharni.org"}, "not-the-secret", timeout=1, retries=0)
+    forged = forged_disconnect("10.199.0.11", "02-00-00-00-00-01", "anonymous@scharni.org", "not-the-secret")
     check("the access point drops a Disconnect-Request with a wrong secret", forged == "timeout", forged)
     check("a revoked device cannot connect", connect("alice-android")[0] == "reject")
     check("... and the reject is logged with its reason (revoked, the device)",
@@ -337,7 +452,7 @@ def main():
     write_client("alice-apple-renewed", key, cert, chain)
     check("renewal: the new certificate connects", connect("alice-apple-renewed") == ("accept", "30"))
     check("renewal: the old certificate still works during the overlap", connect("alice-apple")[0] == "accept")
-    sql("UPDATE credential SET retired_after = now() - interval '1 minute' WHERE retired_after IS NOT NULL "
+    sql("UPDATE credential SET retired_at = now() - interval '1 minute' WHERE retired_at IS NOT NULL "
         "AND device_id = %s", apple_id)
     old_cert = connect("alice-apple")[0]
     retired = last_reject()
@@ -345,21 +460,21 @@ def main():
           old_cert == "reject" and connect("alice-apple-renewed")[0] == "accept")
     check("... the old certificate's reject is logged as retired", retired[:2] == ("retired", apple_id), retired)
     check("renewal keeps one device", len(device_ids("sub-alice")) == 3)
-    sql("UPDATE credential SET not_after = now() - interval '1 minute' WHERE device_id = %s", eap_id)
+    sql("UPDATE credential SET issued_at = now() - interval '2 days', not_after = now() - interval '1 minute' "
+        "WHERE device_id = %s", eap_id)            # a certificate is issued before it expires
     check("an expired certificate cannot connect", connect("alice-eap-config")[0] == "reject")
     check("... logged as expired", last_reject()[:2] == ("expired", eap_id), last_reject())
 
     # --- the FreeRADIUS traps: certificates that must fail although the chain looks fine ----
-    device_ca = pki.load(RUN / "pki" / "device-ca.pem", (RUN / "pki" / "device-ca.key").read_bytes())
-    root = pki.load(RUN / "pki" / "root.pem", (RUN / "pki" / "root.key").read_bytes())
-    _, unregistered = pki.device_cert(device_ca, "scharni.org")
-    write_client("unregistered", unregistered.key, unregistered.cert, [device_ca.cert])
+    for name in ("unregistered", "foreign", "root-signed"):
+        write_conf(name)                       # their .crt and .key: radius-test-certs (run.sh)
+    unregistered = CERTS["unregistered"]["serial"]
     check("a device-CA certificate that is not in the registry cannot connect",
           connect("unregistered")[0] == "reject")
     check("... logged as unknown_cert with its serial, no device",
-          last_reject() == ("unknown_cert", None, unregistered.serial_hex.lower()), last_reject())
+          last_reject() == ("unknown_cert", None, unregistered), last_reject())
     connect("unregistered")
-    rows = sql("SELECT count, last_at > at FROM radius_auth WHERE serial = %s", unregistered.serial_hex.lower())
+    rows = sql("SELECT tries, last_at > at FROM radius_auth WHERE serial = %s", unregistered)
     check("a repeated reject (same MAC, reason, serial, AP within 60 s) adds to its row: one row, count 2",
           [tuple(r) for r in rows] == [(2, True)], rows)
     nocert = (RUN / "client" / "alice-android.conf").read_text().replace(' client_cert="/client/alice-android.crt"\n', "")
@@ -372,25 +487,20 @@ def main():
                          input='User-Name = "bob", User-Password = "x", Message-Authenticator = 0x00\n').stdout
     check("a request without EAP (password) is rejected, logged as not_eap",
           "Access-Reject" in out and last_reject() == ("not_eap", None, None), (out[-200:], last_reject()))
-    # Registered serials, so only the issuer checks stand in the way.
-    other_root = pki.make_ca("Test Network Root", days=30, path_length=1)
-    other_ca = pki.make_ca("Test Device CA", issuer=other_root, days=30, path_length=0)  # same names
-    _, foreign = pki.device_cert(other_ca, "scharni.org")
-    _, root_signed = pki.device_cert(root, "scharni.org")
-    sql("INSERT INTO device (id, owner, name, kind, platform, policy) VALUES "
-        "('00000000-0000-4000-8000-000000000001', 'sub-carol', 'trap', 'cert', 'apple', 'residents')")
-    for issued in (foreign, root_signed):
-        sql("INSERT INTO credential (serial, device_id, not_after) VALUES "
-            "(%s, '00000000-0000-4000-8000-000000000001', now() + interval '1 day')", issued.serial_hex)
-    write_client("foreign", foreign.key, foreign.cert, [other_ca.cert, other_root.cert])
+    # Registered serials of the devices the certificates name (CN <device id>@<realm>), so only
+    # the issuer checks stand in the way.
+    for name in ("foreign", "root-signed"):
+        sql("INSERT INTO device (id, owner, name, kind, platform, policy) VALUES (%s, 'sub-carol', 'trap', 'cert', "
+            "'apple', 'residents')", CERTS[name]["device_id"])
+        sql("INSERT INTO credential (serial, device_id, not_after) VALUES (%s, %s, now() + interval '1 day')",
+            CERTS[name]["serial"], CERTS[name]["device_id"])
     check("a certificate of a foreign CA with the same names cannot connect", connect("foreign")[0] == "reject")
     check("... logged as bad_chain (its chain did not verify)", last_reject()[:2] == ("bad_chain", None), last_reject())
-    write_client("root-signed", root_signed.key, root_signed.cert, [root.cert])
     check("a certificate the root signed directly (not the device CA) cannot connect",
           connect("root-signed")[0] == "reject")
     check("... logged as bad_chain, not attributed to the registered device (not proven ours)",
-          last_reject() == ("bad_chain", None, root_signed.serial_hex.lower()), last_reject())
-    sql("DELETE FROM device WHERE id = '00000000-0000-4000-8000-000000000001'")
+          last_reject() == ("bad_chain", None, CERTS["root-signed"]["serial"]), last_reject())
+    sql("DELETE FROM device WHERE id IN (%s, %s)", CERTS["foreign"]["device_id"], CERTS["root-signed"]["device_id"])
 
     # --- Let's Wi-Fi (geteduroam apps) ----------------------------------------------------
     doc = requests.get(PORTAL + "/", headers={"Accept": "application/json"}).json()
@@ -475,12 +585,13 @@ def main():
     carol_phone = sql("SELECT id FROM device WHERE owner = 'sub-carol' AND name = 'carol phone'")[0][0]
     sql("UPDATE radius_session SET nas_ip = '10.199.0.11'")        # the fake access point
     users(("sub-carol", "carol", ["former-residents"], True), ALICE, ADMIN, FIA)   # carol moved out
-    out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
+    out = subprocess.run(CLI + ["offboard"], cwd=ROOT, capture_output=True, text=True)
     check("offboarding runs after someone moved out", out.returncode == 0, out.stderr[-300:])
     actions = {r[0] for r in sql("SELECT action FROM audit WHERE device_id = %s", carol_phone)}
     check("... her device moves to the guests' policy with a Disconnect, and is not revoked",
           {"policy:guests", "disconnect:ack"} <= actions
-          and sql("SELECT policy, revoked FROM device WHERE id = %s", carol_phone)[0] == ("guests", None), actions)
+          and sql("SELECT policy, revoked_at FROM device WHERE id = %s",
+                  carol_phone)[0] == ("guests", None), actions)
     verdict = connect("carol")
     check("... and connects into VLAN 50 from then on", verdict == ("accept", "50"), verdict)
     c, r = login(("sub-carol", "carol", ["former-residents"], True), others=(ALICE, ADMIN, FIA))
@@ -494,22 +605,25 @@ def main():
     # Admin rights are checked against the registry on every request (2026-10-22): removed from
     # it-admins, the open session loses the admin view at the next offboarding round.
     users(("sub-admin", "admin", ["residents"], True), ("sub-carol", "carol", ["former-residents"], True), ALICE, FIA)
-    out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
-    r = a.get(PORTAL + "/admin")
+    out = subprocess.run(CLI + ["offboard"], cwd=ROOT, capture_output=True, text=True)
+    r = a.get(PORTAL + "/admin", allow_redirects=False)       # the open session ends (to the login)
     check("someone removed from the admin group loses the admin view at once, in the open session",
-          out.returncode == 0 and r.status_code == 403, (out.returncode, r.status_code))
+          out.returncode == 0 and r.status_code == 302 and "/login" in r.headers.get("Location", ""),
+          (out.returncode, r.status_code))
 
     # --- offboarding ----------------------------------------------------------------------
     s, _ = login(ALICE)
     form_before = csrf(s)                 # alice's portal session from before she left
     users(("sub-alice", "alice", [], True), CAROL, ADMIN)
-    out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
-    check("offboarding runs", out.returncode == 0, out.stderr[-300:])
+    first = subprocess.run(CLI + ["offboard"], cwd=ROOT, capture_output=True, text=True)   # only noted
+    out = subprocess.run(CLI + ["offboard"], cwd=ROOT, capture_output=True, text=True)
+    check("offboarding runs", first.returncode == 0 and out.returncode == 0, (first.stderr + out.stderr)[-300:])
     check("someone who left the Wi-Fi groups loses every device",
           connect("alice-app-renewed")[0] == "reject" and connect("alice-apple-renewed")[0] == "reject")
     late = requests.post(PORTAL + "/api/eap-config/", headers={"Authorization": "Bearer " + pending["access_token"]})
     check("... and an app grant without a device yet cannot create one", late.status_code == 401
-          and len(sql("SELECT 1 FROM device WHERE owner = 'sub-alice' AND revoked IS NULL")) == 0, late.status_code)
+          and len(sql("SELECT 1 FROM device WHERE owner = 'sub-alice' AND revoked_at IS NULL")) == 0,
+          late.status_code)
     r = s.post(PORTAL + "/enroll", data={"csrf": form_before, "format": "apple"}, allow_redirects=False)
     check("... and her open portal session cannot enrol a new device",
           r.status_code == 302 and "/login" in r.headers.get("Location", ""), r.status_code)
@@ -519,11 +633,11 @@ def main():
     r = s.get(PORTAL + "/welcome")
     check("... the landing page stays at /welcome", r.status_code == 200 and "/login" in r.text, r.status_code)
     requests.post(IDP + "/_test/users", json=[])
-    out = subprocess.run([sys.executable, "-m", "netportal", "offboard"], cwd=ROOT, capture_output=True, text=True)
+    out = subprocess.run(CLI + ["offboard"], cwd=ROOT, capture_output=True, text=True)
     check("an empty Authentik answer revokes nothing (fails safe)", out.returncode != 0)
 
     # --- monitoring -----------------------------------------------------------------------
-    text = requests.get(PORTAL + "/metrics").text
+    text = requests.get(METRICS + "/metrics").text
     check("metrics: devices and certificate states", "netportal_devices{state=\"active\"}" in text
           and "netportal_certificates{state=\"expiring_30d\"}" in text, text[:200])
     check("metrics: the offboarding sidecar's last success (from the registry)",
@@ -531,8 +645,10 @@ def main():
     check("metrics: Disconnect results of the last hour (portal and offboarding)",
           (metric('netportal_disconnects_last_hour{result="ack"}') or 0) >= 1
           and metric('netportal_disconnects_last_hour{result="timeout"}') is not None)
-    hidden = requests.get(PORTAL + "/metrics", headers={"X-Forwarded-For": "1.2.3.4"})
+    hidden = requests.get(METRICS + "/metrics", headers={"X-Forwarded-For": "1.2.3.4"})
     check("metrics are not served through the proxy", hidden.status_code == 404, hidden.status_code)
+    public = requests.get(PORTAL + "/metrics")
+    check("metrics are not served on the portal's own port", public.status_code == 404, public.status_code)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0
@@ -669,31 +785,30 @@ def telemetry_checks(tablet, portal=None):
     check("Accounting-On (the access point restarted) closes its open sessions",
           answered and all(r[7] is not None for r in rows.values())
           and [rows[s][11] for s in ("IT-1", "IT-2", "IT-3")] == ["User-Request", "NAS-Reboot", "NAS-Reboot"], rows)
-    with registry.connect(DB) as db:
-        sessions = registry.acct_sessions(db, tablet, registry.now() - datetime.timedelta(hours=1), registry.now())
+    sessions = acct_sessions(tablet)
     check("the registry lists the device's sessions", [s["acct_session_id"] for s in sessions] == ["IT-1", "IT-2"],
           sessions)
     if portal is not None:
         presence_checks(tablet, portal, mac)
 
     # --- the radius role: the decision view and the logging functions, no table ---------
-    check("the radius role reads the decision view", radius_role_can("SELECT * FROM radius_cert"))
+    check("the radius role reads the decision view", radius_role_can("SELECT * FROM radius.valid_cert"))
     check("the radius role cannot read people, devices or sessions",
           not any(radius_role_can("SELECT 1 FROM %s" % t) for t in ("person", "device", "credential",
                                                                      "radius_session", "radius_auth", "radius_acct")))
-    check("the radius role cannot write the session table directly (only through radius_login)",
+    check("the radius role cannot write the session table directly (only through radius.login)",
           not radius_role_can("UPDATE radius_session SET nas_ip = '1.2.3.4'"))
     check("the radius role may call the logging functions",
-          radius_role_can("SELECT radius_reject('', '', '', '', 'other')"))
+          radius_role_can("SELECT radius.reject('', '', '', '', 'other')"))
 
     # --- logging has its own connection pool (radius/mods/sql_log) ----------------------------
     connect("carol-tablet", mac=mac)
     pools = radius_pools()
-    logging_calls = re.compile(r"radius_(login|reject|accounting)\(")
-    check("the logging calls run on their own pool (sql_log), the decision's pool (sql) only reads radius_cert",
+    logging_calls = re.compile(r"radius\.(login|reject|accounting)\(")
+    check("the logging calls run on their own pool (sql_log), the decision's pool (sql) only reads radius.valid_cert",
           any(logging_calls.search(q) for q in pools.get("sql_log", []))
           and not any(logging_calls.search(q) for q in pools.get("sql", []))
-          and any("radius_cert" in q for q in pools.get("sql", [])), pools)
+          and any("radius.valid_cert" in q for q in pools.get("sql", [])), pools)
     # Logging blocked (the tables it writes locked, as a long transaction might): logins still
     # get in, also more at once than either pool has connections, and are answered in time.
     blocker = psycopg.connect(DB)
@@ -713,8 +828,8 @@ def telemetry_checks(tablet, portal=None):
         blocker.close()
 
     # --- fail open for logging, fail closed for access --------------------------------------
-    sql("REVOKE EXECUTE ON FUNCTION radius_login(text, text, text, text, text, text, text), "
-        "radius_reject(text, text, text, text, text), radius_accounting(" + ", ".join(["text"] * 14) + ") FROM radius")
+    sql("REVOKE EXECUTE ON FUNCTION radius.login(text, text, text, text, text, text, text), "
+        "radius.reject(text, text, text, text, text), radius.accounting(" + ", ".join(["text"] * 14) + ") FROM radius")
     before = sql("SELECT count(*) FROM radius_auth")[0][0]
     verdict = connect("carol-tablet", mac=mac)
     check("with the logging functions failing, a valid device still connects (without Class)",
@@ -723,8 +838,7 @@ def telemetry_checks(tablet, portal=None):
     check("... and accounting is still answered", accounting({**base, "Acct-Status-Type": "Start",
                                                              "Acct-Session-Id": '"IT-4"'}))
     check("... (nothing was logged)", sql("SELECT count(*) FROM radius_auth")[0][0] == before and acct_row("IT-4") is None)
-    with registry.connect(DB) as db:
-        registry.migrate(db)                   # grants.sql: the declared rights again
+    migrate()                  # sql/radius_grants.sql: the declared rights again
     verdict = connect("carol-tablet", mac=mac)
     check("migrate restores the radius role's rights (declarative grants): logged with Class again",
           verdict == ("accept", "50") and reply_class() is not None, verdict)

@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { backoffMs, createClient, createPoller, HttpError, LoginEnded, POLL, pollMs } from "../../netportal/static/live.js";
+import { backoffMs, createClient, createPoller, HttpError, LoginEnded, POLL, pollMs } from "../../crates/netportal-web/static/live.js";
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 

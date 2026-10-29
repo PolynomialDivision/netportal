@@ -1,24 +1,21 @@
 // Telemetry v2's pure helpers: the evidence of findings, codes and their texts, incidents and
 // APs (format.js, admin.js), the merged timeline, day bars, month ticks and incident lanes
 // (charts.js), the event filter (render.js). Where the server formats the same thing
-// (netportal/i18n.py Format) both must answer alike, in every language.
+// (crates/netportal-web/src/render/format.rs; Python: i18n.Format) both must answer alike, in every language.
 // node --test tests/js/
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import * as F from "../../netportal/static/format.js";
-import * as C from "../../netportal/static/charts.js";
-import * as A from "../../netportal/static/admin.js";
-import { EVENT_FILTERS, filterEvents } from "../../netportal/static/render.js";
+import * as F from "../../crates/netportal-web/static/format.js";
+import * as C from "../../crates/netportal-web/static/charts.js";
+import * as A from "../../crates/netportal-web/static/admin.js";
+import { EVENT_FILTERS, filterEvents } from "../../crates/netportal-web/static/render.js";
+import { askServer, SKIP } from "./web-oracle.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const T0 = Date.parse("2026-10-25T10:00:00Z");
 const iso = (ms) => new Date(ms).toISOString();
 
-// findings as diagnostics.py makes them (code, severity, basis, evidence, params)
+// findings as the diagnostics make them (code, severity, basis, evidence, params)
 const FINDINGS = [
   { code: "weak_signal", evidence: { signal_dbm: -79, warn_dbm: -75, bad_dbm: -80 }, params: { signal_dbm: -79 } },
   { code: "low_snr", evidence: { snr_db: 14, noise_dbm: -88, signal_dbm: -74, warn_db: 20 } },
@@ -50,46 +47,13 @@ const APS = [
   { state: "unknown", clients: 5, radios: [], weak_clients: 2 },
 ];
 
-const PY = `
-import json, sys
-sys.path.insert(0, ${JSON.stringify(root)})
-from netportal import i18n
-cases = json.loads(sys.stdin.read())
-F = i18n.Format
-out = {"texts": i18n.TEXT, "lang": {}, "tables": {
-    "EVIDENCE_SPEC": {k: [list(x) for x in v] for k, v in i18n.EVIDENCE_SPEC.items()},
-    "EVIDENCE_FORMAT": i18n.EVIDENCE_FORMAT, "EVIDENCE_WINDOW": i18n.EVIDENCE_WINDOW,
-    "EVIDENCE_SHORT": {k: list(v) for k, v in i18n.EVIDENCE_SHORT.items()},
-    "EVENT_KINDS": list(i18n.EVENT_KINDS), "REJECT_REASONS": list(i18n.REJECT_REASONS),
-    "TERMINATE_CAUSES": list(i18n.TERMINATE_CAUSES), "INCIDENT_KINDS": list(i18n.INCIDENT_KINDS),
-    "MAC_MODES": list(i18n.MAC_MODES), "DIAGNOSES": list(i18n.DIAGNOSES)},
-    "ap_warnings": [F.ap_warnings(a) for a in cases["aps"]],
-    "causes": [F.cause_key(c) for c in cases["causes"]]}
-for lang in ("en", "de", "uk"):
-    r = {"items": [], "short": [], "admin": []}
-    for f in cases["findings"]:
-        items, window = F.evidence_items(f, lang)
-        r["items"].append([[list(i) for i in items], window])
-        r["admin"].append([list(i) for i in F.evidence_items(f, lang, True)[0]])
-        r["short"].append(F.evidence_short(f, lang))
-    r["incidents"] = [F.incident_text(i, lang) for i in cases["incidents"]]
-    r["days"] = [F.day(d, lang) for d in cases["days"]]
-    out["lang"][lang] = r
-print(json.dumps(out))
-`;
 const INCIDENTS = [{ kind: "ap_down", subject: "d0", subject_name: "ap-scharni-2-corner" }, { kind: "internet_down", subject: "" },
   { kind: "switch_port_down", subject: "sw/7", subject_name: "sw-keller port 7" }, { kind: "brand_new" }, "dns_down"];
 const DAYS = ["2026-10-24", "2026-01-01", "2026-03-29"];
 const CAUSES = ["Lost-Carrier", "lost_carrier", "2", "22", "23", "", null, "User Request", "nonsense"];
 
-let server = null;
-try {
-  server = JSON.parse(execFileSync("python3", ["-c", PY], {
-    input: JSON.stringify({ findings: FINDINGS, aps: APS, incidents: INCIDENTS, days: DAYS, causes: CAUSES }), encoding: "utf8" }));
-} catch {
-  server = null;
-}
-const skip = !server && "python3 not available";
+const server = askServer("v2", { findings: FINDINGS, aps: APS, incidents: INCIDENTS, days: DAYS, causes: CAUSES });
+const skip = !server && SKIP;
 
 test("the code tables are the server's", { skip }, () => {
   for (const name of ["EVIDENCE_SPEC", "EVIDENCE_FORMAT", "EVIDENCE_WINDOW", "EVIDENCE_SHORT", "EVENT_KINDS", "REJECT_REASONS",

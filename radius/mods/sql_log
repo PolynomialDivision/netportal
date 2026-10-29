@@ -1,9 +1,9 @@
 # The registry for LOGGING only (netportal docs/TELEMETRY.md, "fail open for logging"): the
-# %{sql_log:...} expansions in sites/default that call radius_login, radius_reject and
-# radius_accounting. A second instance of rlm_sql with its own small pool, so a slow or blocked
+# %{sql_log:...} expansions in sites/default that call radius.login, radius.reject and
+# radius.accounting. A second instance of rlm_sql with its own small pool, so a slow or blocked
 # log write (a row lock, a flood of rejects, a busy database) can only use up these connections,
-# never the decision's (module "sql", mods/sql: SELECT on radius_cert only). Same role and
-# database as "sql" (role radius: EXECUTE on the functions, no table rights).
+# never the decision's (module "sql", mods/sql: SELECT on radius.valid_cert only). Same role and
+# database as "sql" (role radius: EXECUTE on the functions of the schema radius, no table rights).
 #
 # Bounded on every side:
 # - pool max 4: at most four requests wait on a log write at once; a fifth finds no free
@@ -12,7 +12,7 @@
 # - query_timeout 1 s: rlm_sql_postgresql gives up reading the answer after 1 s (and uses it as
 #   libpq's connect_timeout), so a post-auth waits about a second at most before the reply goes
 #   out; the functions themselves wait 500 ms for a row lock and the role has statement_timeout
-#   2 s (migrations), so a normal write is done in milliseconds;
+#   2 s (sql/radius_grants.sql), so a normal write is done in milliseconds;
 # - max_retries 0: a timed-out or broken connection is replaced, but the write is not tried again
 #   on the new one (that would multiply the wait); it is lost, as any failed log write.
 sql sql_log {

@@ -1,8 +1,8 @@
-// The data's ages from a body a 304 keeps (live.js withAges): web.py's ETag leaves the ages out,
-// so with a frozen unpoller snapshot every poll answers 304 and the page must work out the
-// Wi-Fi data's age itself (from house.wifi_data_at): the "data is 5 min old" banner appears
-// after 300 s, "may be out of date" after 600 s, the stale_data finding's age and the admin
-// overview's freshness advance, all without a new body.
+// The data's ages from a body a 304 keeps (live.js withAges), against the server: its side is the
+// Rust implementation (`cargo run -q -p netportal-telemetry --example js_oracle`, or the binary in
+// NETPORTAL_JS_ORACLE).
+// The ETag leaves the ages out, so with a frozen unpoller snapshot every poll answers 304 and the
+// page must work out the Wi-Fi data's age itself (from house.wifi_data_at).
 // node --test tests/js/
 
 import { test } from "node:test";
@@ -11,10 +11,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { createFormatter } from "../../netportal/static/format.js";
-import { createClient, createPoller, WIFI_AGE_BANNER_S, WIFI_STALE_S, withAges } from "../../netportal/static/live.js";
-import * as A from "../../netportal/static/admin.js";
-import * as R from "../../netportal/static/render.js";
+import { createFormatter } from "../../crates/netportal-web/static/format.js";
+import { createClient, createPoller, WIFI_AGE_BANNER_S, WIFI_STALE_S, withAges } from "../../crates/netportal-web/static/live.js";
+import * as A from "../../crates/netportal-web/static/admin.js";
+import * as R from "../../crates/netportal-web/static/render.js";
 import { installDom } from "./dom-shim.mjs";
 
 installDom();
@@ -25,16 +25,15 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 let server = null;
 try {
-  server = JSON.parse(execFileSync("python3", ["-c", `
-import json, sys
-sys.path.insert(0, ${JSON.stringify(root)})
-from netportal import diagnostics, i18n
-print(json.dumps({"texts": i18n.TEXT["en"], "stale_after_s": diagnostics.STALE_AFTER_S}))
-`], { encoding: "utf8" }));
+  const oracle = process.env.NETPORTAL_JS_ORACLE;
+  const out = oracle
+    ? execFileSync(oracle, [], { encoding: "utf8" })
+    : execFileSync("cargo", ["run", "-q", "-p", "netportal-telemetry", "--example", "js_oracle"], { cwd: root, encoding: "utf8" });
+  server = JSON.parse(out);
 } catch {
   server = null;
 }
-const skip = !server && "python3 not available";
+const skip = !server && "the Rust oracle (cargo) is not available";
 
 /** A /api/devices body of a frozen snapshot taken 250 s before T0. */
 function body() {
@@ -51,7 +50,9 @@ function body() {
 
 test("the thresholds are the server's", { skip }, () => {
   assert.equal(WIFI_STALE_S, server.stale_after_s);
-  const dash = readFileSync(path.join(root, "netportal/templates/_dash.html"), "utf8");
+  // the Rust payloads' code tables the scripts know
+  assert.deepEqual(server.tables.PRESENCE_STATES, ["online", "connecting", "offline", "unknown", "never_connected"]);
+  const dash = readFileSync(path.join(root, "crates/netportal-web/templates/_dash.html"), "utf8");
   assert.match(dash, new RegExp(`wifi_data_age_s > ${WIFI_AGE_BANNER_S} %}`));
 });
 

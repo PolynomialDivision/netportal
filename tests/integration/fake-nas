@@ -8,6 +8,11 @@ server fake-nas {
 		port = 3799
 	}
 	recv-coa {
+		# the access point signs its replies (hostapd adds a Message-Authenticator), and the
+		# portal requires that; FreeRADIUS computes the attribute when it is set to zero
+		update reply {
+			Message-Authenticator := 0x00
+		}
 		ok
 	}
 	send-coa {

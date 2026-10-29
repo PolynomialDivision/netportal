@@ -1,5 +1,10 @@
 # Device identity, telemetry and network diagnostics
 
+> Written for the Python version (file names like `netportal/presence.py`, the view
+> `radius_cert`, `netportal/migrations/`). The design holds for the Rust port; its names: the
+> crates in README.md, the FreeRADIUS contract in schema `radius` (RADIUS_CONTRACT.md), the
+> migrations in `migrations/`, each difference in PARITY.md.
+
 Design of 2026-10-25 (the second "My devices" iteration). It replaces "one MAC per device, read
 live from Prometheus" with device identities over time, a RADIUS login and accounting record,
 UniFi's own client events, nightly rollups for history over months, and incidents derived from

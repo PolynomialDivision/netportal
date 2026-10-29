@@ -1,5 +1,5 @@
 # The house Wi-Fi's RADIUS server: EAP-TLS only, every decision from the device registry
-# (view radius_cert, through check-eap-tls). Authentik is never asked, so Wi-Fi works while it
+# (view radius.valid_cert, through check-eap-tls). Authentik is never asked, so Wi-Fi works while it
 # is down. Wired 802.1X will use the same path; MAC authentication (wired devices without
 # 802.1X) gets its own elsif branch here later (docs: NETWORK-ACCESS.md).
 #
@@ -7,7 +7,7 @@
 # is true; every error or missing value ends in an else that rejects.
 #
 # Fail open for logging (netportal docs/TELEMETRY.md): logins, rejects and accounting are
-# written through the registry's functions radius_login, radius_reject and radius_accounting,
+# written through the registry's functions radius.login, radius.reject and radius.accounting,
 # each as a %{sql_log:...} expansion in the TEST of an "if". sql_log (mods/sql_log) is a second
 # rlm_sql instance with its own small pool and a 1 s query timeout: a slow or blocked write waits
 # there, never for a connection of the decision's pool (mods/sql, used by check-eap-tls only). A failed expansion (database down,
@@ -18,6 +18,9 @@
 # the functions and stops the database to show it.
 # Values are escaped by rlm_sql (its default: characters outside safe_characters become =XX),
 # inside '...' literals; the functions validate every argument.
+#
+# The contract's functions radius.login, radius.reject and radius.accounting (schema radius,
+# schema-qualified; docs/RADIUS_CONTRACT.md).
 server default {
 	listen {
 		type = auth
@@ -47,10 +50,11 @@ server default {
 
 	accounting {
 		# UniFi sends Start, Interim-Update (Acct-Interim-Interval), Stop and Accounting-On/Off;
-		# radius_accounting keeps one row per NAS session (radius_acct). Class echoes the token
-		# of the login (radius_login); Event-Timestamp as epoch seconds. Always answered: a
+		# radius.accounting keeps one row per NAS session (radius_acct). Class echoes the token
+		# of the login (radius.login); Event-Timestamp as epoch seconds. Always answered: a
 		# write that fails is logged and the access point does not retransmit.
-		if ("%{sql_log:SELECT radius_accounting('%{Acct-Status-Type}', '%{Acct-Session-Id}', '%{Class}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Framed-IP-Address}', '%{Acct-Session-Time}', '%{Acct-Input-Octets}', '%{Acct-Output-Octets}', '%{Acct-Input-Gigawords}', '%{Acct-Output-Gigawords}', '%{Acct-Terminate-Cause}', '%{integer:Event-Timestamp}')}") {
+		# radius.accounting: 14 arguments.
+		if ("%{sql_log:SELECT radius.accounting('%{Acct-Status-Type}', '%{Acct-Session-Id}', '%{Class}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Framed-IP-Address}', '%{Acct-Session-Time}', '%{Acct-Input-Octets}', '%{Acct-Output-Octets}', '%{Acct-Input-Gigawords}', '%{Acct-Output-Gigawords}', '%{Acct-Terminate-Cause}', '%{integer:Event-Timestamp}')}") {
 			noop
 		}
 		ok
@@ -78,8 +82,9 @@ server default {
 			# first_seen kept while the MAC stays). The returned token goes into Class, which
 			# the access point echoes in accounting (radius_acct link "class"). Only after the
 			# decision, and only into the test of an "if" (see the top).
+			# radius.login: 7 arguments.
 			if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
-				if ("%{sql_log:SELECT radius_login('%{control:Tmp-String-2}', '%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
+				if ("%{sql_log:SELECT radius.login('%{control:Tmp-String-2}', '%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
 					update reply {
 						&Class := "%{1}"
 					}
@@ -113,7 +118,8 @@ server default {
 					&Tmp-String-4 := "not_eap"
 				}
 			}
-			if ("%{sql_log:SELECT radius_reject('%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{control:Tmp-String-4}')}") {
+			# radius.reject: 5 arguments.
+			if ("%{sql_log:SELECT radius.reject('%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{control:Tmp-String-4}')}") {
 				noop
 			}
 		}

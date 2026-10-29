@@ -1,4 +1,5 @@
-poc/runs/
+target/
+tests/runs/
 __pycache__/
 *.pyc
-tests/runs/
+poc/runs/

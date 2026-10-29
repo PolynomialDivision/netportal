@@ -1,21 +1,18 @@
 // static/presence.js and its DOM in render.js: the state line from DEVICE.presence reads like
-// the server's (netportal/i18n.py Format.presence_view) in every language, never contradicts
+// the server's (render/format.rs presence_view; Python: Format.presence_view) in every language, never contradicts
 // itself (no "offline" beside a fresh connection, "Not connected" only while offline), says why
 // a state is unknown, and keeps its relative times current without a request.
 // node --test tests/js/
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { createFormatter } from "../../netportal/static/format.js";
-import * as P from "../../netportal/static/presence.js";
-import * as R from "../../netportal/static/render.js";
+import { createFormatter } from "../../crates/netportal-web/static/format.js";
+import * as P from "../../crates/netportal-web/static/presence.js";
+import * as R from "../../crates/netportal-web/static/render.js";
 import { installDom } from "./dom-shim.mjs";
+import { askServer, SKIP } from "./web-oracle.mjs";
 
 installDom();
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const NOW = Date.parse("2026-10-25T15:53:00Z");
 const ago = (s) => new Date(NOW - s * 1000).toISOString();
 const presence = (state, reason, by = null, confirmedS = null, sinceS = null, extra = {}) => ({
@@ -42,33 +39,11 @@ const DEVICES = [
   { id: "n", state: "bogus", diagnostics: [], presence: { state: "nonsense" } },
 ];
 
-const PY = `
-import json, sys
-sys.path.insert(0, ${JSON.stringify(root)})
-from netportal import i18n
-cases = json.loads(sys.stdin.read())
-F = i18n.Format
-out = {"texts": i18n.TEXT, "tables": {"PRESENCE_STATES": list(i18n.PRESENCE_STATES), "PRESENCE_SOURCES": list(i18n.PRESENCE_SOURCES),
-       "PRESENCE_REASONS": list(i18n.PRESENCE_REASONS), "PRESENCE_ICON": i18n.PRESENCE_ICON}, "views": {}, "shown": [],
-       "recent": {}, "stamp": {}}
-for lang in ("en", "de", "uk"):
-    out["views"][lang] = [F.presence_view(d, lang, cases["now"], "Example") for d in cases["devices"]]
-    out["recent"][lang] = [F.recent(t, lang, cases["now"]) for t in cases["times"]]
-    out["stamp"][lang] = [F.stamp(t, lang) for t in cases["times"]]
-out["shown"] = [[f["code"] for f in F.findings_shown(d)] for d in cases["devices"]]
-print(json.dumps(out))
-`;
 const TIMES = [ago(0), ago(4), ago(5), ago(59), ago(61), ago(7200), "2026-03-29T01:30:07Z"];
 
-let server = null;
-try {
-  server = JSON.parse(execFileSync("python3", ["-c", PY], {
-    input: JSON.stringify({ devices: DEVICES, now: new Date(NOW).toISOString(), times: TIMES }), encoding: "utf8" }));
-} catch {
-  server = null;
-}
-const skip = !server && "python3 not available";
-// the moments' ISO text differs in form (+00:00 vs Z): compare the moment, and everything else
+const server = askServer("presence", { devices: DEVICES, now: new Date(NOW).toISOString(), times: TIMES });
+const skip = !server && SKIP;
+// the moments' ISO text differs in form (Z with or without milliseconds): compare the moment, and everything else
 const norm = (view) => JSON.parse(JSON.stringify(view, (k, v) => (k === "time" && typeof v === "string" ? Date.parse(v) : v)));
 
 test("the code tables are the server's", { skip }, () => {

@@ -1,5 +1,9 @@
-tests/runs/
-__pycache__/
-*.pyc
-.git/
-rust/
+# The build context of Dockerfile: the workspace without its build output, test runs and the
+# FreeRADIUS image (radius/, its own context: radius/Dockerfile.dockerignore).
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!migrations/
+!sql/
+**/__pycache__/

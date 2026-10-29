@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   apSlots, availability, extent, linePath, nearestIndex, niceStep, niceTicks, scaleLinear, segments, stepPath,
   summary, timeTicks, timelineSegments, toMs, toPoints, zoneOffsetMs, AP_SLOTS,
-} from "../../netportal/static/charts.js";
+} from "../../crates/netportal-web/static/charts.js";
 
 const T0 = 1_792_900_800;   // 2026-10-25 10:40 UTC, Unix seconds as the API sends them
 
