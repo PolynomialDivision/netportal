@@ -195,7 +195,7 @@ def csrf(session, path="/"):
 
 
 def enrol(s, fmt, name=None):
-    r = s.post(PORTAL + "/enroll", data={"csrf": csrf(s), "format": fmt, "name": name or ""})
+    r = s.post(PORTAL + "/wifi/enroll", data={"csrf": csrf(s), "format": fmt, "name": name or ""})
     m = re.search(r'href="(/download/[^"]+)"', r.text)
     return m.group(1) if m else None
 
@@ -360,9 +360,10 @@ def main():
         return 1
     check("security headers", "default-src 'none'" in r.headers.get("Content-Security-Policy", "")
           and r.headers.get("Cache-Control") == "no-store", r.headers)
+    wifi = s.get(PORTAL + "/wifi").text       # the Wi-Fi area (/wifi since the home devices)
     check("Android browser: Passpoint is the first option",
-          r.text.find('value="android"') < r.text.find('value="eap-config"') and 'value="android"' in r.text)
-    bad = s.post(PORTAL + "/enroll", data={"format": "apple"})
+          wifi.find('value="android"') < wifi.find('value="eap-config"') and 'value="android"' in wifi)
+    bad = s.post(PORTAL + "/wifi/enroll", data={"format": "apple"})
     check("a POST without CSRF token is refused", bad.status_code == 400, bad.status_code)
 
     # --- enrolment per platform -----------------------------------------------------------
@@ -430,16 +431,16 @@ def main():
 
     # --- ownership ------------------------------------------------------------------------
     c, _ = login(CAROL)
-    r = c.post(PORTAL + "/devices/%s/revoke" % android_id, data={"csrf": csrf(c)})
+    r = c.post(PORTAL + "/wifi/devices/%s/revoke" % android_id, data={"csrf": csrf(c)})
     check("another resident cannot revoke alice's device", r.status_code == 404, r.status_code)
-    r = c.get(PORTAL + "/")
+    r = c.get(PORTAL + "/wifi")
     check("another resident does not see alice's devices", "alice android" not in r.text)
 
     # --- revocation: registry + Disconnect-Request ----------------------------------------
     s, _ = login(ALICE)
     sql("UPDATE radius_session SET nas_ip = '10.199.0.11'")        # the fake access point
     before = metric('netportal_disconnects_total{result="ack"}') or 0
-    r = s.post(PORTAL + "/devices/%s/revoke" % android_id, data={"csrf": csrf(s)})
+    r = s.post(PORTAL + "/wifi/devices/%s/revoke" % android_id, data={"csrf": csrf(s)})
     check("revoke answers", r.status_code in (200, 302), r.status_code)
     after = metric('netportal_disconnects_total{result="ack"}') or 0
     check("revoke sends a Disconnect-Request the access point accepts (ACK)", after == before + 1, (before, after))
@@ -451,7 +452,7 @@ def main():
     check("other devices of the same person still connect", connect("alice-apple") == ("accept", "30"))
 
     # --- renewal --------------------------------------------------------------------------
-    r = s.post(PORTAL + "/devices/%s/renew" % apple_id, data={"csrf": csrf(s)})
+    r = s.post(PORTAL + "/wifi/devices/%s/renew" % apple_id, data={"csrf": csrf(s)})
     link = re.search(r'href="(/download/[^"]+)"', r.text).group(1)
     key, cert, chain = from_mobileconfig(s.get(PORTAL + link).content)
     write_client("alice-apple-renewed", key, cert, chain)
@@ -629,7 +630,7 @@ def main():
     check("... and an app grant without a device yet cannot create one", late.status_code == 401
           and len(sql("SELECT 1 FROM device WHERE owner = 'sub-alice' AND revoked_at IS NULL")) == 0,
           late.status_code)
-    r = s.post(PORTAL + "/enroll", data={"csrf": form_before, "format": "apple"}, allow_redirects=False)
+    r = s.post(PORTAL + "/wifi/enroll", data={"csrf": form_before, "format": "apple"}, allow_redirects=False)
     check("... and her open portal session cannot enrol a new device",
           r.status_code == 302 and "/login" in r.headers.get("Location", ""), r.status_code)
     r = s.get(PORTAL + "/", allow_redirects=False)
@@ -692,7 +693,7 @@ def recheck_checks():
     # the access point does not answer: the revocation stands, the page says the cut is not confirmed
     subprocess.run(["docker", "pause", "netportal-it-nas"], capture_output=True)
     try:
-        r = g.post(PORTAL + "/devices/%s/revoke" % phone, data={"csrf": csrf(g)})
+        r = g.post(PORTAL + "/wifi/devices/%s/revoke" % phone, data={"csrf": csrf(g)})
     finally:
         subprocess.run(["docker", "unpause", "netportal-it-nas"], capture_output=True)
     check("recheck: a revocation whose Disconnect is lost says so on the page",
