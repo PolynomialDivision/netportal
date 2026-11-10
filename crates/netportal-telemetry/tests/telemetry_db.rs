@@ -55,7 +55,9 @@ fn with_database(url: &str, name: &str) -> String {
 async fn fresh(admin: &str) -> Db {
     let name = format!("t_{}", &Uuid::new_v4().simple().to_string()[..12]);
     let mut conn = PgConnection::connect(admin).await.expect("connect as admin");
-    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("create database");
+    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+        .await
+        .expect("create database");
     let mut db = Db::connect(&with_database(admin, &name)).await.expect("connect");
     let policies = [Policy { name: "residents".into(), vlan: 30, groups: ["residents".to_string()].into() }];
     {

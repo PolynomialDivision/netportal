@@ -85,7 +85,9 @@ async fn fresh_database(admin: &url::Url) -> String {
     ensure_radius_role(admin).await;
     let name = format!("t_{}", &Uuid::new_v4().simple().to_string()[..12]);
     let mut conn = admin_conn(admin).await;
-    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("create database");
+    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+        .await
+        .expect("create database");
     url_for(admin, &name, None)
 }
 

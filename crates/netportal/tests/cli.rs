@@ -67,7 +67,9 @@ async fn test_init_db_creates_and_upgrades_the_schema() {
     let mut url = url::Url::parse(&admin).expect("url");
     let name = format!("cli_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     let mut conn = PgConnection::connect(&admin).await.expect("connect");
-    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("create");
+    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+        .await
+        .expect("create");
     url.set_path(&format!("/{name}"));
     let vars = [
         ("NETPORTAL_DATABASE_URL", url.as_str()),

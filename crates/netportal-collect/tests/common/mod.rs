@@ -40,7 +40,9 @@ macro_rules! need_db {
 pub async fn fresh_database(admin: &url::Url) -> String {
     let name = format!("c_{}", &Uuid::new_v4().simple().to_string()[..12]);
     let mut conn = PgConnection::connect(admin.as_str()).await.expect("connect as admin");
-    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("create database");
+    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+        .await
+        .expect("create database");
     let mut url = admin.clone();
     url.set_path(&format!("/{name}"));
     let mut db = Db::connect(url.as_str()).await.expect("connect");

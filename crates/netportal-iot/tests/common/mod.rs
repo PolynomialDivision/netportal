@@ -647,7 +647,9 @@ impl Case {
     pub async fn new(admin: &url::Url) -> Case {
         let name = format!("t_{}", &Uuid::new_v4().simple().to_string()[..12]);
         let mut conn = PgConnection::connect(admin.as_str()).await.expect("connect as admin");
-        conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("database");
+        conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+            .await
+            .expect("database");
         let mut url = admin.clone();
         url.set_path(&format!("/{name}"));
         let url = url.to_string();

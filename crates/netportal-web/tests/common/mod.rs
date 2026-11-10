@@ -317,7 +317,9 @@ static INIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn fresh_database(admin: &url::Url) -> String {
     let name = format!("w_{}", &Uuid::new_v4().simple().to_string()[..12]);
     let mut conn = PgConnection::connect(admin.as_str()).await.expect("connect as admin");
-    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("database");
+    conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+        .await
+        .expect("database");
     let mut url = admin.clone();
     url.set_path(&format!("/{name}"));
     url.to_string()

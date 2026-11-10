@@ -92,7 +92,9 @@ impl Case {
         ensure_roles(admin).await;
         let name = format!("t_{}", &Uuid::new_v4().simple().to_string()[..12]);
         let mut conn = PgConnection::connect(admin.as_str()).await.expect("connect as admin");
-        conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))).await.expect("create");
+        conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name} TEMPLATE template0"))))
+            .await
+            .expect("create");
         let url = url_for(admin, &name, None);
         let mut db = Db::connect(&url).await.expect("connect");
         {
