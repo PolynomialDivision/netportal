@@ -25,6 +25,10 @@ ignore = [
     # so it is never built (cargo tree -i sqlx-sqlite: nothing). sqlx-sqlite 0.9.0 allows
     # libsqlite3-sys <0.38, so the lock cannot take the fix. Drop it with a sqlx that can.
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys via sqlx-sqlite: only in Cargo.lock, never built (sqlx with postgres only)" },
+    # chrono 0.4 (declared unmaintained 2026-09, chronotope/chrono#1768; informational, no
+    # vulnerability, no patched version): through oauth2 5.0 in openidconnect 4.1, the latest.
+    # Drop it when openidconnect/oauth2 move off chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained notice only, via openidconnect/oauth2 (latest); no vulnerability" },
 ]
 
 [licenses]
