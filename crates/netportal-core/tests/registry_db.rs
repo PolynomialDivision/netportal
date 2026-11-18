@@ -1029,10 +1029,10 @@ async fn test_a_row_being_updated_is_skipped_not_waited_for() {
         .execute("SELECT 1 FROM radius_auth WHERE mac = 'aa:bb:cc:dd:ee:23' FOR UPDATE")
         .await
         .expect("lock"); // held, not committed
-    let began = Instant::now();
     r.execute(reject).await.expect("reject");
-    assert!(began.elapsed().as_secs_f64() < 0.4);
     other.rollback().await.expect("rollback");
+    // A second row proves the skip: waiting would run into the function's lock_timeout, which it
+    // swallows, and write nothing. No wall-clock bound: it failed on a loaded machine.
     let tries: Vec<i32> = reject_rows(&mut case, "aa:bb:cc:dd:ee:23").await.into_iter().map(|x| x.2).collect();
     assert_eq!(tries, [1, 1]);
 }
