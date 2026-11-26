@@ -1,0 +1,103 @@
+// static/format.js: numbers, sizes, rates, durations, times and rooms per language, and that
+// they read exactly like the server's (crates/netportal-web/src/render/format.rs; Python: i18n.Format)
+// for the same values.
+// node --test tests/js/
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createFormatter, fill, signalLevel, healthLevel, toDate, DIAGNOSES } from "../../crates/netportal-web/static/format.js";
+import { askServer, SKIP } from "./web-oracle.mjs";
+
+const NOW = "2026-10-25T12:05:00+00:00";
+
+// The cases both formatters get; the server's answers come from the Rust oracle.
+const CASES = [
+  ["bytes", [1234567890]], ["bytes", [999]], ["bytes", [42_000_000]], ["bytes", [null]],
+  ["bitrate", [86_600_000]], ["bitrate", [950]], ["bitrate", [1_200_000_000]], ["bitrate", [4_200]],
+  ["percent", [0.0123, 1]], ["percent", [0.72]], ["dbm", [-58]], ["db", [37]], ["ms", [9.8]], ["ms", [11.4]],
+  ["duration", [8130]], ["duration", [3 * 86400 + 4000]], ["duration", [42]], ["duration", [7200]], ["duration", [0]],
+  ["ago", ["2026-10-25T10:00:00Z", NOW]], ["ago", ["2026-10-25T12:04:30Z", NOW]],
+  ["when", ["2026-10-25T10:00:00Z", NOW]], ["when", ["2026-10-24T10:00:00Z", NOW]], ["when", ["2026-10-02T10:00:00Z", NOW]],
+  ["when", ["2025-12-31T23:30:00Z", NOW]], ["date", ["2026-03-29T01:30:00Z"]],
+  ["number", [12345.6, 1]], ["number", [-3]],
+  ["room", [{ name: "ap-tannhof-2-corner", house: "tannhof", floor: 2, spot: "corner" }]],
+  ["room", [{ name: "ap-birke-0-west", house: "birke", floor: 0, spot: "west" }]],
+  ["room", [{ name: "2. stock tannhof mitte", house: null, floor: null, spot: null }]],
+  ["room", [{ name: "ap-x-7-far", house: "x", floor: 7, spot: "far" }]],
+  ["wifi", [{ band: "2.4", channel: 6, proto: "n" }]], ["wifi", [{ band: "6", channel: 37, proto: "ax" }]],
+  ["wifi", [{ band: "5", channel: 36, proto: "b" }]], ["band", ["2.4"]],
+];
+
+// no oracle (no cargo): the cross-check is skipped, the rest still runs
+const server = askServer("format", CASES);
+const skip = !server && SKIP;
+const texts = server ? server.texts : null;
+
+function call(f, name, args) {
+  if (name === "ago" || name === "when") return f[name](args[0], args[1]);
+  if (name === "band") return f.bandName(args[0]);
+  return f[name](...args);
+}
+
+test("the browser formats like the server, in every language", { skip }, () => {
+  for (const lang of ["en", "de", "uk"]) {
+    const f = createFormatter(lang, texts[lang]);
+    CASES.forEach(([name, args], i) => {
+      assert.equal(call(f, name, args), server.answers[lang][i], `${lang} ${name}(${JSON.stringify(args)})`);
+    });
+  }
+});
+
+test("examples read naturally", { skip }, () => {
+  const en = createFormatter("en", texts.en), de = createFormatter("de", texts.de), uk = createFormatter("uk", texts.uk);
+  assert.equal(en.bytes(1_830_000_000), "1.8 GB");
+  assert.equal(de.bytes(1_830_000_000), "1,8 GB");
+  assert.equal(uk.bytes(1_830_000_000), "1,8 ГБ");
+  assert.equal(en.bitrate(866_000_000), "866 Mbit/s");
+  assert.equal(de.duration(8130), "2 Std. 15 Min.");
+  assert.equal(en.ago("2026-10-25T09:05:00Z", NOW), "3 h ago");
+  assert.equal(de.ago("2026-10-25T09:05:00Z", NOW), "vor 3 Std.");
+  assert.equal(en.when("2026-10-24T20:00:00Z", NOW), "yesterday 22:00");    // the house's clock (CEST)
+  assert.equal(en.room({ house: "tannhof", floor: 2, spot: "corner" }), "Tannhof · 2nd floor · corner");
+  assert.equal(uk.room({ house: "tannhof", floor: 0, spot: "middle" }), "Tannhof · перший поверх · середина");
+  assert.equal(en.dbm(-58), "−58 dBm");
+  assert.equal(en.wifi({ band: "6", channel: 37, proto: "ax" }), "6 GHz · channel 37 · Wi-Fi 6E");
+});
+
+test("unknown values are a dash, never a zero", () => {
+  const f = createFormatter("en", {});
+  for (const fn of [f.bytes, f.bitrate, f.percent, f.dbm, f.ms, f.duration, f.number]) assert.equal(fn(null), "–");
+  assert.equal(f.ago(null), "–");
+  assert.equal(f.when("not a time"), "–");
+  assert.equal(f.room(null), "–");
+});
+
+test("signal and quality levels", () => {
+  assert.deepEqual(signalLevel(-55), { bars: 4, key: "sig_excellent", tone: "ok" });
+  assert.deepEqual(signalLevel(-60), { bars: 4, key: "sig_excellent", tone: "ok" });
+  assert.deepEqual(signalLevel(-67), { bars: 3, key: "sig_good", tone: "ok" });
+  assert.deepEqual(signalLevel(-70), { bars: 2, key: "sig_fair", tone: "warn" });
+  assert.deepEqual(signalLevel(-80), { bars: 1, key: "sig_weak", tone: "warn" });
+  assert.deepEqual(signalLevel(-90), { bars: 0, key: "sig_very_weak", tone: "bad" });
+  assert.equal(signalLevel(null), null);
+  assert.deepEqual(healthLevel(80), { key: "q_good", tone: "ok" });
+  assert.deepEqual(healthLevel(79), { key: "q_fair", tone: "warn" });
+  assert.deepEqual(healthLevel(10), { key: "q_poor", tone: "bad" });
+  assert.equal(healthLevel(undefined), null);
+});
+
+test("every diagnosis code has its three texts in every language", { skip }, () => {
+  for (const lang of ["en", "de", "uk"]) {
+    for (const code of DIAGNOSES) {
+      for (const suffix of ["", "_why", "_do"]) assert.ok(texts[lang][`diag_${code}${suffix}`], `${lang} diag_${code}${suffix}`);
+    }
+  }
+});
+
+test("fill and toDate", () => {
+  assert.equal(fill("{n} of {total}", { n: 1, total: 3 }), "1 of 3");
+  assert.equal(fill("{n} {missing}", { n: 1 }), "1 {missing}");
+  assert.equal(toDate(1_800_000_000_000).getTime(), 1_800_000_000_000);
+  assert.equal(toDate(""), null);
+  assert.equal(toDate("2026-10-25T12:00:00Z").toISOString(), "2026-10-25T12:00:00.000Z");
+});

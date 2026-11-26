@@ -1,0 +1,30 @@
+[package]
+name = "netportal-offboard"
+description = "Offboarding: reconcile the registry with Authentik (offboarding.py)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+netportal-core.workspace = true
+netportal-pki.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+futures.workspace = true
+time.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+# The build context of radius/Dockerfile (BuildKit reads <Dockerfile>.dockerignore): only
+# radius/ (the workspace's target/ would be gigabytes).
+*
+!radius/
+radius/Dockerfile*

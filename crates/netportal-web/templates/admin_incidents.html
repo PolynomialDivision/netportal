@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% import "_dash.html" as dash %}
+{% import "_admin.html" as adm %}
+{% block scripts %}<script type="module" src="/static/dashboard.js"></script>{% endblock %}
+{% block body_attrs %} class="wide" data-page="incidents"{% endblock %}
+{# The house network's incidents over a time span, newest first, each with the devices that
+   dropped out at the time; above them a chart of when they were (drawn by the script).
+   Context: incidents (the /api/admin/incidents payload: {"from", "to", "incidents": [INCIDENT]}).
+   Kind and state filter in place (a plain GET form without the script); the time span (range)
+   is the server's. Context: also span ({from, to, kind}: Python's `range`), unused here. #}
+{% set payload = incidents if incidents is defined and incidents else {} %}
+{% set list = payload.incidents if payload is mapping and payload.incidents is defined else (payload if payload is not mapping else []) %}
+{% set inc_ranges = ("7d", "30d", "90d", "1y") %}
+{% set rng = request.args.get("range") if request.args.get("range") in inc_ranges
+             else ((fmt.span_key(payload["from"], payload.to, inc_ranges) if payload is mapping and payload["from"] else none) or "7d") %}
+{% set to = payload.to if payload is mapping and payload.to else none %}
+{% set want_kind = request.args.get("kind") or (payload.kind if payload is mapping and payload.kind else "") %}
+{% set want_state = request.args.get("state") if request.args.get("state") in ("open", "closed") else "" %}
+{% set kinds = incident_kinds %}
+{% set ns = namespace(shown=0) %}
+{% block body %}
+{{ adm.tabs("incidents") }}
+<section class="incidents" aria-labelledby="inc-h" data-incidents>
+  <div class="section-head">
+    <h1 id="inc-h">{{ t.inc_title }} <span class="count">{{ list|length }}</span></h1>
+    <nav class="range" aria-label="{{ t.inc_filter_range }}">
+      {% for r in inc_ranges %}<a href="?range={{ r }}{% if want_kind %}&amp;kind={{ want_kind|urlencode }}{% endif %}{% if want_state %}&amp;state={{ want_state }}{% endif %}" data-range="{{ r }}"{% if r == rng %} aria-current="true"{% endif %}>{{ t["range_" ~ r] }}</a>{% endfor %}
+    </nav>
+  </div>
+  <p class="muted">{{ t.inc_intro }}</p>
+  {% if payload is mapping and payload["from"] %}<p class="muted small">{{ (t.raw_span|e).format(start=dash.time(payload["from"]), end=dash.time(payload.to or payload.until)) }}</p>{% endif %}
+  {{ dash.live_line(payload if payload is mapping else none) }}
+  <div class="banners" data-part="banners"></div>
+
+  <figure class="card chart inc-chart needs-js"{% if not list %} hidden{% endif %}>
+    <figcaption><h3>{{ t.inc_chart }}</h3></figcaption>
+    <div class="chart-host" data-inc-chart></div>
+    <p class="tl-info" data-inc-info aria-live="polite"></p>
+  </figure>
+
+  <form class="filters card inc-filters" method="get" action="/admin/incidents" data-inc-filters>
+    <input type="hidden" name="range" value="{{ rng }}">
+    <label class="f-select"><span>{{ t.inc_filter_kind }}</span>
+      <select name="kind">
+        <option value="">{{ t.adm_any }}</option>
+        {% for k in kinds %}<option value="{{ k }}"{% if want_kind == k %} selected{% endif %}>{{ t["inc_" ~ k] }}</option>{% endfor %}
+      </select></label>
+    <label class="f-select"><span>{{ t.inc_filter_state }}</span>
+      <select name="state">
+        <option value="">{{ t.adm_any }}</option>
+        <option value="open"{% if want_state == "open" %} selected{% endif %}>{{ t.inc_state_open }}</option>
+        <option value="closed"{% if want_state == "closed" %} selected{% endif %}>{{ t.inc_state_closed }}</option>
+      </select></label>
+    <div class="f-actions">
+      <button class="button small primary" data-apply>{{ t.adm_apply }}</button>
+      <a class="pill" href="/admin/incidents?range={{ rng }}">{{ t.adm_reset }}</a>
+    </div>
+  </form>
+
+  {% set ordered = list|sort(attribute="started", reverse=True) %}
+  {% for i in ordered %}{% if (not want_kind or i.kind == want_kind) and (not want_state or (want_state == "open") == (not i.ended)) %}{% set ns.shown = ns.shown + 1 %}{% endif %}{% endfor %}
+  {% if payload is mapping and payload.truncated %}<p class="muted small">{{ t.raw_truncated.format(n=list|length) }}</p>{% endif %}
+  <p class="adm-count" data-shown role="status">{{ (t.inc_shown|e).format(shown=ns.shown, total=list|length) }}</p>
+  {% if list %}
+  <ol class="inc-list inc-full" data-part="incidents">
+    {% for i in ordered %}
+    {% set shown = (not want_kind or i.kind == want_kind) and (not want_state or (want_state == "open") == (not i.ended)) %}
+    {{ adm.incident_item(i, full=True, shown=shown) }}
+    {% endfor %}
+  </ol>
+  {% endif %}
+  <p class="card empty" data-none{% if ns.shown %} hidden{% endif %}>{{ t.inc_none }}</p>
+</section>
+{{ dash.page_data({"page": "incidents", "lang": lang, "api": "/api/admin/incidents", "range": rng, "kind": want_kind, "login": "/login",
+                   "ssid": settings.ssid},
+                  payload if payload is mapping else {"incidents": list}) }}
+{% endblock %}

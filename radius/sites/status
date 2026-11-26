@@ -1,0 +1,16 @@
+# Status-Server on localhost only, for the container healthcheck:
+#   radclient 127.0.0.1:18121 status "$RADIUS_STATUS_SECRET"
+server status {
+	listen {
+		type = status
+		ipaddr = 127.0.0.1
+		port = 18121
+	}
+	client healthcheck {
+		ipaddr = 127.0.0.1
+		secret = "$ENV{RADIUS_STATUS_SECRET}"
+	}
+	authorize {
+		ok
+	}
+}

@@ -1,0 +1,200 @@
+# The house Wi-Fi's RADIUS server: EAP-TLS for the residents' SSID, every decision from the
+# device registry (view radius.valid_cert, through check-eap-tls); MAC authentication for the
+# IoT SSID (house-infra docs/IOT-ACCESS.md 6.3: the view radius.iot_mac decides, the elsif
+# branch in authorize below). Authentik is never asked, so Wi-Fi works while it is down. Wired
+# 802.1X will use the EAP path (docs: NETWORK-ACCESS.md).
+#
+# Fail closed, written positively (see check-eap-tls): access only inside an "if" whose test
+# is true; every error or missing value ends in an else that rejects.
+#
+# Fail open for logging (netportal docs/TELEMETRY.md): logins, rejects and accounting are
+# written through the registry's functions radius.login, radius.reject and radius.accounting,
+# each as a %{sql_log:...} expansion in the TEST of an "if". sql_log (mods/sql_log) is a second
+# rlm_sql instance with its own small pool and a 1 s query timeout: a slow or blocked write waits
+# there, never for a connection of the decision's pool (mods/sql, used by check-eap-tls only). A failed expansion (database down,
+# function missing, no right) is logged by rlm_sql and makes that test false without changing
+# the section's result (a failed post-auth would turn an Accept into a Reject). 3.2.10 also
+# lets a failed expansion inside "update" through as an empty value (tested 2026-10-25), but
+# this does not depend on it. So no write can change a decision; the integration test revokes
+# the functions and stops the database to show it.
+# Values are escaped by rlm_sql (its default: characters outside safe_characters become =XX),
+# inside '...' literals; the functions validate every argument.
+#
+# The contract's functions radius.login, radius.reject and radius.accounting (schema radius,
+# schema-qualified; docs/RADIUS_CONTRACT.md).
+server default {
+	listen {
+		type = auth
+		ipaddr = *
+		port = 1812
+	}
+	listen {
+		type = acct
+		ipaddr = *
+		port = 1813
+	}
+
+	authorize {
+		if (&EAP-Message) {
+			eap
+		}
+		elsif (&User-Name && (&User-Name =~ /^([0-9A-Fa-f]{2})[-:]?([0-9A-Fa-f]{2})[-:]?([0-9A-Fa-f]{2})[-:]?([0-9A-Fa-f]{2})[-:]?([0-9A-Fa-f]{2})[-:]?([0-9A-Fa-f]{2})$/)) {
+			# MAC authentication (no EAP, the User-Name a MAC): UniFi's RADIUS MAC authentication
+			# of the IoT SSID sends the client's MAC as User-Name and User-Password (the SSID's
+			# radius_macacl_format "none_lower": 12 lowercase hex digits; any separator form and
+			# case is taken, normalised here to aa:bb:cc:dd:ee:ff for the lookup). The password
+			# is not checked: the PPSK already authenticated the association, the MAC says which
+			# registered device it is. Only on the IoT SSID (Called-Station-Id "<BSSID>:<SSID>",
+			# the SSID compared with RADIUS_IOT_SSID, radius/entrypoint.sh): a MAC login on any
+			# other SSID is rejected like any request without EAP.
+			update request {
+				&Tmp-String-5 := "%{tolower:%{1}:%{2}:%{3}:%{4}:%{5}:%{6}}"
+			}
+			if (&Called-Station-Id && (&Called-Station-Id =~ /^[0-9A-Fa-f]{2}([-:][0-9A-Fa-f]{2}){5}:(.+)$/)) {
+				update request {
+					&Tmp-String-6 := "%{2}"
+				}
+			}
+			if (&request:Tmp-String-6 && (&request:Tmp-String-6 == "$ENV{RADIUS_IOT_SSID}")) {
+				# Marked first (its own update: a failed SQL expansion below must not lose
+				# the mark), so the reject is logged as unknown_mac and the MAC noted for a claim.
+				update control {
+					&Tmp-String-7 := "iot-mac"
+				}
+				# The decision view radius.iot_mac (docs/RADIUS_CONTRACT.md): the registered MAC
+				# of an unrevoked home device whose owner is not offboarded, with the device id.
+				# Fail closed, written positively (see check-eap-tls): no row, an empty answer
+				# or a database error leaves Tmp-String-2 empty, and only a UUID accepts.
+				update control {
+					&Tmp-String-2 := "%{sql:SELECT device_id FROM radius.iot_mac WHERE mac = '%{request:Tmp-String-5}'::macaddr}"
+				}
+				if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)) {
+					update control {
+						&Auth-Type := Accept
+					}
+				}
+				else {
+					update control {
+						&Auth-Type := Reject
+					}
+					reject
+				}
+			}
+			else {
+				reject
+			}
+		}
+		else {
+			reject
+		}
+	}
+
+	authenticate {
+		Auth-Type eap {
+			eap
+		}
+	}
+
+	accounting {
+		# UniFi sends Start, Interim-Update (Acct-Interim-Interval), Stop and Accounting-On/Off;
+		# radius.accounting keeps one row per NAS session (radius_acct). Class echoes the token
+		# of the login (radius.login); Event-Timestamp as epoch seconds. Always answered: a
+		# write that fails is logged and the access point does not retransmit.
+		# radius.accounting: 14 arguments.
+		if ("%{sql_log:SELECT radius.accounting('%{Acct-Status-Type}', '%{Acct-Session-Id}', '%{Class}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Framed-IP-Address}', '%{Acct-Session-Time}', '%{Acct-Input-Octets}', '%{Acct-Output-Octets}', '%{Acct-Input-Gigawords}', '%{Acct-Output-Gigawords}', '%{Acct-Terminate-Cause}', '%{integer:Event-Timestamp}')}") {
+			noop
+		}
+		ok
+	}
+
+	post-auth {
+		# VLAN and device were decided by check-eap-tls (outer.control).
+		if (&control:Tmp-String-0 && (&control:Tmp-String-0 =~ /^[0-9]+$/)) {
+			update reply {
+				&Tunnel-Type := VLAN
+				&Tunnel-Medium-Type := IEEE-802
+				&Tunnel-Private-Group-Id := "%{control:Tmp-String-0}"
+				# Backstop for sessions a Disconnect-Request does not reach (netaccess.session_timeout).
+				&Session-Timeout := $ENV{RADIUS_SESSION_TIMEOUT}
+				&Termination-Action := RADIUS-Request
+				# Accounting Interim-Update interval (hostapd takes it from the Accept): traffic
+				# and presence per session even when the controller's own interval differs. The
+				# portal reads the same NETPORTAL_ACCT_INTERIM_S (a session silent for 2 x this +
+				# 60 s is abandoned); radius/entrypoint.sh defaults it to 300.
+				&Acct-Interim-Interval := $ENV{NETPORTAL_ACCT_INTERIM_S}
+			}
+			# The login (radius_auth), the device's MAC identity (device_mac) and its latest
+			# session (radius_session: where netportal sends the Disconnect-Request when the
+			# device is revoked; without NAS-IP-Address the packet's source is the access point;
+			# first_seen kept while the MAC stays). The returned token goes into Class, which
+			# the access point echoes in accounting (radius_acct link "class"). Only after the
+			# decision, and only into the test of an "if" (see the top). The VLAN of this Accept is
+			# logged too: netportal's Disconnect reconciliation cuts a session whose VLAN is no
+			# longer its device's policy's.
+			# radius.login: 8 arguments.
+			if (&control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
+				if ("%{sql_log:SELECT radius.login('%{control:Tmp-String-2}', '%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}', '%{control:Tmp-String-0}')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
+					update reply {
+						&Class := "%{1}"
+					}
+				}
+			}
+		}
+		elsif (&control:Tmp-String-7 && (&control:Tmp-String-7 == "iot-mac") && &control:Tmp-String-2 && (&control:Tmp-String-2 =~ /^[-0-9a-f]+$/)) {
+			# A MAC login on the IoT SSID (authorize): no VLAN attributes, the key's mapping in
+			# UniFi puts the device into the IoT network; the same Session-Timeout backstop and
+			# accounting interval as above. Logged through radius.login like a certificate login
+			# (serial and VLAN empty: radius_auth, device_mac, radius_session fill as usual), the
+			# Class token into the reply for the accounting link.
+			update reply {
+				&Session-Timeout := $ENV{RADIUS_SESSION_TIMEOUT}
+				&Acct-Interim-Interval := $ENV{NETPORTAL_ACCT_INTERIM_S}
+			}
+			# radius.login: 8 arguments.
+			if ("%{sql_log:SELECT radius.login('%{control:Tmp-String-2}', '', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{Acct-Session-Id}', '%{User-Name}', '')}" =~ /^(np1:[-_0-9A-Za-z]{22})$/) {
+				update reply {
+					&Class := "%{1}"
+				}
+			}
+		}
+		else {
+			reject
+		}
+		Post-Auth-Type REJECT {
+			update reply {
+				&Reply-Message := "device not registered"
+			}
+			# Every reject with its reason (radius_auth): with a client certificate whose chain
+			# verified, the registry says why (unknown_cert, revoked, retired, expired; bad_chain
+			# when it would accept the serial: check_cert_issuer refused it), else the hint:
+			# bad_chain (a chain was presented but did not verify: only its CA certificates were
+			# read, TLS-Cert-*), no_cert (EAP without a client certificate), unknown_mac (a MAC
+			# login on the IoT SSID the view refused: radius.reject also notes the MAC in
+			# iot_join_attempt for the portal's one-click claim), not_eap.
+			if (&TLS-Cert-Serial) {
+				update control {
+					&Tmp-String-4 := "bad_chain"
+				}
+			}
+			elsif (&EAP-Message) {
+				update control {
+					&Tmp-String-4 := "no_cert"
+				}
+			}
+			elsif (&control:Tmp-String-7 && (&control:Tmp-String-7 == "iot-mac")) {
+				update control {
+					&Tmp-String-4 := "unknown_mac"
+				}
+			}
+			else {
+				update control {
+					&Tmp-String-4 := "not_eap"
+				}
+			}
+			# radius.reject: 5 arguments.
+			if ("%{sql_log:SELECT radius.reject('%{TLS-Client-Cert-Serial}', '%{Calling-Station-Id}', '%{Called-Station-Id}', '%{%{NAS-IP-Address}:-%{Packet-Src-IP-Address}}', '%{control:Tmp-String-4}')}") {
+				noop
+			}
+		}
+	}
+}

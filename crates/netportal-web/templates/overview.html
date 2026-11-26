@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{# The overview (IOT-ACCESS 6.6): the person's Wi-Fi devices and home devices in two cards with
+   their counts and the next step. Context: wifi ({count, expiring: [names]}), home ({own, shared}). #}
+{% block body %}
+<section class="overview" aria-labelledby="ov-h">
+  <h1 id="ov-h">{{ t.overview_title }}</h1>
+  <div class="ov-cards">
+    <article class="card ov-card" aria-labelledby="ov-wifi-h">
+      <div class="ov-card-head">
+        <span class="hero-mark small" aria-hidden="true"><svg class="icon"><use href="#i-wifi"/></svg></span>
+        <h2 id="ov-wifi-h">{{ t.nav_wifi }}</h2>
+      </div>
+      {% if wifi.count %}
+      <p class="ov-number"><strong>{{ wifi.count }}</strong> <span>{{ t.overview_wifi_devices.format(n=wifi.count) }}</span></p>
+      {% else %}
+      <p class="muted">{{ t.overview_wifi_none }}</p>
+      {% endif %}
+      {% if wifi.expiring %}
+      <p class="warn"><svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg>{{ t.overview_wifi_expiring.format(names=wifi.expiring|join(", ")) }}</p>
+      {% endif %}
+      <p class="cta"><a class="button primary big" href="/wifi#add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>{{ t.add_device }}</a></p>
+      <a class="more" href="/wifi"><svg class="icon" aria-hidden="true"><use href="#i-wifi"/></svg><span>{{ t.your_devices }}</span><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></a>
+    </article>
+    <article class="card ov-card" aria-labelledby="ov-home-h">
+      <div class="ov-card-head">
+        <span class="hero-mark small" aria-hidden="true"><svg class="icon"><use href="#i-cast"/></svg></span>
+        <h2 id="ov-home-h">{{ t.nav_home }}</h2>
+      </div>
+      {% if home.own or home.shared %}
+      <p class="ov-number"><strong>{{ home.own }}</strong> <span>{{ t.overview_home_own.format(n=home.own) }}</span></p>
+      <p class="ov-sub-number"><strong>{{ home.shared }}</strong> <span>{{ t.overview_home_shared.format(n=home.shared) }}</span></p>
+      {% else %}
+      <p class="muted">{{ t.overview_home_none }}</p>
+      {% endif %}
+      <p class="cta"><a class="button{% if not home.own %} primary{% endif %} big" href="/home#add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>{{ t.home_add }}</a></p>
+      <a class="more" href="/home"><svg class="icon" aria-hidden="true"><use href="#i-cast"/></svg><span>{{ t.home_all }}</span><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></a>
+    </article>
+  </div>
+</section>
+{% endblock %}

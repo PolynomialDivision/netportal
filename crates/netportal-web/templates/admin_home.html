@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% import "_dash.html" as dash %}
+{% import "_admin.html" as adm %}
+{% import "_home.html" as home %}
+{% block body_attrs %} class="wide" data-page="admin-home"{% endblock %}
+{# Every home device in the house (IOT-ACCESS 6.6, the admin's view): owner, address, class,
+   visibility, shares, the controller's state per target, last seen; the join attempts with a
+   claim for any device without an address. Context: devices (home device JSON with shares and
+   sync_targets), attempts, unclaimed ([{id, name, owner}]), dashboard. #}
+{% block body %}
+{{ adm.tabs("home") }}
+<section class="adm" aria-labelledby="adm-home-h">
+  <div class="section-head">
+    <h1 id="adm-home-h">{{ t.adm_home_title }} <span class="count">{{ devices|length }}</span></h1>
+  </div>
+  <p class="muted">{{ t.adm_home_intro }}</p>
+  {{ dash.banners(dashboard if dashboard is defined else none) }}
+  {% if not devices %}<p class="card empty muted">{{ t.adm_home_none }}</p>{% endif %}
+  <ul class="adm-list">
+  {% for d in devices %}
+  {% set st = dash.state_of(d) %}
+  <li class="adm-item" data-device="{{ d.id }}">
+    <details class="adm-row">
+      <summary>
+        <span class="adm-state state-{{ st }}">{{ dash.icon(home.class_icon.get(d.class, "home")) }}<span class="sr">{{ t["state_" ~ st] }}</span></span>
+        <span class="adm-main"><strong class="adm-name">{{ d.name }}</strong><span class="adm-owner">{{ d.owner.display }}</span></span>
+        <span class="adm-info">
+          <span class="adm-room">{{ t["cls_" ~ d.class] }} · {{ t["state_" ~ st] }}</span>
+          <span class="adm-signal mono">{{ d.mac or "–" }}</span>
+          <span class="adm-badge">{% if d.sync and d.sync.status == "failed" %}<span class="badge sev-bad">{{ dash.icon("bad") }}{{ t.home_sync_failed.format(detail=d.sync.detail|truncate(40)) }}</span>{% elif d.sync and d.sync.status == "pending" %}<span class="badge sev-warn">{{ dash.icon("clock") }}{{ t.home_sync_pending }}</span>{% endif %}</span>
+        </span>
+        {{ dash.icon("chevron", "adm-chevron") }}
+      </summary>
+      <div class="adm-body">
+        {{ home.state_line(d) }}
+        {{ home.visibility_line(d) }}
+        {{ dash.live(d) }}
+        <dl class="kv">
+          <div><dt>{{ t.dt_owner }}</dt><dd>{{ d.owner.display }} <span class="muted mono">{{ d.owner.sub }}</span></dd></div>
+          <div><dt>{{ t.added }}</dt><dd>{{ dash.x("date", d.created) }}</dd></div>
+          <div><dt>{{ t.adm_home_seen }}</dt><dd>{% if d.last_seen %}{{ dash.time(d.last_seen, "ago") }}{% else %}{{ t.never }}{% endif %}</dd></div>
+          <div><dt>{{ t.adm_home_shares }}</dt><dd>{% if d.shares %}{% for s in d.shares %}{% if not loop.first %}, {% endif %}{{ s.display }}{% endfor %}{% else %}<span class="muted">{{ t.home_not_shared }}</span>{% endif %}</dd></div>
+          <div><dt>{{ t.home_sync_label }}</dt><dd>
+            {% if d.sync_targets %}
+            <ul class="sync-targets">
+              {% for s in d.sync_targets %}{% set tone = {"applied": "ok", "pending": "warn", "failed": "bad"}.get(s.status, "warn") %}
+              <li class="tone-text-{{ tone }}">{{ dash.icon(dash.tone_icon[tone]) }}<span class="mono">{{ s.target }}</span> {% if s.status == "failed" %}{{ t.home_sync_failed.format(detail=s.detail) }}{% else %}{{ t["home_sync_" ~ s.status] }}{% endif %} <span class="muted small">{{ dash.time(s.updated_at, "ago") }}</span></li>
+              {% endfor %}
+            </ul>
+            {% else %}<span class="muted">{{ t.home_sync_pending }}</span>{% endif %}
+          </dd></div>
+        </dl>
+        <div class="actions">
+          <a class="more" href="/home/devices/{{ d.id }}?from=admin">{{ dash.icon("key") }}<span>{{ t.home_details }}</span>{{ dash.icon("next") }}</a>
+          <details class="danger">
+            <summary>{{ dash.icon("trash") }}{{ t.home_remove }}</summary>
+            <form method="post" action="/home/devices/{{ d.id }}/remove" class="confirm">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="back" value="/admin/home">
+              <p>{{ t.home_remove }}: <strong>{{ d.name }}</strong></p>
+              <button class="button danger small">{{ t.revoke }}</button>
+            </form>
+          </details>
+        </div>
+      </div>
+    </details>
+  </li>
+  {% endfor %}
+  </ul>
+</section>
+
+<section class="card attempts-card" aria-labelledby="adm-claim-h">
+  <h2 id="adm-claim-h">{{ dash.icon("fingerprint") }}{{ t.adm_home_attempts }}</h2>
+  {% if unclaimed %}<p class="muted small">{{ t.adm_home_unclaimed.format(n=unclaimed|length) }}</p>{% endif %}
+  {% if attempts %}
+  {{ home.attempts_list(attempts, unclaimed, "/admin/home") }}
+  {% else %}
+  <p class="muted">{{ t.adm_home_attempts_none }}</p>
+  {% endif %}
+</section>
+{% endblock %}

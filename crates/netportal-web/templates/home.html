@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% import "_dash.html" as dash %}
+{% import "_home.html" as home %}
+{% block body_attrs %} class="wide" data-page="home"{% endblock %}
+{# The home devices (IOT-ACCESS 6.6): the person's own devices and the ones shared with them,
+   the join attempts to claim, and the registration form. Context: own, shared (home device JSON),
+   attempts, unclaimed ([{id, name}]), classes, dashboard (generated_at, telemetry, stale). #}
+{% block body %}
+<section class="dev-section" aria-labelledby="home-h">
+  <div class="section-head">
+    <h1 id="home-h">{{ t.nav_home }} <span class="count">{{ own|length }}</span></h1>
+    {% if own %}<a class="pill add-link" href="#add">{{ dash.icon("plus") }}{{ t.home_add }}</a>{% endif %}
+  </div>
+  <p class="muted">{{ t.home_intro }}</p>
+  {{ dash.banners(dashboard if dashboard is defined else none) }}
+  {% if not own %}
+  <p class="card empty">{{ t.home_none }} <span class="muted">{{ t.home_none_hint }}</span></p>
+  {% endif %}
+  <div class="dev-grid">
+  {% for d in own %}{{ home.card(d) }}{% endfor %}
+  </div>
+</section>
+
+{% if own and attempts %}
+<section class="card attempts-card" aria-labelledby="claim-h">
+  <h2 id="claim-h">{{ dash.icon("fingerprint") }}{{ t.home_claim_title }}</h2>
+  {{ home.attempts_list(attempts, unclaimed, "/home") }}
+</section>
+{% elif unclaimed %}
+<p class="muted small home-claim-none">{{ dash.icon("info") }}{{ t.home_claim_none.format(ssid=settings.iot_ssid) }}</p>
+{% endif %}
+
+<section class="dev-section" aria-labelledby="shared-h">
+  <div class="section-head">
+    <h2 id="shared-h">{{ t.home_shared_title }} <span class="count">{{ shared|length }}</span></h2>
+  </div>
+  {% if not shared %}<p class="card empty muted">{{ t.home_shared_none }}</p>{% endif %}
+  <div class="dev-grid">
+  {% for d in shared %}{{ home.card(d) }}{% endfor %}
+  </div>
+</section>
+
+<section class="card connect" id="add" aria-labelledby="add-h">
+  <h2 id="add-h">{{ dash.icon("plus") }}{{ t.home_add }}</h2>
+  <form method="post" action="/home/register" class="register">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="field">{{ t.home_form_name }}
+      <input name="name" maxlength="60" autocomplete="off" placeholder="{{ t.home_form_name_ph }}">
+    </label>
+    <fieldset class="field classes">
+      <legend>{{ t.home_form_class }}</legend>
+      {% for c in classes %}
+      <label class="choice"><input type="radio" name="class" value="{{ c }}"{% if loop.first %} checked{% endif %}>
+        <span class="choice-text"><svg class="icon" aria-hidden="true"><use href="#i-{{ home.class_icon.get(c, 'home') }}"/></svg><strong>{{ t["cls_" ~ c] }}</strong> <span class="small muted">{{ t["cls_hint_" ~ c] }}</span></span></label>
+      {% endfor %}
+    </fieldset>
+    <label class="field">{{ t.home_form_mac }}
+      <input name="mac" class="mono" maxlength="20" autocomplete="off" spellcheck="false" placeholder="3C:22:FB:12:34:56" pattern="[0-9A-Fa-f]{2}([:\-]?[0-9A-Fa-f]{2}){5}">
+      <span class="small muted">{{ t.home_form_mac_help }}</span>
+    </label>
+    <details class="mac-hints">
+      <summary>{{ dash.icon("help") }}{{ t.mac_hint_label }}</summary>
+      <dl class="kv">
+        {% for c in classes %}<div><dt>{{ t["cls_" ~ c] }}</dt><dd>{{ t["mac_hint_" ~ c] }}</dd></div>{% endfor %}
+      </dl>
+    </details>
+    <p class="cta"><button class="button primary big">{{ dash.icon("key") }}{{ t.home_form_submit }}</button></p>
+  </form>
+</section>
+
+<section class="card notes" aria-labelledby="notes-h">
+  <h2 id="notes-h">{{ dash.icon("info") }}{{ t.home_notes_title }}</h2>
+  <p>{{ t.home_visibility_note }}</p>
+  <p>{{ t.home_house_note }}</p>
+  <p><strong>{{ t.home_firewall_note }}</strong></p>
+</section>
+{% endblock %}
